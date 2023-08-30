@@ -19,12 +19,12 @@ interface Proxy:
     def burners(_coin: address) -> address: view
 
 interface Synthetix:
-    def exchangeAtomically(
+    def exchangeWithTracking(
         sourceCurrencyKey: bytes32,
         sourceAmount: uint256,
         destinationCurrencyKey: bytes32,
+        rewardAddress: address,
         trackingCode: bytes32,
-        minAmount: uint256,
     ) -> uint256: nonpayable
     def settle(currencyKey: bytes32) -> uint256[3]: nonpayable
 
@@ -87,7 +87,7 @@ def _fetch_swap_data(_coin: synthERC20) -> SwapData:
 @internal
 def _burn(_coin: synthERC20, _amount: uint256):
     """
-    @notice Burn implementation
+    @notice Exchanges via Synthetix according to swap_data and sends resulting coins to Proxy
     """
     assert not self.is_killed and not self.killed_coin[_coin], "Is killed"
 
@@ -96,12 +96,12 @@ def _burn(_coin: synthERC20, _amount: uint256):
         SNX.settle(swap_data.currency_key)
         _coin.transfer(PROXY.address, _amount)
     else:
-        SNX.exchangeAtomically(
+        SNX.exchangeWithTracking(
             swap_data.currency_key,
             _amount,
             self._fetch_swap_data(swap_data.to).currency_key,
+            PROXY.address,
             TRACKING_CODE,
-            0,  # No slippage by design
         )
         amount: uint256 = swap_data.to.balanceOf(self)
         swap_data.to.transfer(PROXY.address, amount)
