@@ -15,6 +15,7 @@ interface ERC20:
 interface Swap:
     def coins(_i: uint256) -> address: view
     def price_oracle(_i: uint256=0) -> uint256: view
+    def get_virtual_price() -> uint256: view
 
 interface StableSwap:
     def exchange(i: int128, j: int128, dx: uint256, min_dy: uint256): payable
@@ -30,15 +31,16 @@ interface Proxy:
 
 enum Implementation:
     # Price
-    CONST  # 1
-    ORACLE  # 2
-    ORACLE_NUM  # 4
+    CONST  # 1, 1:1
+    CONST_METAPOOL  # 2, virtual_price
+    ORACLE  # 4, .price_oracle()
+    ORACLE_NUM  # 8, .price_oracle(_num)
     # Exchange
-    STABLE  # 8
-    STABLE_UNDERLYING  # 16
-    CRYPTO  # 32
-    CRYPTO_ETH  # 64
-    CRYPTO_UNDERLYING  # 128
+    STABLE  # 16
+    STABLE_UNDERLYING  # 32
+    CRYPTO  # 64
+    CRYPTO_ETH  # 128
+    CRYPTO_UNDERLYING  # 256
 
 IMPLEMENTATION_PRICE: immutable(Implementation)
 IMPLEMENTATION_CRYPTO: immutable(Implementation)
@@ -50,6 +52,7 @@ struct SwapData:
     j: int128
     dec: uint256  # decimals multiplier
     implementation: Implementation
+    base_pool: Swap
     slippage: uint256  # 0 will use default
 
 struct SwapDataInput:
@@ -57,6 +60,7 @@ struct SwapDataInput:
     to: ERC20
     pool: Swap
     implementation: Implementation
+    base_pool: Swap  # Needed for metapools, empty(address) will use token as pool
     slippage: uint256  # 0 will use default
 
 
@@ -91,7 +95,7 @@ def __init__(_proxy: Proxy, _owner: address, _emergency_owner: address):
     self.owner = _owner
     self.emergency_owner = _emergency_owner
 
-    IMPLEMENTATION_PRICE = Implementation.CONST | Implementation.ORACLE | Implementation.ORACLE_NUM
+    IMPLEMENTATION_PRICE = convert(convert(Implementation.STABLE, uint256) - 1, Implementation)
     IMPLEMENTATION_CRYPTO = Implementation.CRYPTO | Implementation.CRYPTO_ETH | Implementation.CRYPTO_UNDERLYING
 
 
@@ -136,6 +140,14 @@ def _get_price(_swap_data: SwapData) -> uint256:
     price: uint256 = _swap_data.dec
     if _swap_data.implementation in Implementation.CONST:
         return price  # bind to 1, slippage can be increased if needed
+
+    if _swap_data.implementation in Implementation.CONST_METAPOOL:
+        virtual_price: uint256 = _swap_data.base_pool.get_virtual_price()
+        if _swap_data.i == 0:
+            price = price * ONE / virtual_price
+        else:
+            price = price * virtual_price / ONE
+        return price
 
     if _swap_data.implementation in Implementation.ORACLE:
         price_oracle: uint256 = _swap_data.pool.price_oracle()
@@ -323,11 +335,16 @@ def _decimals(_coin: ERC20) -> uint256:
 @internal
 def _add_swap_data(_data_input: SwapDataInput):
     assert _data_input.slippage <= BPS
+    assert _data_input.base_pool == empty(Swap) or _data_input.implementation in Implementation.CONST_METAPOOL  # dev: only for metapools
     self._check_implementation(_data_input.implementation)
 
     i: int128 = empty(int128)
     j: int128 = empty(int128)
     i, j = self._get_indexes(_data_input)
+
+    base_pool: Swap = _data_input.base_pool
+    if _data_input.implementation in Implementation.CONST_METAPOOL and base_pool == empty(Swap):
+        base_pool = Swap(_data_input.pool.coins(1))
 
     swap_data: SwapData = SwapData({
         to: _data_input.to,
@@ -336,6 +353,7 @@ def _add_swap_data(_data_input: SwapDataInput):
         j: j,
         dec: ONE * self._decimals(_data_input.to) / self._decimals(_data_input.coin),
         implementation: _data_input.implementation,
+        base_pool: base_pool,
         slippage: _data_input.slippage,
     })
     self.swap_data[_data_input.coin] = swap_data
