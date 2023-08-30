@@ -46,7 +46,7 @@ def __init__(_proxy: Proxy, _owner: address, _emergency_owner: address):
 @internal
 def _burn(_coin: yERC20, _amount: uint256):
     """
-    @notice Burn implementation
+    @notice Withdraws underlying token
     """
     assert not self.is_killed and not self.killed_coin[_coin], "Is killed"
 
