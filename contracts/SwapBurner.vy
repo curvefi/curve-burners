@@ -360,6 +360,8 @@ def _add_swap_data(_data_input: SwapDataInput):
 
     if _data_input.implementation not in Implementation.CONST:
         self._get_price(swap_data)  # check price_oracle call
+        if _data_input.implementation in Implementation.ORACLE:
+            assert i + j == 1  # dev: method is for 2-coins pool
 
     if _data_input.coin.address != ETH_ADDRESS:
         _data_input.coin.approve(_data_input.pool.address, max_value(uint256))
