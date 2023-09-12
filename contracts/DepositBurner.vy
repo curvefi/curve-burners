@@ -150,7 +150,9 @@ def _get_min_lp(_swap_data: SwapData, _amounts: DynArray[uint256, N_COINS_MAX]) 
 
 
 @internal
-def _add_liquidity(_swap_data: SwapData, _amounts: DynArray[uint256, N_COINS_MAX], _eth_amount: uint256, _min_lp: uint256):
+def _add_liquidity(
+    _swap_data: SwapData, _amounts: DynArray[uint256, N_COINS_MAX], _eth_amount: uint256, _min_lp: uint256,
+):
     """
     @notice Add Liquidity execution implementation
     @param _swap_data Swap metadata

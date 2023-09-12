@@ -302,7 +302,8 @@ def _check_implementation(_implementation: Implementation):
     subset = convert(_implementation & ~IMPLEMENTATION_PRICE, uint256)
     assert subset & (subset - 1) == 0  # dev: Wrong number of implementations set
 
-    assert not (_implementation in IMPLEMENTATION_CRYPTO and _implementation in Implementation.CONST)  # dev: All crypto pools have oracle
+    assert not (_implementation in IMPLEMENTATION_CRYPTO and\
+                _implementation in Implementation.CONST)  # dev: All crypto pools have oracle
 
 
 @internal
@@ -335,7 +336,8 @@ def _decimals(_coin: ERC20) -> uint256:
 @internal
 def _add_swap_data(_data_input: SwapDataInput):
     assert _data_input.slippage <= BPS
-    assert _data_input.base_pool == empty(Swap) or _data_input.implementation in Implementation.CONST_METAPOOL  # dev: only for metapools
+    assert _data_input.base_pool == empty(Swap) or\
+            _data_input.implementation in Implementation.CONST_METAPOOL  # dev: only for metapools
     self._check_implementation(_data_input.implementation)
 
     i: int128 = empty(int128)
