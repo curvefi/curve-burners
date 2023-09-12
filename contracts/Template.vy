@@ -75,7 +75,7 @@ def _burn(_coin: ERC20, _amount: uint256):
 
     if PROXY.burners(swap_data.to.address) != self:
         assert swap_data.to.transfer(
-            PROXY.address, _coin.balanceOf(self), default_return_value=True
+            PROXY.address, swap_data.to.balanceOf(self), default_return_value=True
         )  # safe
 
 
