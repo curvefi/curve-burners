@@ -97,6 +97,32 @@ def __init__(_proxy: Proxy, _owner: address, _emergency_owner: address):
 
 
 @internal
+def _transfer_in(_coin: ERC20, _from: address) -> uint256:
+    """
+    @notice Transfer coin whether it is ERC20 or ETH
+    """
+    if _coin.address == ETH_ADDRESS:
+        return self.balance
+
+    amount: uint256 = _coin.balanceOf(_from)
+    if amount != 0:
+        _coin.transferFrom(_from, self, amount)
+        return _coin.balanceOf(self)
+    return amount
+
+
+@internal
+def _balance(_coin: ERC20) -> uint256[2]:
+    """
+    @notice Get _coin balance of self
+    @return [balance, eth_amount]
+    """
+    if _coin.address == ETH_ADDRESS:
+        return [self.balance, self.balance]
+    return [_coin.balanceOf(self), 0]
+
+
+@internal
 @view
 def _get_min_lp(_swap_data: SwapData, _amounts: DynArray[uint256, N_COINS_MAX]) -> uint256:
     min_lp: uint256 = _amounts[0] * _swap_data.mul[0]
@@ -124,58 +150,53 @@ def _get_min_lp(_swap_data: SwapData, _amounts: DynArray[uint256, N_COINS_MAX]) 
 
 
 @internal
-def _add_liquidity(_swap_data: SwapData, _amounts: DynArray[uint256, N_COINS_MAX], _min_lp: uint256):
+def _add_liquidity(_swap_data: SwapData, _amounts: DynArray[uint256, N_COINS_MAX], _eth_amount: uint256, _min_lp: uint256):
     """
     @notice Add Liquidity execution implementation
     @param _swap_data Swap metadata
     @param _amounts Amounts to deposit
+    @param _eth_amount ETH amount to include in transaction
     @param _min_lp Minimum amount to receive
     """
-    eth_amount: uint256 = 0
-    for i in range(N_COINS_MAX):
-        if i == len(_amounts):
-            break
-        if _swap_data.coins[i].address == ETH_ADDRESS:
-            eth_amount = _amounts[i]
-
     if len(_swap_data.coins) == 2:
         amounts: uint256[2] = [_amounts[0], _amounts[1]]
         if _swap_data.implementation in Implementation.UNDERLYING:
-            Swap2(_swap_data.pool.address).add_liquidity(amounts, _min_lp, True, value=eth_amount)
+            Swap2(_swap_data.pool.address).add_liquidity(amounts, _min_lp, True, value=_eth_amount)
         else:
-            Swap2(_swap_data.pool.address).add_liquidity(amounts, _min_lp, value=eth_amount)
+            Swap2(_swap_data.pool.address).add_liquidity(amounts, _min_lp, value=_eth_amount)
         return
 
     if len(_swap_data.coins) == 3:
         amounts: uint256[3] = [_amounts[0], _amounts[1], _amounts[2]]
         if _swap_data.implementation in Implementation.UNDERLYING:
-            Swap3(_swap_data.pool.address).add_liquidity(amounts, _min_lp, True, value=eth_amount)
+            Swap3(_swap_data.pool.address).add_liquidity(amounts, _min_lp, True, value=_eth_amount)
         else:
-            Swap3(_swap_data.pool.address).add_liquidity(amounts, _min_lp, value=eth_amount)
+            Swap3(_swap_data.pool.address).add_liquidity(amounts, _min_lp, value=_eth_amount)
         return
 
     if len(_swap_data.coins) == 4:
         amounts: uint256[4] = [_amounts[0], _amounts[1], _amounts[2], _amounts[3]]
         if _swap_data.implementation in Implementation.UNDERLYING:
-            Swap4(_swap_data.pool.address).add_liquidity(amounts, _min_lp, True, value=eth_amount)
+            Swap4(_swap_data.pool.address).add_liquidity(amounts, _min_lp, True, value=_eth_amount)
         else:
-            Swap4(_swap_data.pool.address).add_liquidity(amounts, _min_lp, value=eth_amount)
+            Swap4(_swap_data.pool.address).add_liquidity(amounts, _min_lp, value=_eth_amount)
         return
 
     if len(_swap_data.coins) == 5:
         amounts: uint256[5] = [_amounts[0], _amounts[1], _amounts[2], _amounts[3], _amounts[4]]
         if _swap_data.implementation in Implementation.UNDERLYING:
-            Swap5(_swap_data.pool.address).add_liquidity(amounts, _min_lp, True, value=eth_amount)
+            Swap5(_swap_data.pool.address).add_liquidity(amounts, _min_lp, True, value=_eth_amount)
         else:
-            Swap5(_swap_data.pool.address).add_liquidity(amounts, _min_lp, value=eth_amount)
+            Swap5(_swap_data.pool.address).add_liquidity(amounts, _min_lp, value=_eth_amount)
         return
 
 
 @internal
-def _burn(_swap_data: SwapData, _amounts: DynArray[uint256, N_COINS_MAX]):
+def _burn(_swap_data: SwapData, _amounts: DynArray[uint256, N_COINS_MAX], _eth_amount: uint256):
     """
     @param _swap_data Burning metadata
     @param _amounts Amounts of coins to convert
+    @param _eth_amount ETH amount to include in transaction
     """
     assert not self.is_killed and not self.killed_coin[_swap_data.token], "Is killed"
 
@@ -186,34 +207,37 @@ def _burn(_swap_data: SwapData, _amounts: DynArray[uint256, N_COINS_MAX]):
         slippage = SLIPPAGE
     min_lp -= min_lp * slippage / BPS
 
-    self._add_liquidity(_swap_data, _amounts, min_lp)
+    self._add_liquidity(_swap_data, _amounts, _eth_amount, min_lp)
 
     if PROXY.burners(_swap_data.token.address) != self:
         _swap_data.token.transfer(PROXY.address, _swap_data.token.balanceOf(self))  # LP Tokens are safe
 
 
 @external
+@payable
 def burn(_coin: ERC20) -> bool:
     """
     @notice Trigger `_coin` burn
     @param _coin Address of the coin
     @return bool Success, remained for compatibility
     """
-    amount: uint256 = _coin.balanceOf(msg.sender)
-    if amount != 0:
-        assert _coin.transferFrom(msg.sender, self, amount, default_return_value=True)  # safe
+    amount: uint256 = self._transfer_in(_coin, msg.sender)
 
     swap_data: SwapData = self.swap_data[_coin]
     if swap_data.pool != empty(Swap):
         amounts: DynArray[uint256, N_COINS_MAX] = empty(DynArray[uint256, N_COINS_MAX])
+        eth_amount: uint256 = 0
         for coin in swap_data.coins:
-            amounts.append(coin.balanceOf(self))
-        self._burn(swap_data, amounts)
+            balances: uint256[2] = self._balance(coin)
+            amounts.append(balances[0])
+            eth_amount += balances[1]
+        self._burn(swap_data, amounts, eth_amount)
 
     return True
 
 
 @external
+@payable
 def burn_amount(_coin: ERC20, _amounts_to_burn: DynArray[uint256, N_COINS_MAX]):
     """
     @notice Burn a specific amounts of coins
@@ -221,19 +245,20 @@ def burn_amount(_coin: ERC20, _amounts_to_burn: DynArray[uint256, N_COINS_MAX]):
     @param _coin Address of the coin to trigger burn
     @param _amounts_to_burn Amounts of coins to burn
     """
-    amount: uint256 = _coin.balanceOf(PROXY.address)
-    if amount != 0 and PROXY.burners(_coin.address) == self:
-        assert _coin.transferFrom(PROXY.address, self, amount, default_return_value=True)  # safe
+    if PROXY.burners(_coin.address) == self:
+        self._transfer_in(_coin, PROXY.address)
 
     swap_data: SwapData = self.swap_data[_coin]
     assert len(_amounts_to_burn) == len(swap_data.coins), "Incorrect amounts"
+    eth_amount: uint256 = 0
     for i in range(N_COINS_MAX):
         if i == len(_amounts_to_burn):
             break
-        amount = swap_data.coins[i].balanceOf(self)
-        assert amount >= _amounts_to_burn[i], "Insufficient balance"
+        balances: uint256[2] = self._balance(swap_data.coins[i])
+        assert balances[0] >= _amounts_to_burn[i], "Insufficient balance"
+        eth_amount += balances[1]
 
-    self._burn(swap_data, _amounts_to_burn)
+    self._burn(swap_data, _amounts_to_burn, eth_amount)
 
 
 @external
