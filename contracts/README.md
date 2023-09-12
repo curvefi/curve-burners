@@ -5,6 +5,8 @@
 Does not work for first versions of crypto pools since there is no `.lp_price()` and StableSwap metapools without price oracle.
 Omitted as most probably won't be needed. (1)
 - LPBurner for `remove_liquidity_one_coin`.
+Automatically fetches all necessary data except metapools and separate LP token contracts without `minter()` method (like 3pool).
+Though coins priorities need to be handled.
 - Wrapped Burners (wrapped ETH, aave tokens, etc.).
 
 (1) Raw ETH(and other native coins) can not be taken from `burn_amount`, so in case of slippage it would be stuck in proxy.
