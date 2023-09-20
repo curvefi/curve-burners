@@ -40,6 +40,7 @@ def __default__():
 
 
 @external
+@payable
 def burn(_coin: address) -> bool:
     """
     @notice Wrap/unwrap ETH
