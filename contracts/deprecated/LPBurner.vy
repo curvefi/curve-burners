@@ -22,7 +22,10 @@ interface Swap:
     def get_virtual_price() -> uint256: view
     def price_oracle(_i: uint256=0) -> uint256: view
     def lp_price() -> uint256: view
-    def remove_liquidity_one_coin(token_amount: uint256, i: uint256, min_amount: uint256) -> uint256: nonpayable
+    def remove_liquidity_one_coin(token_amount: uint256, i: uint256, min_amount: uint256): nonpayable
+
+interface Swap128:
+    def remove_liquidity_one_coin(token_amount: uint256, i: int128, min_amount: uint256): nonpayable
 
 interface Proxy:
     def burners(_coin: address) -> address: view
@@ -36,6 +39,8 @@ enum Implementation:
     ORACLE_NUM  # 8, .price_oracle(_num)
     # .lp_price() method, used as bool
     LP_PRICE  # 8
+    # int128 for indexes, used as bool
+    I128  # 16
 
 IMPLEMENTATION_PRICE: immutable(Implementation)
 
@@ -202,6 +207,16 @@ def _get_prioritized_index(_swap_data: SwapData) -> uint256:
 
 
 @internal
+def _remove_liquidity_one_coin(_swap_data: SwapData, _amount: uint256, _i: uint256, _min_amount: uint256):
+    if _swap_data.implementation in Implementation.I128:
+        Swap128(_swap_data.pool.address).remove_liquidity_one_coin(
+            _amount, convert(_i, int128), _min_amount
+        )
+    else:
+        _swap_data.pool.remove_liquidity_one_coin(_amount, _i, _min_amount)
+
+
+@internal
 def _burn(_coin: CurveToken, _amount: uint256):
     """
     @param _coin Address of the coin being converted
@@ -219,7 +234,7 @@ def _burn(_coin: CurveToken, _amount: uint256):
         slippage = SLIPPAGE
     min_amount -= min_amount * slippage / BPS
 
-    swap_data.pool.remove_liquidity_one_coin(_amount, i, min_amount)
+    self._remove_liquidity_one_coin(swap_data, _amount, i, min_amount)
 
     if PROXY.burners(swap_data.coins[i].address) != self:
         assert swap_data.coins[i].transfer(
