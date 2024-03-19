@@ -87,6 +87,21 @@ def test_collect(fee_collector, set_epoch, executor, coins, weth, admin, arve, b
             executor.call([weth, weth])
 
 
+def test_empty_callback(fee_collector, set_epoch, coins, admin, burner):
+    """
+    Forward coins to burner with collect without any fee applying
+    """
+    for coin in coins:
+        coin._mint_for_testing(fee_collector, 10 ** coin.decimals())
+
+    set_epoch(Epoch.COLLECT)
+    fee_collector.collect(coins, (ZERO_ADDRESS, bytes()))
+
+    for coin in coins:
+        assert coin.balanceOf(fee_collector) == 0
+        assert coin.balanceOf(burner) == 10 ** coin.decimals()
+
+
 def test_forward(fee_collector, set_epoch, target, arve, burle, hooker):
     target._mint_for_testing(fee_collector, 10 ** target.decimals())
 
