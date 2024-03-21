@@ -71,8 +71,7 @@ START_TIME: constant(uint256) = 1600300800  # ts of distribution start
 EPOCH_TIMESTAMPS: immutable(uint256[17])
 
 target: public(ERC20)  # coin swapped into
-max_collect_fee: public(uint256)
-max_forward_fee: public(uint256)
+max_fee: public(uint256[9])  # max_fee[Epoch]
 
 BURNER_INTERFACE_ID: constant(bytes4) = 0x5c144e65
 HOOKER_INTERFACE_ID: constant(bytes4) = 0xc8e65276
@@ -99,8 +98,8 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
     self.owner = _owner
     self.emergency_owner = _emergency_owner
 
-    self.max_collect_fee = ONE / 100  # 1%
-    self.max_forward_fee = ONE / 100  # 1%
+    self.max_fee[convert(Epoch.COLLECT, uint256)] = ONE / 100  # 1%
+    self.max_fee[convert(Epoch.FORWARD, uint256)] = ONE / 100  # 1%
 
     ALL_COINS = ERC20(empty(address))
 
@@ -207,7 +206,7 @@ def _fee(epoch: Epoch, ts: uint256) -> uint256:
     start, end = self._epoch_time_frame(epoch, ts)
     if ts >= end:
         return 0
-    return self.max_collect_fee * (ts - start) / (end - start)
+    return self.max_fee[convert(epoch, uint256)] * (ts - start) / (end - start)
 
 
 @external
@@ -322,6 +321,19 @@ def recover(_recovers: DynArray[RecoverInput, MAX_LEN], _receiver: address):
             if amount == max_value(uint256):
                 amount = input.coin.balanceOf(self)
             input.coin.transfer(_receiver, amount)  # do not need safe transfer
+
+
+@external
+def set_max_fee(_epoch: Epoch, _max_fee: uint256):
+    """
+    @notice Set keeper's max fee
+    @dev Callable only by owner
+    """
+    assert msg.sender == self.owner, "Only owner"
+    subset: uint256 = convert(_epoch, uint256)
+    assert subset & (subset - 1) == 0, "Bad Epoch"
+    assert _max_fee <= ONE, "Bad max_fee"
+    self.max_fee[convert(_epoch, uint256)] = _max_fee
 
 
 @external

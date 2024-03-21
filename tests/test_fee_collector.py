@@ -79,8 +79,8 @@ def test_collect(fee_collector, set_epoch, executor, coins, weth, admin, arve, b
         if coin == weth:
             amount *= 2
         assert coin.balanceOf(executor) == 0
-        assert amount * fee_collector.max_collect_fee() // (2 * 10 ** 18) <= coin.balanceOf(burle) <=\
-               amount * fee_collector.max_collect_fee() // 10 ** 18
+        assert amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10 ** 18) <= coin.balanceOf(burle) <=\
+               amount * fee_collector.max_fee(Epoch.COLLECT) // 10 ** 18
         assert coin.balanceOf(burle) + coin.balanceOf(fee_collector) + coin.balanceOf(burner) == amount
 
     with boa.env.prank(arve):
@@ -111,7 +111,7 @@ def test_forward(fee_collector, set_epoch, target, arve, burle, hooker):
         fee_collector.forward(burle)
     assert target.balanceOf(arve) == 0
     assert target.balanceOf(fee_collector) == 0
-    assert 0 < target.balanceOf(burle) <= 10 ** target.decimals() * fee_collector.max_forward_fee() // 10 ** 18
+    assert 0 < target.balanceOf(burle) <= 10 ** target.decimals() * fee_collector.max_fee(Epoch.FORWARD) // 10 ** 18
     assert target.balanceOf(burle) + target.balanceOf(hooker) == 10 ** target.decimals()
 
 
@@ -122,6 +122,7 @@ def test_admin(fee_collector, admin, arve, burner, hooker):
     with boa.env.anchor():
         with boa.env.prank(admin):
             fee_collector.recover([], arve)
+            fee_collector.set_max_fee(2, 5 * 10 ** (18 - 2))
             fee_collector.set_burner(burner.address)
             fee_collector.set_hooker(hooker.address)
             fee_collector.set_killed(killed)
@@ -132,6 +133,8 @@ def test_admin(fee_collector, admin, arve, burner, hooker):
     with boa.env.prank(arve):
         with boa.reverts("Only owner"):
             fee_collector.recover([], arve)
+        with boa.reverts("Only owner"):
+            fee_collector.set_max_fee(2, 5 * 10 ** (18 - 2))
         with boa.reverts("Only owner"):
             fee_collector.set_burner(burner.address)
         with boa.reverts("Only owner"):
@@ -245,6 +248,27 @@ def test_epoch(fee_collector):
         assert fee_collector.epoch(start) == epoch
         assert fee_collector.epoch((start + end) // 2) == epoch
         assert fee_collector.epoch(end - 1) == epoch
+
+
+def test_fee(fee_collector, admin):
+    for epoch, max_fee in zip([Epoch.COLLECT, Epoch.EXCHANGE, Epoch.FORWARD],
+                              [2 * 10 ** 16, 3 * 10 ** 16, 4 * 10 ** 16]):
+        with boa.env.prank(admin):
+            fee_collector.set_max_fee(epoch, max_fee)
+        start, end = fee_collector.epoch_time_frame(epoch)
+        prev_fee = fee_collector.fee(epoch, start)
+        assert prev_fee <= max_fee // 10
+        for ts in range(start + 1, end, (end - start) // 12):
+            fee = fee_collector.fee(epoch, ts)
+            assert prev_fee <= fee
+            prev_fee = fee
+        assert max_fee * 9 // 10 <= prev_fee <= max_fee
+
+    with boa.env.prank(admin):
+        with boa.reverts("Bad Epoch"):
+            fee_collector.set_max_fee(Epoch.COLLECT | Epoch.FORWARD, 10 ** 16)
+        with boa.reverts("Bad max_fee"):
+            fee_collector.set_max_fee(Epoch.COLLECT, 10 ** 18 + 1)
 
 
 def test_recover(fee_collector, coins, admin, arve):
