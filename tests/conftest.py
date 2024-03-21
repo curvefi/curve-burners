@@ -76,7 +76,7 @@ def set_epoch(fee_collector) -> Callable[[Epoch], None]:
     week = 7 * 24 * 3600
 
     def inner(epoch: Epoch):
-        ts = fee_collector.epoch_time_frame(epoch)[0]
+        ts = sum(fee_collector.epoch_time_frame(epoch)) // 2  # middle fo the period for the fee
         diff = ts - boa.env.vm.state.timestamp
         boa.env.time_travel(seconds=diff + week * (diff // week))
     return inner
@@ -87,6 +87,7 @@ def burner(admin, fee_collector):
     with boa.env.prank(admin):
         burner = boa.load("contracts/burners/XYZBurner.vy", fee_collector)
         fee_collector.set_burner(burner)
+        fee_collector.set_killed([(ZERO_ADDRESS, 0)])
     return burner
 
 

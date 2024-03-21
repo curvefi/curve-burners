@@ -79,7 +79,8 @@ def test_collect(fee_collector, set_epoch, executor, coins, weth, admin, arve, b
         if coin == weth:
             amount *= 2
         assert coin.balanceOf(executor) == 0
-        assert 0 < coin.balanceOf(burle) <= amount * fee_collector.max_collect_fee() // 10 ** 18
+        assert amount * fee_collector.max_collect_fee() // (2 * 10 ** 18) <= coin.balanceOf(burle) <=\
+               amount * fee_collector.max_collect_fee() // 10 ** 18
         assert coin.balanceOf(burle) + coin.balanceOf(fee_collector) + coin.balanceOf(burner) == amount
 
     with boa.env.prank(arve):
@@ -236,7 +237,7 @@ def test_epoch(fee_collector):
         prev = end
     assert prev - week_start == 7 * 24 * 60 * 60  # a week
 
-    with boa.reverts("Unknown Epoch"):
+    with boa.reverts("Bad Epoch"):
         fee_collector.epoch_time_frame(Epoch.SLEEP | Epoch.FORWARD)
 
     for epoch in [Epoch.SLEEP, Epoch.COLLECT, Epoch.EXCHANGE, Epoch.FORWARD]:

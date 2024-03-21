@@ -67,28 +67,23 @@ WETH: immutable(wETH)
 MAX_LEN: constant(uint256) = 64
 ONE: constant(uint256) = 10 ** 18  # Precision
 
-owner: public(address)
-emergency_owner: public(address)
-
 START_TIME: constant(uint256) = 1600300800  # ts of distribution start
+EPOCH_TIMESTAMPS: immutable(uint256[17])
 
-# Collect fees
-COLLECT_EPOCH_TS: immutable(uint256)
-max_collect_fee: public(uint256)
-
-EXCHANGE_EPOCH_TS: immutable(uint256)
-
-# Forward
-FORWARD_EPOCH_TS: immutable(uint256)
 target: public(ERC20)  # coin swapped into
+max_collect_fee: public(uint256)
 max_forward_fee: public(uint256)
 
 BURNER_INTERFACE_ID: constant(bytes4) = 0x5c144e65
 HOOKER_INTERFACE_ID: constant(bytes4) = 0xc8e65276
 burner: public(Burner)
 hooker: public(Hooker)
+
 is_killed: HashMap[ERC20, Epoch]
-ALL_COINS: immutable(ERC20)
+ALL_COINS: immutable(ERC20)  # Auxiliary indicator for all coins (=ZERO_ADDRESS)
+
+owner: public(address)
+emergency_owner: public(address)
 
 
 @external
@@ -109,12 +104,22 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
 
     ALL_COINS = ERC20(empty(address))
 
-    COLLECT_EPOCH_TS = 4 * 24 * 3600
-    EXCHANGE_EPOCH_TS = 5 * 24 * 3600
-    FORWARD_EPOCH_TS = 6 * 24 * 3600
-#    COLLECT_EPOCH_TS = 100
-#    EXCHANGE_EPOCH_TS = 200
-#    FORWARD_EPOCH_TS = 7 * 24 * 3600 - 100
+    timestamps: uint256[17] = empty(uint256[17])
+    if False:  # testing collect
+        # timestamps[1] = 0
+        timestamps[2] = 100
+        timestamps[4] = 200
+        timestamps[8] = 7 * 24 * 3600 - 100
+        timestamps[16] = 7 * 24 * 3600
+    else:
+        # timestamps[1] = 0
+        timestamps[2] = 4 * 24 * 3600
+        timestamps[4] = 5 * 24 * 3600
+        timestamps[8] = 6 * 24 * 3600
+        timestamps[16] = 7 * 24 * 3600
+    EPOCH_TIMESTAMPS = timestamps
+
+    self.is_killed[empty(ERC20)] = Epoch.COLLECT  # Set burner first
 
 
 @external
@@ -155,13 +160,10 @@ def burn(_coin: address) -> bool:
 @pure
 def _epoch_ts(ts: uint256) -> Epoch:
     ts = (ts - START_TIME) % (7 * 24 * 3600)
-    if ts < COLLECT_EPOCH_TS:
-        return Epoch.SLEEP
-    elif ts < EXCHANGE_EPOCH_TS:
-        return Epoch.COLLECT
-    elif ts < FORWARD_EPOCH_TS:
-        return Epoch.EXCHANGE
-    return Epoch.FORWARD
+    for epoch in [Epoch.SLEEP, Epoch.COLLECT, Epoch.EXCHANGE, Epoch.FORWARD]:
+        if ts < EPOCH_TIMESTAMPS[2 * convert(epoch, uint256)]:
+            return epoch
+    raise "Bad Epoch"
 
 
 @external
@@ -175,6 +177,16 @@ def epoch(ts: uint256=block.timestamp) -> Epoch:
     return self._epoch_ts(ts)
 
 
+@internal
+@pure
+def _epoch_time_frame(epoch: Epoch, ts: uint256) -> (uint256, uint256):
+    subset: uint256 = convert(epoch, uint256)
+    assert subset & (subset - 1) == 0, "Bad Epoch"
+
+    ts = ts - (ts - START_TIME) % (7 * 24 * 3600)
+    return (ts + EPOCH_TIMESTAMPS[convert(epoch, uint256)], ts + EPOCH_TIMESTAMPS[2 * convert(epoch, uint256)])
+
+
 @external
 @view
 def epoch_time_frame(_epoch: Epoch, _ts: uint256=block.timestamp) -> (uint256, uint256):
@@ -184,37 +196,32 @@ def epoch_time_frame(_epoch: Epoch, _ts: uint256=block.timestamp) -> (uint256, u
     @param _ts Timestamp to anchor to. Current by default
     @return [start, end) time frame boundaries
     """
-    ts: uint256 = _ts - (_ts - START_TIME) % (7 * 24 * 3600)
-    if _epoch == Epoch.SLEEP:
-        return (ts, ts + COLLECT_EPOCH_TS)
-    elif _epoch == Epoch.COLLECT:
-        return (ts + COLLECT_EPOCH_TS, ts + EXCHANGE_EPOCH_TS)
-    elif _epoch == Epoch.EXCHANGE:
-        return (ts + EXCHANGE_EPOCH_TS, ts + FORWARD_EPOCH_TS)
-    elif _epoch == Epoch.FORWARD:
-        return (ts + FORWARD_EPOCH_TS, ts + 7 * 24 * 3600)
-    raise "Unknown Epoch"
+    return self._epoch_time_frame(_epoch, _ts)
 
 
 @internal
 @view
-def _collect_fee(coin: ERC20, amount: uint256) -> uint256:
-    """
-    @dev Stable for now, dynamic soon
-    """
-    return amount * self.max_collect_fee / ONE
+def _fee(epoch: Epoch, ts: uint256) -> uint256:
+    start: uint256 = 0
+    end: uint256 = 0
+    start, end = self._epoch_time_frame(epoch, ts)
+    if ts >= end:
+        return 0
+    return self.max_collect_fee * (ts - start) / (end - start)
 
 
 @external
 @view
-def collect_fee(coin: ERC20, amount: uint256) -> uint256:
+def fee(_epoch: Epoch=empty(Epoch), _ts: uint256=block.timestamp) -> uint256:
     """
-    @notice Calculate caller's fee for calling `collect`
-    @param coin Coin to collect
-    @param amount Amount of collected coin
-    @return Amount to return to executor
+    @notice Calculate keeper's fee for calling `collect`
+    @param _epoch Epoch to count fee for
+    @param _ts Timestamp of collection
+    @return Fee with base 10^18
     """
-    return self._collect_fee(coin, amount)
+    if _epoch == empty(Epoch):
+        return self._fee(self._epoch_ts(_ts), _ts)
+    return self._fee(_epoch, _ts)
 
 
 @external
@@ -238,9 +245,10 @@ def collect(_coins: DynArray[ERC20, MAX_LEN], _callback: Callback, _receiver: ad
     self.hooker.callback(_callback, value=msg.value)
 
     burner: Burner = self.burner
+    fee: uint256 = self._fee(Epoch.COLLECT, block.timestamp)
     for i in range(len(_coins), bound=MAX_LEN):
         collected_amount: uint256 = _coins[i].balanceOf(self) - balances[i]
-        balances[i] = self._collect_fee(_coins[i], collected_amount)
+        balances[i] = collected_amount * fee / ONE
         _coins[i].transfer(_receiver, balances[i])
         _coins[i].transfer(burner.address, _coins[i].balanceOf(self))
         log Collected(_coins[i].address, msg.sender, collected_amount, balances[i])
@@ -269,26 +277,6 @@ def exchange(_coins: DynArray[ERC20, MAX_LEN]) -> bool:
     return True
 
 
-@internal
-@view
-def _forward_fee(amount: uint256) -> uint256:
-    """
-    @dev Stable for now, dynamic soon
-    """
-    return amount * self.max_forward_fee / ONE
-
-
-@external
-@view
-def forward_fee(amount: uint256) -> uint256:
-    """
-    @notice Calculate caller's fee for calling `forward`
-    @param amount Amount of forwarded coin
-    @return Amount to return to executor
-    """
-    return self._forward_fee(amount)
-
-
 @external
 @payable
 @nonreentrant("forward")
@@ -304,7 +292,7 @@ def forward(_receiver: address=msg.sender) -> uint256:
 
     self.burner.push_target()
     amount: uint256 = target.balanceOf(self)
-    fee: uint256 = self._forward_fee(amount)
+    fee: uint256 = self._fee(Epoch.FORWARD, block.timestamp) * amount / ONE
 
     hooker: Hooker = self.hooker
     target.transfer(hooker.address, amount - fee)
