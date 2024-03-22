@@ -268,7 +268,8 @@ def exchange(_coins: DynArray[ERC20, MAX_LEN]) -> bool:
     @param _coins Coins to exchange
     @return Boolean value if coins are allowed to be exchanged
     """
-    if self.is_killed[ALL_COINS] in Epoch.EXCHANGE:
+    if self._epoch_ts(block.timestamp) != Epoch.EXCHANGE or\
+        self.is_killed[ALL_COINS] in Epoch.EXCHANGE:
         return False
     for coin in _coins:
         if self.is_killed[coin] in Epoch.EXCHANGE:
