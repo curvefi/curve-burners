@@ -28,7 +28,7 @@ interface Burner:
 
 interface Hooker:
     def callback(_callback: Callback): payable
-    def forward(): payable
+    def forward(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN]): payable
     def supportsInterface(_interface_id: bytes4) -> bool: view
 
 
@@ -51,6 +51,10 @@ struct Callback:
     data: Bytes[4000]
 
 
+struct HookInput:
+    data: Bytes[1024]
+
+
 struct RecoverInput:
     coin: ERC20
     amount: uint256
@@ -65,6 +69,7 @@ ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 WETH: immutable(wETH)
 
 MAX_LEN: constant(uint256) = 64
+MAX_HOOK_LEN: constant(uint256) = 32
 ONE: constant(uint256) = 10 ** 18  # Precision
 
 START_TIME: constant(uint256) = 1600300800  # ts of distribution start
@@ -104,7 +109,7 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
     ALL_COINS = ERC20(empty(address))
 
     timestamps: uint256[17] = empty(uint256[17])
-    if False:  # testing collect
+    if False:  # testing exchange
         # timestamps[1] = 0
         timestamps[2] = 100
         timestamps[4] = 200
@@ -280,9 +285,10 @@ def exchange(_coins: DynArray[ERC20, MAX_LEN]) -> bool:
 @external
 @payable
 @nonreentrant("forward")
-def forward(_receiver: address=msg.sender) -> uint256:
+def forward(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN], _receiver: address=msg.sender) -> uint256:
     """
     @notice Transfer target coin forward
+    @param _hook_inputs Input parameters for forward hooks
     @param _receiver Receiver of caller `forward_fee`
     @return Amount of received fee
     """
@@ -296,7 +302,7 @@ def forward(_receiver: address=msg.sender) -> uint256:
 
     hooker: Hooker = self.hooker
     target.transfer(hooker.address, amount - fee)
-    hooker.forward(value=msg.value)
+    hooker.forward(_hook_inputs, value=msg.value)
 
     target.transfer(_receiver, fee)
     return fee

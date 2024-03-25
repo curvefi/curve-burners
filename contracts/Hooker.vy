@@ -25,6 +25,10 @@ struct Hook:
     calldata: Bytes[4000]
 
 
+struct HookInput:
+    data: Bytes[1024]
+
+
 ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 SUPPORTED_INTERFACES: constant(bytes4[2]) = [
     # ERC165: method_id("supportsInterface(bytes4)") == 0x01ffc9a7
@@ -36,6 +40,7 @@ SUPPORTED_INTERFACES: constant(bytes4[2]) = [
 ]
 
 MAX_LEN: constant(uint256) = 64
+MAX_HOOK_LEN: constant(uint256) = 32
 fee_collector: public(immutable(FeeCollector))
 
 MAX_HOOKS: constant(uint256) = 16
@@ -57,7 +62,7 @@ def callback(_callback: Callback):
 
 
 @external
-def forward():
+def forward(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN]):
     # TODO
     pass
 

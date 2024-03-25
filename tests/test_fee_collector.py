@@ -108,7 +108,7 @@ def test_forward(fee_collector, set_epoch, target, arve, burle, hooker):
 
     set_epoch(Epoch.FORWARD)
     with boa.env.prank(arve):
-        fee_collector.forward(burle)
+        fee_collector.forward([], burle)
     assert target.balanceOf(arve) == 0
     assert target.balanceOf(fee_collector) == 0
     assert 0 < target.balanceOf(burle) <= 10 ** target.decimals() * fee_collector.max_fee(Epoch.FORWARD) // 10 ** 18
@@ -189,9 +189,9 @@ def test_killed_all(fee_collector, set_epoch, executor, weth, target, admin, arv
     set_epoch(Epoch.FORWARD)
     if Epoch.FORWARD in to_kill:
         with boa.reverts():
-            fee_collector.forward()
+            fee_collector.forward([])
     else:
-        fee_collector.forward()
+        fee_collector.forward([])
 
 
 def test_killed(fee_collector, set_epoch, executor, coins, target, admin, arve):
@@ -219,15 +219,15 @@ def test_killed(fee_collector, set_epoch, executor, coins, target, admin, arve):
 
     # Forward
     set_epoch(Epoch.FORWARD)
-    fee_collector.forward()
+    fee_collector.forward([])
     with boa.env.prank(admin):
         fee_collector.set_killed([(target.address, Epoch.FORWARD)])
     with boa.reverts():
-        fee_collector.forward()
+        fee_collector.forward([])
     with boa.env.prank(admin):
         fee_collector.set_killed([(target.address, Epoch.EXCHANGE | Epoch.FORWARD)])
     with boa.reverts():
-        fee_collector.forward()
+        fee_collector.forward([])
 
 
 def test_epoch(fee_collector):
