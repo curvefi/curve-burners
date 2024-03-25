@@ -63,8 +63,12 @@ def test_burn(burner, weth, arve):
 
 
 def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoch, admin):
+    def poll_try_at_epoch_error(ts, msg):
+        return bytes(boa.eval(f'_abi_encode(convert({ts}, uint256), "{msg}",'
+                              f'method_id=method_id("PollTryAtEpoch(uint256,string)"))'))
+
     next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.vm.state.timestamp + 7 * 24 * 3600)[0]
-    with boa.reverts(f"PollTryAtEpoch({next_ts},)"):  # Zero balance
+    with boa.reverts(vm_error=poll_try_at_epoch_error(next_ts, "ZeroBalance")):
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
 
     weth._mint_for_testing(burner, 10 ** weth.decimals())
@@ -89,18 +93,21 @@ def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoc
         assert order[i] == current_order[i]
 
     set_epoch(Epoch.FORWARD)
-    with boa.reverts(f"PollTryAtEpoch({next_ts},)"):  # Outdated
+    with boa.reverts(vm_error=poll_try_at_epoch_error(next_ts, "NotAllowed")):  # Outdated
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
 
     set_epoch(Epoch.EXCHANGE)
     next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.vm.state.timestamp + 7 * 24 * 3600)[0]
     with boa.env.prank(admin):
-        fee_collector.set_killed([(weth, Epoch.EXCHANGE)])
-    with boa.reverts(f"PollTryAtEpoch({next_ts},)"):  # killed
+        fee_collector.set_killed([(weth.address, Epoch.EXCHANGE)])
+    with boa.reverts(vm_error=poll_try_at_epoch_error(next_ts, "NotAllowed")):  # killed
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
 
 
 def test_verify(burner, coins, arve, target, fee_collector, admin):
+    def order_not_valid_error(msg):
+        return bytes(boa.eval(f'_abi_encode("{msg}", method_id=method_id("OrderNotValid(string)"))'))
+
     coins = [coin for coin in coins if coin != target]
     coin = coins[0]
     coin._mint_for_testing(burner, 10 ** coin.decimals())
@@ -121,7 +128,7 @@ def test_verify(burner, coins, arve, target, fee_collector, admin):
     # Order implementations MUST validate / verify offchainInput
     invalid_params = deepcopy(params)
     invalid_params[6] = bytes.fromhex("00")
-    with boa.reverts("OrderNotValid(NonZeroOffchainInput)"):
+    with boa.reverts(vm_error=order_not_valid_error("NonZeroOffchainInput")):
         burner.verify(*invalid_params)
 
     invalid_params[6] = bytes.fromhex("0100")
@@ -132,16 +139,16 @@ def test_verify(burner, coins, arve, target, fee_collector, admin):
     # valid order.
     invalid_params = deepcopy(params)
     invalid_params[5] = bytes.fromhex(coins[1].address[2:])  # Wrong sellToken
-    with boa.reverts("OrderNotValid(BadOrder)"):
+    with boa.reverts(vm_error=order_not_valid_error("BadOrder")):
         burner.verify(*invalid_params)
 
     invalid_params = deepcopy(params)
     invalid_params[7] = list(invalid_params[7])
     invalid_params[7][1] = coins[1].address  # Wrong buyToken
-    with boa.reverts("OrderNotValid(BadOrder)"):
+    with boa.reverts(vm_error=order_not_valid_error("BadOrder")):
         burner.verify(*invalid_params)
 
     with boa.env.prank(admin):
-        fee_collector.set_killed([(coin, Epoch.EXCHANGE)])
-    with boa.reverts("OrderNotValid(NotAllowed)"):
+        fee_collector.set_killed([(coin.address, Epoch.EXCHANGE)])
+    with boa.reverts(vm_error=order_not_valid_error("NotAllowed")):
         burner.verify(*params)

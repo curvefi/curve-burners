@@ -165,7 +165,7 @@ def _get_order(sell_token: ERC20) -> GPv2Order_Data:
 def get_current_order(sell_token: address=empty(address)) -> GPv2Order_Data:
     """
     @notice Get current order parameters
-    @notice sell_token Address of possible sell token
+    @param sell_token Address of possible sell token
     """
     return self._get_order(ERC20(sell_token))
 
@@ -192,8 +192,10 @@ def getTradeableOrder(_owner: address, _sender: address, _ctx: bytes32, _static_
         start, end = fee_collector.epoch_time_frame(Epoch.EXCHANGE)
         if block.timestamp >= start:
             start, end = fee_collector.epoch_time_frame(Epoch.EXCHANGE, block.timestamp + 7 * 24 * 3600)
-        error_str: String[15 + 256 + 13] = concat("PollTryAtEpoch(", uint2str(start), ",)")
-        raise error_str
+        reason: String[11] = "ZeroBalance"
+        if order.sellAmount != 0:  # FeeCollector reject
+            reason = "NotAllowed"
+        raw_revert(_abi_encode(start, reason, method_id=method_id("PollTryAtEpoch(uint256,string)")))
 
     return order
 
@@ -223,12 +225,15 @@ def verify(
     @param _order The proposed discrete order's `GPv2Order.Data` struct
     """
     sell_token: ERC20 = ERC20(convert(convert(_static_input, bytes20), address))
-    assert fee_collector.exchange([sell_token]), "OrderNotValid(NotAllowed)"
-    assert _offchain_input == b"", "OrderNotValid(NonZeroOffchainInput)"
+    if not fee_collector.exchange([sell_token]):
+        raw_revert(_abi_encode("NotAllowed", method_id=method_id("OrderNotValid(string)")))
+    if _offchain_input != b"":
+        raw_revert(_abi_encode("NonZeroOffchainInput", method_id=method_id("OrderNotValid(string)")))
     order: GPv2Order_Data = self._get_order(sell_token)
     order.sellAmount = _order.sellAmount  # Any amount allowed
     order.buyAmount = _order.buyAmount  # Price is discovered within CowSwap competition
-    assert _abi_encode(order) == _abi_encode(_order), "OrderNotValid(BadOrder)"
+    if _abi_encode(order) != _abi_encode(_order):
+        raw_revert(_abi_encode("BadOrder", method_id=method_id("OrderNotValid(string)")))
 
 
 @view
