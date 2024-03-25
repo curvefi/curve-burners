@@ -118,7 +118,7 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
         timestamps[16] = 7 * 24 * 3600
     EPOCH_TIMESTAMPS = timestamps
 
-    self.is_killed[empty(ERC20)] = Epoch.COLLECT  # Set burner first
+    self.is_killed[empty(ERC20)] = Epoch.COLLECT | Epoch.FORWARD  # Set burner first
 
 
 @external
