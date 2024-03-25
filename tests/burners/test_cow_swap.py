@@ -2,7 +2,7 @@ from copy import deepcopy
 
 import pytest
 import boa
-
+from boa import BoaError
 
 from ..conftest import Epoch, ZERO_ADDRESS
 
@@ -68,8 +68,9 @@ def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoc
                               f'method_id=method_id("PollTryAtEpoch(uint256,string)"))'))
 
     next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.vm.state.timestamp + 7 * 24 * 3600)[0]
-    with boa.reverts(vm_error=poll_try_at_epoch_error(next_ts, "ZeroBalance")):
+    with pytest.raises(BoaError) as error:
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
+    assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "ZeroBalance")
 
     weth._mint_for_testing(burner, 10 ** weth.decimals())
     order = burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
@@ -93,15 +94,17 @@ def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoc
         assert order[i] == current_order[i]
 
     set_epoch(Epoch.FORWARD)
-    with boa.reverts(vm_error=poll_try_at_epoch_error(next_ts, "NotAllowed")):  # Outdated
+    with pytest.raises(BoaError) as error:  # Outdated
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
+    assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "NotAllowed")
 
     set_epoch(Epoch.EXCHANGE)
     next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.vm.state.timestamp + 7 * 24 * 3600)[0]
     with boa.env.prank(admin):
         fee_collector.set_killed([(weth.address, Epoch.EXCHANGE)])
-    with boa.reverts(vm_error=poll_try_at_epoch_error(next_ts, "NotAllowed")):  # killed
+    with pytest.raises(BoaError) as error:  # killed
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
+    assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "NotAllowed")
 
 
 def test_verify(burner, coins, arve, target, fee_collector, admin):
@@ -128,8 +131,9 @@ def test_verify(burner, coins, arve, target, fee_collector, admin):
     # Order implementations MUST validate / verify offchainInput
     invalid_params = deepcopy(params)
     invalid_params[6] = bytes.fromhex("00")
-    with boa.reverts(vm_error=order_not_valid_error("NonZeroOffchainInput")):
+    with pytest.raises(BoaError) as error:
         burner.verify(*invalid_params)
+    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("NonZeroOffchainInput")
 
     invalid_params[6] = bytes.fromhex("0100")
     with boa.reverts():  # Overflow error
@@ -139,16 +143,19 @@ def test_verify(burner, coins, arve, target, fee_collector, admin):
     # valid order.
     invalid_params = deepcopy(params)
     invalid_params[5] = bytes.fromhex(coins[1].address[2:])  # Wrong sellToken
-    with boa.reverts(vm_error=order_not_valid_error("BadOrder")):
+    with pytest.raises(BoaError) as error:
         burner.verify(*invalid_params)
+    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("BadOrder")
 
     invalid_params = deepcopy(params)
     invalid_params[7] = list(invalid_params[7])
     invalid_params[7][1] = coins[1].address  # Wrong buyToken
-    with boa.reverts(vm_error=order_not_valid_error("BadOrder")):
+    with pytest.raises(BoaError) as error:
         burner.verify(*invalid_params)
+    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("BadOrder")
 
     with boa.env.prank(admin):
         fee_collector.set_killed([(coin.address, Epoch.EXCHANGE)])
-    with boa.reverts(vm_error=order_not_valid_error("NotAllowed")):
+    with pytest.raises(BoaError) as error:
         burner.verify(*params)
+    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("NotAllowed")
