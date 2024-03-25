@@ -4,6 +4,10 @@ import boa
 from ..conftest import ETH_ADDRESS
 
 
+def test_version(burner):
+    assert burner.VERSION() == "XYZ"
+
+
 def test_push_target(burner, target, fee_collector, arve):
     target._mint_for_testing(burner, 10 ** target.decimals())
 

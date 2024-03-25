@@ -25,8 +25,10 @@ SUPPORTED_INTERFACES: constant(bytes4[2]) = [
     # Burner:
     #   method_id("burn(address[],address)") == 0x72a436a8
     #   method_id("push_target()") == 0x2eb078cd
-    0x5c144e65,
+    #   method_id("VERSION()") == 0xffa1ad74
+    0xa3b5e311,
 ]
+VERSION: public(constant(String[20])) = "XYZ"
 
 fee_collector: public(immutable(FeeCollector))
 

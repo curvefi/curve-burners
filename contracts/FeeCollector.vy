@@ -78,7 +78,7 @@ EPOCH_TIMESTAMPS: immutable(uint256[17])
 target: public(ERC20)  # coin swapped into
 max_fee: public(uint256[9])  # max_fee[Epoch]
 
-BURNER_INTERFACE_ID: constant(bytes4) = 0x5c144e65
+BURNER_INTERFACE_ID: constant(bytes4) = 0xa3b5e311
 HOOKER_INTERFACE_ID: constant(bytes4) = 0xc8e65276
 burner: public(Burner)
 hooker: public(Hooker)

@@ -11,7 +11,7 @@ WETH = "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"  # ALTER: wrapped native coi
 ADMIN = "0x71F718D3e4d1449D1502A6A7595eb84eBcCB1683"  # ALTER
 EMERGENCY_ADMIN = "0x71F718D3e4d1449D1502A6A7595eb84eBcCB1683"  # ALTER
 
-BURNER = "CowSwap"  # ALTER
+BURNER = "XYZ"  # ALTER
 
 NETWORK = f"https://rpc.gnosischain.com"  # ALTER
 
@@ -35,6 +35,9 @@ def deploy():
 
 
 def deploy_burner(fee_collector):
+    if BURNER == "XYZ":
+        return boa.load("contracts/burners/XYZBurner.vy", fee_collector)
+        # return boa.load_partial("contracts/burners/XYZBurner.vy").at("")
     if BURNER == "CowSwap":
         return boa.load("contracts/burners/CowSwapBurner.vy",
                         fee_collector,

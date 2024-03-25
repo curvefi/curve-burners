@@ -89,7 +89,8 @@ SUPPORTED_INTERFACES: constant(bytes4[4]) = [
     # Burner:
     #   method_id("burn(address[],address)") == 0x72a436a8
     #   method_id("push_target()") == 0x2eb078cd
-    0x5c144e65,
+    #   method_id("VERSION()") == 0xffa1ad74
+    0xa3b5e311,
     # Interface corresponding to IConditionalOrderGenerator:
     #   method_id("getTradeableOrder(address,address,bytes32,bytes,bytes)") == 0xb8296fc4
     0xb8296fc4,
@@ -97,6 +98,7 @@ SUPPORTED_INTERFACES: constant(bytes4[4]) = [
     #   method_id("isValidSignature(bytes32,bytes)") == 0x5fd7e97d
     ERC1271_MAGIC_VALUE,
 ]
+VERSION: public(constant(String[20])) = "CowSwap"
 
 created: public(HashMap[ERC20, bool])
 

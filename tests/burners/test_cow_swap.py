@@ -49,6 +49,10 @@ def burner(admin, fee_collector, cow_swap):
     return burner
 
 
+def test_version(burner):
+    assert burner.VERSION() == "CowSwap"
+
+
 def test_erc165(burner):
     assert burner.supportsInterface(bytes.fromhex("01ffc9a7"))
 
