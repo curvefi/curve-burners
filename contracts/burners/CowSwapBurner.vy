@@ -1,6 +1,6 @@
 # @version 0.3.10
 """
-@title Burner
+@title CowSwapBurner
 @notice Exchange tokens using CowSwap
 """
 
@@ -89,7 +89,6 @@ SUPPORTED_INTERFACES: constant(bytes4[4]) = [
     # Burner:
     #   method_id("burn(address[],address)") == 0x72a436a8
     #   method_id("push_target()") == 0x2eb078cd
-    # 0x5c144e65
     0x5c144e65,
     # Interface corresponding to IConditionalOrderGenerator:
     #   method_id("getTradeableOrder(address,address,bytes32,bytes,bytes)") == 0xb8296fc4

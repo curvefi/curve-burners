@@ -1,7 +1,7 @@
 # @version 0.3.10
 """
-@title Callbacker
-@notice Everything about callbacks
+@title Hooker
+@notice Support callbacks and hooks
 """
 
 from vyper.interfaces import ERC20
@@ -17,14 +17,16 @@ struct Callback:
     data: Bytes[4000]
 
 
-# Hooks can be:
-# - mandatory / optional with additional fee
+# Properties:
+# - mandatory / optional with extra fee
+# - extra static/growing fee, postponed fee
 # - [bridge / transfer to FeeDistributor] / static [] / extra parameters from caller
 struct Hook:
     to: address
     calldata: Bytes[4000]
 
 
+# Property: no future changes in FeeCollector
 struct HookInput:
     data: Bytes[1024]
 

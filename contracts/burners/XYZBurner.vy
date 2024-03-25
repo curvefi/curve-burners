@@ -1,6 +1,6 @@
 # @version 0.3.10
 """
-@title Burner
+@title XYZBurner
 @notice Template of a Burner
 """
 
@@ -25,7 +25,6 @@ SUPPORTED_INTERFACES: constant(bytes4[2]) = [
     # Burner:
     #   method_id("burn(address[],address)") == 0x72a436a8
     #   method_id("push_target()") == 0x2eb078cd
-    # 0x5c144e65
     0x5c144e65,
 ]
 
