@@ -58,7 +58,7 @@ def test_erc165(burner):
 
 
 def test_burn(burner, weth, arve):
-    burner.burn([weth], arve)
+    burner.burn([weth.address], arve)
     assert burner.created(weth)
 
 

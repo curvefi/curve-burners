@@ -68,7 +68,7 @@ def test_collect(fee_collector, set_epoch, executor, coins, weth, admin, arve, b
     boa.env.set_balance(arve, 10 ** 18)
     set_epoch(Epoch.COLLECT)
     with boa.env.prank(arve):
-        executor.call(coins, burle, value=10 ** 18)
+        executor.call([coin.address for coin in coins], burle, value=10 ** 18)
 
     assert boa.env.get_balance(arve) == 0
     assert boa.env.get_balance(executor.address) == 0
@@ -85,7 +85,7 @@ def test_collect(fee_collector, set_epoch, executor, coins, weth, admin, arve, b
 
     with boa.env.prank(arve):
         with boa.reverts("Coins not sorted"):
-            executor.call([weth, weth])
+            executor.call([weth.address, weth.address])
 
 
 def test_empty_callback(fee_collector, set_epoch, coins, admin, burner):
@@ -96,7 +96,7 @@ def test_empty_callback(fee_collector, set_epoch, coins, admin, burner):
         coin._mint_for_testing(fee_collector, 10 ** coin.decimals())
 
     set_epoch(Epoch.COLLECT)
-    fee_collector.collect(coins, (ZERO_ADDRESS, bytes()))
+    fee_collector.collect([coin.address for coin in coins], (ZERO_ADDRESS, bytes()))
 
     for coin in coins:
         assert coin.balanceOf(fee_collector) == 0
@@ -177,13 +177,13 @@ def test_killed_all(fee_collector, set_epoch, executor, weth, target, admin, arv
     set_epoch(Epoch.COLLECT)
     if Epoch.COLLECT in to_kill:
         with boa.reverts():
-            executor.call([weth])
+            executor.call([weth.address])
     else:
-        executor.call([weth])
+        executor.call([weth.address])
 
     # Exchange
     set_epoch(Epoch.EXCHANGE)
-    assert not fee_collector.exchange([weth]) == Epoch.EXCHANGE in to_kill
+    assert not fee_collector.exchange([weth.address]) == Epoch.EXCHANGE in to_kill
 
     # Forward
     set_epoch(Epoch.FORWARD)
@@ -195,37 +195,37 @@ def test_killed_all(fee_collector, set_epoch, executor, weth, target, admin, arv
 
 
 def test_killed(fee_collector, set_epoch, executor, coins, target, admin, arve):
-    killed = [(coin, to_kill) for coin, to_kill in
+    killed = [(coin.address, to_kill) for coin, to_kill in
               zip(coins[:3], [Epoch.COLLECT, Epoch.EXCHANGE, Epoch.COLLECT | Epoch.EXCHANGE])]
     with boa.env.prank(admin):
         fee_collector.set_killed(killed)
 
     # Collect
     set_epoch(Epoch.COLLECT)
-    executor.call([coins[1]] + coins[3:])
+    executor.call([coin.address for coin in [coins[1]] + coins[3:]])
     with boa.reverts():
-        executor.call([coins[0]])
+        executor.call([coins[0].address])
     with boa.reverts():
-        executor.call([coins[2]])
+        executor.call([coins[2].address])
     with boa.reverts():
-        executor.call(coins[1:])
+        executor.call([coin.address for coin in coins[1:]])
 
     # Exchange
     set_epoch(Epoch.EXCHANGE)
-    assert fee_collector.exchange([coins[0]] + coins[3:])
-    assert not fee_collector.exchange([coins[1]])
-    assert not fee_collector.exchange([coins[2]])
-    assert not fee_collector.exchange([coins[0], coins[2]] + coins[3:])
+    assert fee_collector.exchange([coin.address for coin in [coins[0]] + coins[3:]])
+    assert not fee_collector.exchange([coins[1].address])
+    assert not fee_collector.exchange([coins[2].address])
+    assert not fee_collector.exchange([coin.address for coin in [coins[0], coins[2]] + coins[3:]])
 
     # Forward
     set_epoch(Epoch.FORWARD)
     fee_collector.forward()
     with boa.env.prank(admin):
-        fee_collector.set_killed([(target, Epoch.FORWARD)])
+        fee_collector.set_killed([(target.address, Epoch.FORWARD)])
     with boa.reverts():
         fee_collector.forward()
     with boa.env.prank(admin):
-        fee_collector.set_killed([(target, Epoch.EXCHANGE | Epoch.FORWARD)])
+        fee_collector.set_killed([(target.address, Epoch.EXCHANGE | Epoch.FORWARD)])
     with boa.reverts():
         fee_collector.forward()
 
@@ -285,7 +285,8 @@ def test_recover(fee_collector, coins, admin, arve):
     amounts.append(10 ** 18 // 3)
 
     with boa.env.prank(admin):
-        fee_collector.recover([(coin, amount) for coin, amount in zip(coins, amounts)], arve)
+        fee_collector.recover([(coin.address if hasattr(coin, "address") else coin, amount)
+                               for coin, amount in zip(coins, amounts)], arve)
 
     for coin in coins[:-2]:
         assert coin.balanceOf(fee_collector) == 0

@@ -34,7 +34,7 @@ def test_recover_balance(burner, fee_collector, admin, emergency_admin, arve, we
     boa.env.set_balance(burner.address, 10 ** 18)
 
     with boa.env.prank(admin):
-        burner.recover([weth, ETH_ADDRESS])
+        burner.recover([weth.address, ETH_ADDRESS])
 
     assert weth.balanceOf(burner) == 0
     assert boa.env.get_balance(burner.address) == 0
