@@ -115,8 +115,7 @@ def __init__(_fee_collector: FeeCollector,
     vault_relayer = _vault_relayer
     composable_cow = _composable_cow
 
-    # {"appCode":"Curve","metadata":{"hooks":{"version":"0.1.0"}},"version":"1.0.0"}
-    app_data = 0x058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f
+    app_data = 0x0000000000000000000000000000000000000000000000000000000000000000
     sell_kind = keccak256("sell")
     token_balance = keccak256("erc20")
 

@@ -7,7 +7,7 @@ from boa import BoaError
 from ..conftest import Epoch, ZERO_ADDRESS
 
 
-APP_DATA = "0x058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"
+APP_DATA = "0x0000000000000000000000000000000000000000000000000000000000000000"
 
 
 @pytest.fixture(scope="module", autouse=True)
