@@ -78,7 +78,7 @@ HOOKER_INTERFACE_ID: constant(bytes4) = 0xc8e65276
 burner: public(Burner)
 hooker: public(Hooker)
 
-is_killed: HashMap[ERC20, Epoch]
+is_killed: public(HashMap[ERC20, Epoch])
 ALL_COINS: immutable(ERC20)  # Auxiliary indicator for all coins (=ZERO_ADDRESS)
 
 owner: public(address)
