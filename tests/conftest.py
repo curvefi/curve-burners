@@ -75,8 +75,10 @@ def fee_collector(admin, emergency_admin, target, weth):
 
 @pytest.fixture(scope="session")
 def set_epoch(fee_collector) -> Callable[[Epoch], None]:
+    boa.env.time_travel(seconds=100 * WEEK)  # move forward, so all time travels lead to positive values
+
     def inner(epoch: Epoch):
-        ts = sum(fee_collector.epoch_time_frame(epoch)) // 2  # middle fo the period for the fee
+        ts = sum(fee_collector.epoch_time_frame(epoch)) // 2  # middle of the period for the fee
         diff = ts - boa.env.vm.state.timestamp
         boa.env.time_travel(seconds=diff + WEEK * (diff // WEEK))
     return inner

@@ -60,6 +60,12 @@ struct MulticallResult:
     return_data: Bytes[1024]
 
 
+struct CollectSave:
+    coins: DynArray[ERC20, MAX_LEN]
+    balances: DynArray[uint256, MAX_LEN]
+    ts: uint256
+
+
 struct HookInput:
     hook_id: uint8
     value: uint256
@@ -97,6 +103,8 @@ burner: public(Burner)
 hooker: public(Hooker)
 multicall: public(Multicall)
 
+# pragma evm-version cancun
+current_collect: public(transient(CollectSave))  # Use storage is cancun is not supported
 last_hooker_approve: uint256
 
 is_killed: public(HashMap[ERC20, Epoch])
@@ -141,6 +149,7 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
     EPOCH_TIMESTAMPS = timestamps
 
     self.is_killed[empty(ERC20)] = Epoch.COLLECT | Epoch.FORWARD  # Set burner first
+    self.is_killed[_target_coin] = Epoch.COLLECT | Epoch.EXCHANGE  # Keep target coin in contract
 
 
 @external
@@ -245,6 +254,43 @@ def fee(_epoch: Epoch=empty(Epoch), _ts: uint256=block.timestamp) -> uint256:
     return self._fee(_epoch, _ts)
 
 
+@internal
+@view
+def _collect_allowed():
+    assert self._epoch_ts(block.timestamp) == Epoch.COLLECT
+    assert not self.is_killed[ALL_COINS] in Epoch.COLLECT
+
+
+@internal
+@view
+def _collect_prepare(_coins: DynArray[ERC20, MAX_LEN]) -> DynArray[uint256, MAX_LEN]:
+    balances: DynArray[uint256, MAX_LEN] = []
+    for coin in _coins:
+        assert not self.is_killed[coin] in Epoch.COLLECT
+        balances.append(coin.balanceOf(self))
+    return balances
+
+
+@internal
+def _collect_finalize(coins: DynArray[ERC20, MAX_LEN], balances: DynArray[uint256, MAX_LEN], receiver: address) -> DynArray[uint256, MAX_LEN]:
+    burner: Burner = self.burner
+    fee: uint256 = self._fee(Epoch.COLLECT, block.timestamp)
+    for i in range(len(coins), bound=MAX_LEN):
+        collected_amount: uint256 = coins[i].balanceOf(self) - balances[i]
+        balances[i] = collected_amount * fee / ONE
+        coins[i].transfer(receiver, balances[i])
+        coins[i].transfer(burner.address, coins[i].balanceOf(self))
+        log Collected(coins[i].address, msg.sender, collected_amount, balances[i])
+
+        # Eliminate case of repeated coins
+        if i > 0:
+            assert convert(coins[i].address, uint160) > convert(coins[i - 1].address, uint160), "Coins not sorted"
+
+    burner.burn(coins, receiver)
+    self.current_collect = empty(CollectSave)
+    return balances
+
+
 @external
 @nonreentrant("collect")
 @payable
@@ -257,30 +303,38 @@ def collect(_coins: DynArray[ERC20, MAX_LEN], _calls: DynArray[Call3Value, MAX_C
     @param _receiver Receiver of caller `collect_fee`s
     @return Amounts of received fees and results from calls
     """
-    assert self._epoch_ts(block.timestamp) == Epoch.COLLECT
-    assert not self.is_killed[ALL_COINS] in Epoch.COLLECT
-    balances: DynArray[uint256, MAX_LEN] = []
-    for coin in _coins:
-        assert not self.is_killed[coin] in Epoch.COLLECT
-        balances.append(coin.balanceOf(self))
+    self._collect_allowed()
+    balances: DynArray[uint256, MAX_LEN] = self._collect_prepare(_coins)
 
     results: DynArray[MulticallResult, MAX_CALL_LEN] = self.multicall.aggregate3Value(_calls, value=msg.value)
 
-    burner: Burner = self.burner
-    fee: uint256 = self._fee(Epoch.COLLECT, block.timestamp)
-    for i in range(len(_coins), bound=MAX_LEN):
-        collected_amount: uint256 = _coins[i].balanceOf(self) - balances[i]
-        balances[i] = collected_amount * fee / ONE
-        _coins[i].transfer(_receiver, balances[i])
-        _coins[i].transfer(burner.address, _coins[i].balanceOf(self))
-        log Collected(_coins[i].address, msg.sender, collected_amount, balances[i])
-
-        # Eliminate case of repeated coins
-        if i > 0:
-            assert convert(_coins[i].address, uint160) > convert(_coins[i - 1].address, uint160), "Coins not sorted"
-
-    burner.burn(_coins, _receiver)
+    balances = self._collect_finalize(_coins, balances, _receiver)
     return balances, results
+
+
+@external
+@nonreentrant("collect")
+def collect_prepare(_coins: DynArray[ERC20, MAX_LEN]):
+    """
+    @notice Prepare for collection of coins. Will save current balances in `current_collect`
+    @param _coins Coins to collect sorted in ascending order
+    """
+    self._collect_allowed()
+    self.current_collect = CollectSave({coins: _coins, balances: self._collect_prepare(_coins), ts: block.timestamp})
+
+
+@external
+@nonreentrant("collect")
+def collect_finalize(_receiver: address=msg.sender) -> DynArray[uint256, MAX_LEN]:
+    """
+    @notice Finalize collection according to `current_collect`
+    @param _receiver Receiver of fees from collection (sender by default)
+    @return Amounts of received fees in the same order as given in preparation
+    """
+    self._collect_allowed()
+    assert self.current_collect.ts == block.timestamp
+
+    return self._collect_finalize(self.current_collect.coins, self.current_collect.balances, _receiver)
 
 
 @external
@@ -400,6 +454,17 @@ def set_multicall(_new_multicall: Multicall):
     """
     assert msg.sender == self.owner, "Only owner"
     self.multicall = _new_multicall
+
+
+@external
+def set_target(_new_target: ERC20):
+    """
+    @notice Set new coin for fees accumulation
+    @dev Callable only by owner
+    """
+    assert msg.sender == self.owner, "Only owner"
+    self.target = _new_target
+    self.is_killed[_new_target] = Epoch.COLLECT | Epoch.EXCHANGE  # Keep target coin in contract
 
 
 @external
