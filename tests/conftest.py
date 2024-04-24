@@ -7,6 +7,7 @@ from typing import Callable
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
+WEEK = 7 * 24 * 3600
 
 
 class Epoch(IntFlag):
@@ -73,12 +74,10 @@ def fee_collector(admin, emergency_admin, target, weth):
 
 @pytest.fixture(scope="session")
 def set_epoch(fee_collector) -> Callable[[Epoch], None]:
-    week = 7 * 24 * 3600
-
     def inner(epoch: Epoch):
         ts = sum(fee_collector.epoch_time_frame(epoch)) // 2  # middle fo the period for the fee
         diff = ts - boa.env.vm.state.timestamp
-        boa.env.time_travel(seconds=diff + week * (diff // week))
+        boa.env.time_travel(seconds=diff + WEEK * (diff // WEEK))
     return inner
 
 

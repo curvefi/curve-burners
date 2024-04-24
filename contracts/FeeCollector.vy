@@ -28,7 +28,8 @@ interface Burner:
 
 interface Hooker:
     def callback(_callback: Callback): payable
-    def forward(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN]): payable
+    def act(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN], _receiver: address=msg.sender, _mandatory: bool=False) -> uint256: payable
+    def buffer_amount() -> uint256: view
     def supportsInterface(_interface_id: bytes4) -> bool: view
 
 
@@ -52,7 +53,9 @@ struct Callback:
 
 
 struct HookInput:
-    data: Bytes[1024]
+    hook_id: uint8
+    value: uint256
+    data: Bytes[8192]
 
 
 struct RecoverInput:
@@ -79,7 +82,7 @@ target: public(ERC20)  # coin swapped into
 max_fee: public(uint256[9])  # max_fee[Epoch]
 
 BURNER_INTERFACE_ID: constant(bytes4) = 0xa3b5e311
-HOOKER_INTERFACE_ID: constant(bytes4) = 0xc8e65276
+HOOKER_INTERFACE_ID: constant(bytes4) = 0xb95b1a35
 burner: public(Burner)
 hooker: public(Hooker)
 
@@ -301,9 +304,9 @@ def forward(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN], _receiver: address=
     fee: uint256 = self._fee(Epoch.FORWARD, block.timestamp) * amount / ONE
 
     hooker: Hooker = self.hooker
-    target.transfer(hooker.address, amount - fee)
-    hooker.forward(_hook_inputs, value=msg.value)
-
+    hooker_buffer: uint256 = hooker.buffer_amount()
+    target.transfer(hooker.address, amount - hooker_buffer - fee)
+    fee += hooker.act(_hook_inputs, _receiver, True, value=msg.value)
     target.transfer(_receiver, fee)
     return fee
 
