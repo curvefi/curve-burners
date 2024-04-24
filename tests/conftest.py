@@ -1,4 +1,5 @@
 import boa
+import boa_solidity
 import pytest
 
 from enum import IntFlag
@@ -96,3 +97,11 @@ def hooker(admin, fee_collector):
         hooker = boa.load("contracts/Hooker.vy", fee_collector)
         fee_collector.set_hooker(hooker)
     return hooker
+
+
+@pytest.fixture(scope="module")
+def multicall(admin, fee_collector):
+    with boa.env.prank(admin):
+        multicall = boa_solidity.load_partial_solc("contracts/testing/Multicall3.sol").deploy()
+        fee_collector.set_multicall(multicall)
+    return multicall

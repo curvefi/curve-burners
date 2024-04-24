@@ -5,7 +5,7 @@ from .conftest import Epoch, ETH_ADDRESS, ZERO_ADDRESS
 
 
 @pytest.fixture(scope="module", autouse=True)
-def preset(burner, hooker):
+def preset(burner, hooker, multicall):
     pass
 
 
@@ -34,10 +34,12 @@ def executor(admin, fee_collector):
 from vyper.interfaces import ERC20
 interface FeeCollector:
     def burn(_coin: address) -> bool: payable
-    def collect(_coins: DynArray[ERC20, 64], _callback: Callback, _receiver: address=msg.sender) -> DynArray[uint256, 64]: payable
-struct Callback:
-    to: address
-    data: Bytes[4000]
+    def collect(_coins: DynArray[ERC20, 64], _callback: DynArray[Call3Value, 64], _receiver: address=msg.sender): payable
+struct Call3Value:
+    target: address
+    allow_failure: bool
+    value: uint256
+    call_data: Bytes[8192]
 ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 
 fee_collector: immutable(FeeCollector)
@@ -48,7 +50,7 @@ def __init__(_fee_collector: FeeCollector):
 @external
 @payable
 def call(_coins: DynArray[ERC20, 64], _receiver: address=msg.sender):
-    fee_collector.collect(_coins, Callback({to: self, data: _abi_encode(_coins, method_id=method_id("collect(address[])"))}), _receiver)
+    fee_collector.collect(_coins, [Call3Value({target: self, allow_failure: False, value: 0, call_data: _abi_encode(_coins, method_id=method_id("collect(address[])"))})], _receiver)
 
 @external
 @payable
@@ -96,7 +98,7 @@ def test_empty_callback(fee_collector, set_epoch, coins, admin, burner):
         coin._mint_for_testing(fee_collector, 10 ** coin.decimals())
 
     set_epoch(Epoch.COLLECT)
-    fee_collector.collect([coin.address for coin in coins], (ZERO_ADDRESS, bytes()))
+    fee_collector.collect([coin.address for coin in coins], [(ZERO_ADDRESS, False, 0, bytes())])
 
     for coin in coins:
         assert coin.balanceOf(fee_collector) == 0

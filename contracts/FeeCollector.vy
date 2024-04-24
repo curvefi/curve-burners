@@ -18,6 +18,9 @@ interface wETH:
     def withdraw(_amount: uint256): nonpayable
     def deposit(): payable
 
+interface Multicall:
+    def aggregate3Value(calls: DynArray[Call3Value, MAX_CALL_LEN]) -> DynArray[MulticallResult, MAX_CALL_LEN]: payable
+
 interface Curve:
     def withdraw_admin_fees(): nonpayable
 
@@ -27,7 +30,6 @@ interface Burner:
     def supportsInterface(_interface_id: bytes4) -> bool: view
 
 interface Hooker:
-    def callback(_callback: Callback): payable
     def act(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN], _receiver: address=msg.sender, _mandatory: bool=False) -> uint256: payable
     def buffer_amount() -> uint256: view
     def supportsInterface(_interface_id: bytes4) -> bool: view
@@ -47,9 +49,15 @@ enum Epoch:
     FORWARD  # 8
 
 
-struct Callback:
-    to: address
-    data: Bytes[4000]
+struct Call3Value:
+    target: address
+    allow_failure: bool
+    value: uint256
+    call_data: Bytes[8192]
+
+struct MulticallResult:
+    success: bool
+    return_data: Bytes[1024]
 
 
 struct HookInput:
@@ -72,6 +80,7 @@ ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 WETH: immutable(wETH)
 
 MAX_LEN: constant(uint256) = 64
+MAX_CALL_LEN: constant(uint256) = 64
 MAX_HOOK_LEN: constant(uint256) = 32
 ONE: constant(uint256) = 10 ** 18  # Precision
 
@@ -85,6 +94,7 @@ BURNER_INTERFACE_ID: constant(bytes4) = 0xa3b5e311
 HOOKER_INTERFACE_ID: constant(bytes4) = 0xb95b1a35
 burner: public(Burner)
 hooker: public(Hooker)
+multicall: public(Multicall)
 
 is_killed: public(HashMap[ERC20, Epoch])
 ALL_COINS: immutable(ERC20)  # Auxiliary indicator for all coins (=ZERO_ADDRESS)
@@ -103,6 +113,7 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
     """
     self.target = _target_coin
     WETH = _weth
+    self.multicall = Multicall(0xcA11bde05977b3631167028862bE2a173976CA11)  # https://github.com/mds1/multicall/ v3
     self.owner = _owner
     self.emergency_owner = _emergency_owner
 
@@ -234,13 +245,14 @@ def fee(_epoch: Epoch=empty(Epoch), _ts: uint256=block.timestamp) -> uint256:
 @external
 @nonreentrant("collect")
 @payable
-def collect(_coins: DynArray[ERC20, MAX_LEN], _callback: Callback, _receiver: address=msg.sender) -> DynArray[uint256, MAX_LEN]:
+def collect(_coins: DynArray[ERC20, MAX_LEN], _calls: DynArray[Call3Value, MAX_CALL_LEN],
+            _receiver: address=msg.sender) -> (DynArray[uint256, MAX_LEN], DynArray[MulticallResult, MAX_CALL_LEN]):
     """
     @notice Collect earned fees. Collection should happen under callback to earn caller fees.
     @param _coins Coins to collect sorted in ascending order
-    @param _callback Callback for collection
+    @param _calls Calls for collection, might be used as callback
     @param _receiver Receiver of caller `collect_fee`s
-    @return Amounts of received fees
+    @return Amounts of received fees and results from calls
     """
     assert self._epoch_ts(block.timestamp) == Epoch.COLLECT
     assert not self.is_killed[ALL_COINS] in Epoch.COLLECT
@@ -249,7 +261,7 @@ def collect(_coins: DynArray[ERC20, MAX_LEN], _callback: Callback, _receiver: ad
         assert not self.is_killed[coin] in Epoch.COLLECT
         balances.append(coin.balanceOf(self))
 
-    self.hooker.callback(_callback, value=msg.value)
+    results: DynArray[MulticallResult, MAX_CALL_LEN] = self.multicall.aggregate3Value(_calls, value=msg.value)
 
     burner: Burner = self.burner
     fee: uint256 = self._fee(Epoch.COLLECT, block.timestamp)
@@ -265,7 +277,7 @@ def collect(_coins: DynArray[ERC20, MAX_LEN], _callback: Callback, _receiver: ad
             assert convert(_coins[i].address, uint160) > convert(_coins[i - 1].address, uint160), "Coins not sorted"
 
     burner.burn(_coins, _receiver)
-    return balances
+    return balances, results
 
 
 @external
@@ -360,12 +372,22 @@ def set_burner(_new_burner: Burner):
 @external
 def set_hooker(_new_hooker: Hooker):
     """
-    @notice Set contract for hooks and callbacks
+    @notice Set contract for hooks
     @dev Callable only by owner
     """
     assert msg.sender == self.owner, "Only owner"
     assert _new_hooker.supportsInterface(HOOKER_INTERFACE_ID)
     self.hooker = _new_hooker
+
+
+@external
+def set_multicall(_new_multicall: Multicall):
+    """
+    @notice Set contract for multicall
+    @dev Callable only by owner
+    """
+    assert msg.sender == self.owner, "Only owner"
+    self.multicall = _new_multicall
 
 
 @external

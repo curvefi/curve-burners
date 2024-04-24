@@ -1,7 +1,7 @@
 # @version 0.3.10
 """
 @title Hooker
-@notice Support callbacks and hooks
+@notice Support hooks
 """
 
 from vyper.interfaces import ERC20
@@ -11,11 +11,6 @@ interface FeeCollector:
     def target() -> ERC20: view
     def owner() -> address: view
     def emergency_owner() -> address: view
-
-
-struct Callback:
-    to: address
-    data: Bytes[4000]
 
 
 struct CompensationStrategy:
@@ -68,15 +63,6 @@ def __init__(_fee_collector: FeeCollector):
     @param _fee_collector Hooker is _hooked_ to fee_collector contract with no update possibility
     """
     fee_collector = _fee_collector
-
-
-@external
-@payable
-def callback(_callback: Callback):
-    """
-    @dev For safety of FeeCollector, no coins at stake
-    """
-    raw_call(_callback.to, _callback.data, value=msg.value)
 
 
 @internal
