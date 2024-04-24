@@ -85,6 +85,7 @@ MAX_HOOK_LEN: constant(uint256) = 32
 ONE: constant(uint256) = 10 ** 18  # Precision
 
 START_TIME: constant(uint256) = 1600300800  # ts of distribution start
+WEEK: constant(uint256) = 7 * 24 * 3600
 EPOCH_TIMESTAMPS: immutable(uint256[17])
 
 target: public(ERC20)  # coin swapped into
@@ -95,6 +96,8 @@ HOOKER_INTERFACE_ID: constant(bytes4) = 0xb95b1a35
 burner: public(Burner)
 hooker: public(Hooker)
 multicall: public(Multicall)
+
+last_hooker_approve: uint256
 
 is_killed: public(HashMap[ERC20, Epoch])
 ALL_COINS: immutable(ERC20)  # Auxiliary indicator for all coins (=ZERO_ADDRESS)
@@ -127,14 +130,14 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
         # timestamps[1] = 0
         timestamps[2] = 100
         timestamps[4] = 200
-        timestamps[8] = 7 * 24 * 3600 - 100
-        timestamps[16] = 7 * 24 * 3600
+        timestamps[8] = WEEK - 100
+        timestamps[16] = WEEK
     else:
         # timestamps[1] = 0
         timestamps[2] = 4 * 24 * 3600
         timestamps[4] = 5 * 24 * 3600
         timestamps[8] = 6 * 24 * 3600
-        timestamps[16] = 7 * 24 * 3600
+        timestamps[16] = WEEK  # next period
     EPOCH_TIMESTAMPS = timestamps
 
     self.is_killed[empty(ERC20)] = Epoch.COLLECT | Epoch.FORWARD  # Set burner first
@@ -177,7 +180,7 @@ def burn(_coin: address) -> bool:
 @internal
 @pure
 def _epoch_ts(ts: uint256) -> Epoch:
-    ts = (ts - START_TIME) % (7 * 24 * 3600)
+    ts = (ts - START_TIME) % WEEK
     for epoch in [Epoch.SLEEP, Epoch.COLLECT, Epoch.EXCHANGE, Epoch.FORWARD]:
         if ts < EPOCH_TIMESTAMPS[2 * convert(epoch, uint256)]:
             return epoch
@@ -201,7 +204,7 @@ def _epoch_time_frame(epoch: Epoch, ts: uint256) -> (uint256, uint256):
     subset: uint256 = convert(epoch, uint256)
     assert subset & (subset - 1) == 0, "Bad Epoch"
 
-    ts = ts - (ts - START_TIME) % (7 * 24 * 3600)
+    ts = ts - (ts - START_TIME) % WEEK
     return (ts + EPOCH_TIMESTAMPS[convert(epoch, uint256)], ts + EPOCH_TIMESTAMPS[2 * convert(epoch, uint256)])
 
 
@@ -313,12 +316,21 @@ def forward(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN], _receiver: address=
 
     self.burner.push_target()
     amount: uint256 = target.balanceOf(self)
-    fee: uint256 = self._fee(Epoch.FORWARD, block.timestamp) * amount / ONE
 
+    # Account buffer
     hooker: Hooker = self.hooker
     hooker_buffer: uint256 = hooker.buffer_amount()
-    target.transfer(hooker.address, amount - hooker_buffer - fee)
-    fee += hooker.act(_hook_inputs, _receiver, True, value=msg.value)
+    amount -= min(hooker_buffer, amount)
+
+    fee: uint256 = self._fee(Epoch.FORWARD, block.timestamp) * amount / ONE
+
+    target.transfer(hooker.address, amount - fee)
+    act_fee: uint256 = hooker.act(_hook_inputs, _receiver, True, value=msg.value)
+    if self.last_hooker_approve < (block.timestamp - START_TIME) / WEEK:
+        target.approve(hooker.address, hooker_buffer - min(act_fee, hooker_buffer))
+        self.last_hooker_approve = (block.timestamp - START_TIME) / WEEK
+
+    fee += act_fee
     target.transfer(_receiver, fee)
     return fee
 

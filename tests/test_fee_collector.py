@@ -1,12 +1,14 @@
 import boa
 import pytest
 
-from .conftest import Epoch, ETH_ADDRESS, ZERO_ADDRESS
+from .conftest import Epoch, ETH_ADDRESS, ZERO_ADDRESS, WEEK
 
 
 @pytest.fixture(scope="module", autouse=True)
-def preset(burner, hooker, multicall):
-    pass
+def preset(burner, hooker, multicall, admin):
+    # Increase hooker.buffer_amount
+    with boa.env.prank(admin):
+        hooker.set_hooks([(ZERO_ADDRESS, b"", (10 ** 9, 0, 0, 0, False), False)])
 
 
 def test_burn(fee_collector, arve, weth):
@@ -112,9 +114,25 @@ def test_forward(fee_collector, set_epoch, target, arve, burle, hooker):
     with boa.env.prank(arve):
         fee_collector.forward([], burle)
     assert target.balanceOf(arve) == 0
-    assert target.balanceOf(fee_collector) == 0
-    assert 0 < target.balanceOf(burle) <= 10 ** target.decimals() * fee_collector.max_fee(Epoch.FORWARD) // 10 ** 18
-    assert target.balanceOf(burle) + target.balanceOf(hooker) == 10 ** target.decimals()
+    assert target.balanceOf(fee_collector) == hooker.buffer_amount()
+    received_amount = 10 ** target.decimals() - hooker.buffer_amount()
+    assert 0 < target.balanceOf(burle) <= received_amount * fee_collector.max_fee(Epoch.FORWARD) // 10 ** 18
+    assert target.balanceOf(burle) + target.balanceOf(hooker) == received_amount
+    assert target.allowance(fee_collector, hooker) == hooker.buffer_amount()
+
+    with boa.env.prank(hooker.address):
+        target.transferFrom(fee_collector, burle, hooker.buffer_amount() // 2)
+    # Does not allow more within a week
+    boa.env.time_travel(seconds=3600)
+    with boa.env.prank(arve):
+        fee_collector.forward([], burle)
+    assert target.allowance(fee_collector, hooker) == hooker.buffer_amount() // 2
+
+    # Allows more next week
+    boa.env.time_travel(seconds=WEEK - 3600)
+    with boa.env.prank(arve):
+        fee_collector.forward([], burle)
+    assert target.allowance(fee_collector, hooker) == hooker.buffer_amount()
 
 
 def test_admin(fee_collector, admin, arve, burner, hooker):
