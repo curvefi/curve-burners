@@ -1,4 +1,4 @@
-# @version 0.3.10
+# pragma version 0.3.10
 """
 @title Hooker
 @notice Support hooks
@@ -23,7 +23,7 @@ struct CompensationStrategy:
 
 struct Hook:
     to: address
-    foreplay: Bytes[8192]  # including method_id
+    foreplay: Bytes[1024]  # including method_id
     compensation_strategy: CompensationStrategy
     mandatory: bool  # Hooks mandatory to act after fee_collector transfer
 

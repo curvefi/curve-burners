@@ -1,8 +1,10 @@
-# @version 0.3.10
+# pragma version 0.3.10
 """
 @title FeeCollector
 @notice Collects fees and delegates to burner for exchange
 """
+# pragma evm-version cancun
+# cancun is used for transient storage, look over `ALTER`
 
 
 interface ERC20:
@@ -103,8 +105,7 @@ burner: public(Burner)
 hooker: public(Hooker)
 multicall: public(Multicall)
 
-# pragma evm-version cancun
-current_collect: public(transient(CollectSave))  # Use storage is cancun is not supported
+current_collect: public(transient(CollectSave))  # ALTER: use storage if cancun is not supported
 last_hooker_approve: uint256
 
 is_killed: public(HashMap[ERC20, Epoch])
@@ -263,11 +264,14 @@ def _collect_allowed():
 
 @internal
 @view
-def _collect_prepare(_coins: DynArray[ERC20, MAX_LEN]) -> DynArray[uint256, MAX_LEN]:
+def _collect_prepare(coins: DynArray[ERC20, MAX_LEN]) -> DynArray[uint256, MAX_LEN]:
     balances: DynArray[uint256, MAX_LEN] = []
-    for coin in _coins:
-        assert not self.is_killed[coin] in Epoch.COLLECT
-        balances.append(coin.balanceOf(self))
+    for i in range(len(coins), bound=MAX_LEN):
+        assert not self.is_killed[coins[i]] in Epoch.COLLECT
+        balances.append(coins[i].balanceOf(self))
+        # Eliminate case of repeated coins
+        if i > 0:
+            assert convert(coins[i].address, uint160) > convert(coins[i - 1].address, uint160), "Coins not sorted"
     return balances
 
 
@@ -281,10 +285,6 @@ def _collect_finalize(coins: DynArray[ERC20, MAX_LEN], balances: DynArray[uint25
         coins[i].transfer(receiver, balances[i])
         coins[i].transfer(burner.address, coins[i].balanceOf(self))
         log Collected(coins[i].address, msg.sender, collected_amount, balances[i])
-
-        # Eliminate case of repeated coins
-        if i > 0:
-            assert convert(coins[i].address, uint160) > convert(coins[i - 1].address, uint160), "Coins not sorted"
 
     burner.burn(coins, receiver)
     self.current_collect = empty(CollectSave)
