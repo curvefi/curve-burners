@@ -135,18 +135,11 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
     ALL_COINS = ERC20(empty(address))
 
     timestamps: uint256[17] = empty(uint256[17])
-    if False:  # testing exchange
-        # timestamps[1] = 0
-        timestamps[2] = 100
-        timestamps[4] = 200
-        timestamps[8] = WEEK - 100
-        timestamps[16] = WEEK
-    else:
-        # timestamps[1] = 0
-        timestamps[2] = 4 * 24 * 3600
-        timestamps[4] = 5 * 24 * 3600
-        timestamps[8] = 6 * 24 * 3600
-        timestamps[16] = WEEK  # next period
+    # timestamps[1] = 0
+    timestamps[2] = 4 * 24 * 3600
+    timestamps[4] = 5 * 24 * 3600
+    timestamps[8] = 6 * 24 * 3600
+    timestamps[16] = WEEK  # next period
     EPOCH_TIMESTAMPS = timestamps
 
     self.is_killed[empty(ERC20)] = Epoch.COLLECT | Epoch.FORWARD  # Set burner first
