@@ -79,7 +79,7 @@ def set_epoch(fee_collector) -> Callable[[Epoch], None]:
 
     def inner(epoch: Epoch):
         ts = sum(fee_collector.epoch_time_frame(epoch)) // 2  # middle of the period for the fee
-        diff = ts - boa.env.vm.state.timestamp
+        diff = ts - boa.env.evm.vm.state.timestamp
         boa.env.time_travel(seconds=diff + WEEK * (diff // WEEK))
     return inner
 
@@ -104,6 +104,7 @@ def hooker(admin, fee_collector):
 @pytest.fixture(scope="module")
 def multicall(admin, fee_collector):
     with boa.env.prank(admin):
-        multicall = boa_solidity.load_partial_solc("contracts/testing/Multicall3.sol").deploy()
+        multicall = boa_solidity.load_partial_solc("contracts/testing/Multicall3.sol",
+                                                   compiler_args={"solc_version": "0.8.12"}).deploy()
         fee_collector.set_multicall(multicall)
     return multicall

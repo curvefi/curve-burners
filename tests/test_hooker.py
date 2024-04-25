@@ -227,7 +227,7 @@ def test_act(hooker, hook_inputs, fee_collector, target, bridger, arve, burle):
 
         # compensation double spend
         with boa.env.anchor():
-            ts_delta = WEEK - (boa.env.vm.state.timestamp - START_TIME) % WEEK
+            ts_delta = WEEK - (boa.env.evm.vm.state.timestamp - START_TIME) % WEEK
             boa.env.time_travel(seconds=ts_delta + 1000)
             gained = hooker.act(hook_inputs(1, 2, 3))
             assert gained == 2 * 10 ** 9

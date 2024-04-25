@@ -106,7 +106,7 @@ def test_collect_separate(fee_collector, set_epoch, coins, arve, burle, burner):
     current_collect = fee_collector.current_collect()
     assert current_collect[0] == [coin.address for coin in coins]
     assert current_collect[1] == [coin.balanceOf(fee_collector) for coin in coins]
-    assert current_collect[2] == boa.env.vm.state.timestamp
+    assert current_collect[2] == boa.env.evm.vm.state.timestamp
 
     for coin in coins:
         coin._mint_for_testing(fee_collector, 10 ** coin.decimals())

@@ -71,7 +71,7 @@ def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoc
         return bytes(boa.eval(f'_abi_encode(convert({ts}, uint256), "{msg}",'
                               f'method_id=method_id("PollTryAtEpoch(uint256,string)"))'))
 
-    next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.vm.state.timestamp + 7 * 24 * 3600)[0]
+    next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.evm.vm.state.timestamp + 7 * 24 * 3600)[0]
     with pytest.raises(BoaError) as error:
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
     assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "ZeroBalance")
@@ -103,7 +103,7 @@ def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoc
     assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "NotAllowed")
 
     set_epoch(Epoch.EXCHANGE)
-    next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.vm.state.timestamp + 7 * 24 * 3600)[0]
+    next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.evm.vm.state.timestamp + 7 * 24 * 3600)[0]
     with boa.env.prank(admin):
         fee_collector.set_killed([(weth.address, Epoch.EXCHANGE)])
     with pytest.raises(BoaError) as error:  # killed
