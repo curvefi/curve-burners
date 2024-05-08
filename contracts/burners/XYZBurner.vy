@@ -64,7 +64,7 @@ def burn(_coins: DynArray[ERC20, MAX_LEN], _receiver: address):
     @notice Post hook after collect to register coins for burn
     @dev Pays out fee and saves coins on fee_collector.
     @param _coins Which coins to burn
-    @param _receiver Receiver of profit. Might be needed for multiple transactions actions
+    @param _receiver Receiver of profit
     """
     assert msg.sender == fee_collector.address, "Only FeeCollector"
 

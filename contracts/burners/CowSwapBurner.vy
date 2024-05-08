@@ -135,7 +135,7 @@ def burn(_coins: DynArray[ERC20, MAX_COINS_LEN], _receiver: address):
     @notice Post hook after collect to register coins for burn
     @dev Registers new orders in ComposableCow
     @param _coins Which coins to burn
-    @param _receiver Receiver of profit. Might be needed for multiple transactions actions, here is ignored
+    @param _receiver Receiver of profit
     """
     assert msg.sender == fee_collector.address, "Only FeeCollector"
 
