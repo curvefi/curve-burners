@@ -49,7 +49,7 @@ enum Epoch:
 struct Transfer:
     coin: ERC20
     to: address
-    amount: uint256
+    amount: uint256  # 2^256-1 for the whole balance
 
 
 struct HookInput:
