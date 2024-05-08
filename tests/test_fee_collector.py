@@ -107,22 +107,43 @@ def test_forward(fee_collector, set_epoch, target, arve, burle, hooker):
     assert target.allowance(fee_collector, hooker) == hooker.buffer_amount()
 
 
-def test_admin(fee_collector, admin, arve, burner, hooker, target):
+def test_admin(fee_collector, admin, emergency_admin, arve, burner, hooker, target):
     killed = [(arve, Epoch.COLLECT)]
 
-    # Everything works for admin
+    # Both admins
     with boa.env.anchor():
         with boa.env.prank(admin):
             fee_collector.recover([], arve)
+            fee_collector.set_killed(killed)
+    with boa.env.anchor():
+        with boa.env.prank(emergency_admin):
+            fee_collector.recover([], arve)
+            fee_collector.set_killed(killed)
+
+    # Only ownership admin
+    with boa.env.anchor():
+        with boa.env.prank(admin):
             fee_collector.set_max_fee(2, 5 * 10 ** (18 - 2))
             fee_collector.set_burner(burner)
             fee_collector.set_hooker(hooker)
             fee_collector.set_target(target)
-            fee_collector.set_killed(killed)
             fee_collector.set_emergency_owner(arve)
             fee_collector.set_owner(arve)
+    with boa.env.prank(emergency_admin):
+        with boa.reverts("Only owner"):
+            fee_collector.set_max_fee(2, 5 * 10 ** (18 - 2))
+        with boa.reverts("Only owner"):
+            fee_collector.set_burner(burner)
+        with boa.reverts("Only owner"):
+            fee_collector.set_hooker(hooker)
+        with boa.reverts("Only owner"):
+            fee_collector.set_target(target)
+        with boa.reverts("Only owner"):
+            fee_collector.set_emergency_owner(arve)
+        with boa.reverts("Only owner"):
+            fee_collector.set_owner(arve)
 
-    # Third party can not access
+    # Third wheel
     with boa.env.prank(arve):
         with boa.reverts("Only owner"):
             fee_collector.recover([], arve)
@@ -140,23 +161,6 @@ def test_admin(fee_collector, admin, arve, burner, hooker, target):
             fee_collector.set_emergency_owner(arve)
         with boa.reverts("Only owner"):
             fee_collector.set_owner(arve)
-
-
-def test_emergency_admin(fee_collector, emergency_admin, arve):
-    killed = [(arve, Epoch.COLLECT)]
-
-    # Everything works for emergency owner
-    with boa.env.anchor():
-        with boa.env.prank(emergency_admin):
-            fee_collector.recover([], arve)
-            fee_collector.set_killed(killed)
-
-    # Third part can not access
-    with boa.env.prank(arve):
-        with boa.reverts("Only owner"):
-            fee_collector.recover([], arve)
-        with boa.reverts("Only owner"):
-            fee_collector.set_killed(killed)
 
 
 @pytest.mark.parametrize("to_kill", [

@@ -265,34 +265,34 @@ def test_one_time_hook(hooker, admin, hooks, burle):
         assert boa.env.get_balance(burle) == 10 ** 5
 
 
-def test_admin(hooker, admin, arve):
-    # Everything works for admin
+def test_admin(hooker, admin, emergency_admin, arve):
+    # Both admins
     with boa.env.anchor():
         with boa.env.prank(admin):
             hooker.recover([])
-            hooker.set_hooks([])
-            hooker.one_time_hooks([], [])
-
-    # Third part can not access
-    with boa.env.prank(arve):
-        with boa.reverts("Only owner"):
-            hooker.recover([])
-        with boa.reverts("Only owner"):
-            hooker.set_hooks([])
-        with boa.reverts("Only owner"):
-            hooker.one_time_hooks([], [])
-
-
-def test_emergency_admin(hooker, emergency_admin, arve):
-    # Everything works for admin
     with boa.env.anchor():
         with boa.env.prank(emergency_admin):
             hooker.recover([])
 
-    # Third part can not access
+    # Only ownership admin
+    with boa.env.anchor():
+        with boa.env.prank(admin):
+            hooker.set_hooks([])
+            hooker.one_time_hooks([], [])
+    with boa.env.prank(emergency_admin):
+        with boa.reverts("Only owner"):
+            hooker.set_hooks([])
+        with boa.reverts("Only owner"):
+            hooker.one_time_hooks([], [])
+
+    # Third wheel
     with boa.env.prank(arve):
         with boa.reverts("Only owner"):
             hooker.recover([])
+        with boa.reverts("Only owner"):
+            hooker.set_hooks([])
+        with boa.reverts("Only owner"):
+            hooker.one_time_hooks([], [])
 
 
 def test_erc165(hooker):
