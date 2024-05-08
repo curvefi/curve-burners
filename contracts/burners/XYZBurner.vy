@@ -1,7 +1,8 @@
 # @version 0.3.10
 """
 @title XYZBurner
-@notice Template of a Burner
+@notice Template of a Burner.
+Designed to be a working version without actually burning, so can be deployed and used to collect fees.
 """
 
 
@@ -13,11 +14,25 @@ interface ERC20:
 
 
 interface FeeCollector:
+    def fee(_epoch: Epoch=empty(Epoch), _ts: uint256=block.timestamp) -> uint256: view
     def target() -> ERC20: view
     def owner() -> address: view
     def emergency_owner() -> address: view
+    def transfer(_transfers: DynArray[Transfer, MAX_LEN]): nonpayable
+
+struct Transfer:
+    coin: ERC20
+    to: address
+    amount: uint256
+
+enum Epoch:
+    SLEEP  # 1
+    COLLECT  # 2
+    EXCHANGE  # 4
+    FORWARD  # 8
 
 ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
+ONE: constant(uint256) = 10 ** 18  # Precision
 MAX_LEN: constant(uint256) = 64
 SUPPORTED_INTERFACES: constant(bytes4[2]) = [
     # ERC165: method_id("supportsInterface(bytes4)") == 0x01ffc9a7
@@ -29,6 +44,7 @@ SUPPORTED_INTERFACES: constant(bytes4[2]) = [
     0xa3b5e311,
 ]
 VERSION: public(constant(String[20])) = "XYZ"
+balances: HashMap[ERC20, uint256]
 
 fee_collector: public(immutable(FeeCollector))
 
@@ -46,10 +62,21 @@ def __init__(_fee_collector: FeeCollector):
 def burn(_coins: DynArray[ERC20, MAX_LEN], _receiver: address):
     """
     @notice Post hook after collect to register coins for burn
+    @dev Pays out fee and saves coins on fee_collector.
     @param _coins Which coins to burn
     @param _receiver Receiver of profit. Might be needed for multiple transactions actions
     """
-    pass
+    assert msg.sender == fee_collector.address, "Only FeeCollector"
+
+    fee: uint256 = fee_collector.fee(Epoch.COLLECT)
+    fee_payouts: DynArray[Transfer, MAX_LEN] = []
+    for coin in _coins:
+        amount: uint256 = (coin.balanceOf(fee_collector.address) - self.balances[coin]) * fee / ONE
+        fee_payouts.append(Transfer({coin: coin, to: _receiver, amount: amount}))
+    fee_collector.transfer(fee_payouts)
+
+    for coin in _coins:
+        self.balances[coin] = coin.balanceOf(fee_collector.address)
 
 
 

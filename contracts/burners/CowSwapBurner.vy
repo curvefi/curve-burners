@@ -14,6 +14,11 @@ interface ERC20:
 ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 
 
+struct Transfer:
+    coin: ERC20
+    to: address
+    amount: uint256
+
 enum Epoch:
     SLEEP  # 1
     COLLECT  # 2
@@ -21,13 +26,16 @@ enum Epoch:
     FORWARD  # 8
 
 interface FeeCollector:
+    def fee(_epoch: Epoch=empty(Epoch), _ts: uint256=block.timestamp) -> uint256: view
     def target() -> ERC20: view
     def owner() -> address: view
     def emergency_owner() -> address: view
     def epoch_time_frame(epoch: Epoch, ts: uint256=block.timestamp) -> (uint256, uint256): view
     def exchange(_coins: DynArray[ERC20, MAX_COINS_LEN]) -> bool: view
+    def transfer(_transfers: DynArray[Transfer, MAX_COINS_LEN]): nonpayable
 
 MAX_COINS_LEN: constant(uint256) = 64
+ONE: constant(uint256) = 10 ** 18  # Precision
 fee_collector: public(immutable(FeeCollector))
 
 
@@ -129,6 +137,11 @@ def burn(_coins: DynArray[ERC20, MAX_COINS_LEN], _receiver: address):
     @param _coins Which coins to burn
     @param _receiver Receiver of profit. Might be needed for multiple transactions actions, here is ignored
     """
+    assert msg.sender == fee_collector.address, "Only FeeCollector"
+
+    fee: uint256 = fee_collector.fee(Epoch.COLLECT)
+    fee_payouts: DynArray[Transfer, MAX_COINS_LEN] = []
+    self_transfers: DynArray[Transfer, MAX_COINS_LEN] = []
     for coin in _coins:
         if not self.created[coin]:
             composable_cow.create(ConditionalOrderParams({
@@ -138,6 +151,12 @@ def burn(_coins: DynArray[ERC20, MAX_COINS_LEN], _receiver: address):
             }), True)
             coin.approve(vault_relayer, max_value(uint256))
             self.created[coin] = True
+        amount: uint256 = coin.balanceOf(fee_collector.address) * fee / ONE
+        fee_payouts.append(Transfer({coin: coin, to: _receiver, amount: amount}))
+        self_transfers.append(Transfer({coin: coin, to: self, amount: max_value(uint256)}))
+
+    fee_collector.transfer(fee_payouts)
+    fee_collector.transfer(self_transfers)
 
 
 @view
@@ -249,17 +268,6 @@ def isValidSignature(_hash: bytes32, signature: Bytes[1792]) -> bytes4:
     order: GPv2Order_Data = empty(GPv2Order_Data)
     payload: PayloadStruct = empty(PayloadStruct)
     order, payload = _abi_decode(signature, (GPv2Order_Data, PayloadStruct))
-
-#    domain_separator: bytes32 = composable_cow.domainSeparator()
-#    hash: bytes32 = keccak256(
-#        concat(b"\x19\x01", domain_separator, keccak256(
-#            concat(b"d5a25ba2e97094ad7d83dc28a6572da797d6b3e7fc6663bd93efb789fc17e489",
-#                _abi_encode(order),
-#            )
-#        ))
-#    )
-#    if hash != _hash:
-#        raise "InvalidHash()"
 
     return composable_cow.isValidSafeSignature(self, msg.sender, _hash, composable_cow.domainSeparator(), empty(bytes32),
         _abi_encode(order),

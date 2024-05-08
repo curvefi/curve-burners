@@ -21,7 +21,7 @@ but also handles hooks for xDAO using [`Hooker`](contracts/Hooker.vy) paying som
 Install:
 ```bash
 python3 -m virtualenv venv/ && source venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.in
 ```
 
 Run:
