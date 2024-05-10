@@ -1,8 +1,10 @@
 # @version 0.3.10
 """
 @title XYZBurner
-@notice Template of a Burner.
-Designed to be a working version without actually burning, so can be deployed and used to collect fees.
+@license MIT
+@author Curve Finance
+@notice Template of a Burner. Designed to be a working version without actually burning,
+        so can be deployed and used to collect fees.
 """
 
 

@@ -1,6 +1,8 @@
 # pragma version 0.3.10
 """
 @title FeeCollector
+@license MIT
+@author Curve Finance
 @notice Collects fees and delegates to burner for exchange
 """
 

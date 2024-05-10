@@ -15,7 +15,7 @@ which delegates price discovery and settlement to CowSwap auction.
 
 Final phase is `Forward` which is applied to resulting crvUSD.
 Mainly it bridges to Ethereum or FeeDistributor,
-but also handles hooks for xDAO using [`Hooker`](contracts/Hooker.vy) paying some fee to keeper.
+but also handles hooks for xDAO using [`Hooker`](contracts/hooks/Hooker.vy) paying some fee to keeper.
 
 ## Tests
 Install:

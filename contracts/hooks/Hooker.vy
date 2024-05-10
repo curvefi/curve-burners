@@ -1,6 +1,8 @@
 # pragma version 0.3.10
 """
 @title Hooker
+@license MIT
+@author Curve Finance
 @notice Support hooks
 """
 
