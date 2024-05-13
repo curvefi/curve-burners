@@ -95,6 +95,6 @@ def burner(admin, fee_collector):
 @pytest.fixture(scope="module")
 def hooker(admin, fee_collector):
     with boa.env.prank(admin):
-        hooker = boa.load("contracts/Hooker.vy", fee_collector)
+        hooker = boa.load("contracts/hooks/Hooker.vy", fee_collector, [], [], [])
         fee_collector.set_hooker(hooker)
     return hooker

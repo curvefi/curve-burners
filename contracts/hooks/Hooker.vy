@@ -59,12 +59,20 @@ buffer_amount: public(uint256)
 
 
 @external
-def __init__(_fee_collector: FeeCollector):
+def __init__(_fee_collector: FeeCollector,
+             _initial_oth: DynArray[Hook, MAX_HOOKS_LEN], _initial_oth_inputs: DynArray[HookInput, MAX_HOOKS_LEN],
+             _initial_hooks: DynArray[Hook, MAX_HOOKS_LEN]):
     """
     @notice Contract constructor
     @param _fee_collector Hooker is _hooked_ to fee_collector contract with no update possibility
+    @param _initial_oth One time hooks at initialization
+    @param _initial_oth_inputs One time hooks input at initialization
+    @param _initial_hooks Hooks to set at initialization
     """
     fee_collector = _fee_collector
+
+    self._one_time_hooks(_initial_oth, _initial_oth_inputs)
+    self._set_hooks(_initial_hooks)
 
 
 @internal
@@ -175,6 +183,12 @@ def act(_hook_inputs: DynArray[HookInput, MAX_HOOKS_LEN],
     return compensation
 
 
+@internal
+def _one_time_hooks(hooks: DynArray[Hook, MAX_HOOKS_LEN], inputs: DynArray[HookInput, MAX_HOOKS_LEN]):
+    for i in range(len(hooks), bound=MAX_HOOKS_LEN):
+        self._shot(hooks[i], inputs[i])
+
+
 @external
 @payable
 def one_time_hooks(_hooks: DynArray[Hook, MAX_HOOKS_LEN], _inputs: DynArray[HookInput, MAX_HOOKS_LEN]):
@@ -186,8 +200,24 @@ def one_time_hooks(_hooks: DynArray[Hook, MAX_HOOKS_LEN], _inputs: DynArray[Hook
     """
     assert msg.sender == fee_collector.owner(), "Only owner"
 
-    for i in range(len(_hooks), bound=MAX_HOOKS_LEN):
-        self._shot(_hooks[i], _inputs[i])
+    self._one_time_hooks(_hooks, _inputs)
+
+
+@internal
+def _set_hooks(new_hooks: DynArray[Hook, MAX_HOOKS_LEN]):
+    self.hooks = new_hooks
+
+    buffer_amount: uint256 = 0
+    mask: uint256 = 0
+    for i in range(len(new_hooks), bound=MAX_HOOKS_LEN):
+        assert new_hooks[i].compensation_strategy.start < WEEK
+        assert new_hooks[i].compensation_strategy.end < WEEK
+
+        buffer_amount += new_hooks[i].compensation_strategy.amount
+        if new_hooks[i].mandatory:
+            mask ^= 1 << i
+    self.buffer_amount = buffer_amount
+    self.mandatory_hook_mask = mask
 
 
 @external
@@ -195,22 +225,11 @@ def set_hooks(_new_hooks: DynArray[Hook, MAX_HOOKS_LEN]):
     """
     @notice Set new hooks
     @dev Callable only by owner
+    @param _new_hooks New list of hooks
     """
     assert msg.sender == fee_collector.owner(), "Only owner"
 
-    self.hooks = _new_hooks
-
-    buffer_amount: uint256 = 0
-    mask: uint256 = 0
-    for i in range(len(_new_hooks), bound=MAX_HOOKS_LEN):
-        assert _new_hooks[i].compensation_strategy.start < WEEK
-        assert _new_hooks[i].compensation_strategy.end < WEEK
-
-        buffer_amount += _new_hooks[i].compensation_strategy.amount
-        if _new_hooks[i].mandatory:
-            mask ^= 1 << i
-    self.buffer_amount = buffer_amount
-    self.mandatory_hook_mask = mask
+    self._set_hooks(_new_hooks)
 
 
 @pure
