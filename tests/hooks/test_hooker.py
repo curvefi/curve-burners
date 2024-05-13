@@ -2,7 +2,7 @@ import boa
 import pytest
 
 from boa.util.abi import abi_encode
-from .conftest import ETH_ADDRESS, ZERO_ADDRESS, WEEK
+from tests.conftest import ETH_ADDRESS, ZERO_ADDRESS, WEEK
 
 
 START_TIME = 1600300800
