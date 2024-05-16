@@ -50,11 +50,15 @@ def test_price(burner, fee_collector, coins):
             burner.price(coin, end)
 
 
-@pytest.fixture(scope="module")
-def mock_fee_collector(fee_collector):
+@pytest.fixture(scope="class")
+def mock_fee_collector(fee_collector, admin):
     return boa.loads("""
 start: uint256
 end: uint256
+owner: public(address)
+@external
+def __init__(_owner: address):
+    self.owner = _owner
 @external
 def set(start: uint256, end: uint256):
     self.start = start
@@ -64,24 +68,26 @@ def set(start: uint256, end: uint256):
 def epoch_time_frame(_epoch: uint256, _ts: uint256=block.timestamp) -> (uint256, uint256):
     return (self.start, self.end)
 """,
+                     admin,
                      override_address=fee_collector.address,
                      )
 
 
-# @given(
-#     lasted=st.integers(min_value=0, max_value=365 * 24 * 3600),
-#     remaining=st.integers(min_value=1, max_value=365 * 24 * 3600),
-#     base=st.integers(min_value=10 ** 18 + 1, max_value=1000_000 * 10 ** 18),
-# )
-# @settings(max_examples=10, deadline=None)
-# def test_time_amplifier(burner, mock_fee_collector, remaining, lasted, base):
-#     whole_period = lasted + remaining
-#     mock_fee_collector.set(0, whole_period)
-#
-#     burner.eval(f"self.base = {base}")
-#     burner.eval(f"self.ln_base = {int(math.log(base / 10 ** 18) * 10 ** 18)}")
-#     assert burner.eval(f"self._time_amplifier({lasted})") / 10 ** 18 ==\
-#            pytest.approx((base ** (remaining / whole_period) - 1) / (base - 1))
+@given(
+    lasted=st.integers(min_value=0, max_value=365 * 24 * 3600),
+    remaining=st.integers(min_value=1, max_value=365 * 24 * 3600),
+    base=st.integers(min_value=10 ** 18 + 10 ** 15, max_value=1_000_000 * 10 ** 18),
+)
+@settings(deadline=None)
+def test_time_amplifier(burner, mock_fee_collector, admin, lasted, remaining, base):
+    whole_period = lasted + remaining
+    mock_fee_collector.set(0, whole_period)
+
+    with boa.env.prank(admin):
+        burner.set_time_amplifier_base(base, int(math.log(base / 10 ** 18) * 10 ** 18))
+
+    assert burner.internal._time_amplifier(lasted) / 10 ** 18 ==\
+           pytest.approx(((base / 10 ** 18) ** (remaining / whole_period) - 1) / ((base / 10 ** 18) - 1))
 
 
 def test_exchange(burner, fee_collector, coins, target, set_epoch, arve, burle):
