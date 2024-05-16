@@ -21,8 +21,9 @@ def burner(admin, fee_collector):
 
 @pytest.fixture(scope="module", autouse=True)
 def multicall():
-    return boa_solidity.load_partial_solc("contracts/testing/Multicall3.sol", compiler_args={"solc_version": "0.8.12"}
-                                          ).at("0xcA11bde05977b3631167028862bE2a173976CA11")
+    deployer = boa_solidity.load_partial_solc("contracts/testing/Multicall3.sol", compiler_args={"solc_version": "0.8.12"})
+    boa.env.deploy_code(bytecode=deployer.bytecode, override_address="0xcA11bde05977b3631167028862bE2a173976CA11")
+    return deployer.at("0xcA11bde05977b3631167028862bE2a173976CA11")
 
 
 def test_version(burner):

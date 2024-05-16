@@ -351,7 +351,7 @@ def exchange(_transfers: DynArray[Transfer, MAX_LEN], _calls: DynArray[Call3Valu
         self.balances[transfer.coin] = new_balance
         log Exchanged(transfer.coin, msg.sender, amount, target_amount)
 
-    results: DynArray[MulticallResult, MAX_CALL_LEN] = []  # multicall.aggregate3Value(_calls, value=msg.value)
+    results: DynArray[MulticallResult, MAX_CALL_LEN] = multicall.aggregate3Value(_calls, value=msg.value)
 
     target: ERC20 = fee_collector.target()
     target_balance: uint256 = target.balanceOf(self)
