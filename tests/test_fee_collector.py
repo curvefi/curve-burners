@@ -107,6 +107,14 @@ def test_forward(fee_collector, set_epoch, target, arve, burle, hooker):
     assert target.allowance(fee_collector, hooker) == hooker.buffer_amount()
 
 
+def test_set_hooker_approval(fee_collector, admin, hooker, target, arve):
+    with boa.env.prank(fee_collector.address):
+        target.approve(hooker, 10 ** target.decimals())
+    with boa.env.prank(admin):
+        fee_collector.set_hooker(hooker)
+    assert target.allowance(fee_collector, hooker) == 0
+
+
 def test_admin(fee_collector, admin, emergency_admin, arve, burner, hooker, target):
     killed = [(arve, Epoch.COLLECT)]
 

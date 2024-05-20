@@ -374,6 +374,8 @@ def set_hooker(_new_hooker: Hooker):
     """
     assert msg.sender == self.owner, "Only owner"
     assert _new_hooker.supportsInterface(HOOKER_INTERFACE_ID)
+
+    self.target.approve(self.hooker.address, 0)
     self.hooker = _new_hooker
 
 
