@@ -90,7 +90,7 @@ token_balance: immutable(bytes32)
 # method_id("domainVerifiers(address,bytes32)") == "0x51cad5ee"
 # method_id("setDomainVerifier(bytes32,address)") == "0x3365582c"
 SIGNATURE_VERIFIER_MUXER_INTERFACE: constant(bytes4) = 0x62af8dc2
-ERC1271_MAGIC_VALUE: constant(bytes4) = 0x5fd7e97d
+ERC1271_MAGIC_VALUE: constant(bytes4) = 0x1626ba7e
 SUPPORTED_INTERFACES: constant(bytes4[4]) = [
     # ERC165: method_id("supportsInterface(bytes4)") == 0x01ffc9a7
     0x01ffc9a7,
@@ -103,7 +103,7 @@ SUPPORTED_INTERFACES: constant(bytes4[4]) = [
     #   method_id("getTradeableOrder(address,address,bytes32,bytes,bytes)") == 0xb8296fc4
     0xb8296fc4,
     # ERC1271 interface:
-    #   method_id("isValidSignature(bytes32,bytes)") == 0x5fd7e97d
+    #   method_id("isValidSignature(bytes32,bytes)") == 0x1626ba7e
     ERC1271_MAGIC_VALUE,
 ]
 VERSION: public(constant(String[20])) = "CowSwap"
