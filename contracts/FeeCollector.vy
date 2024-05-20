@@ -80,7 +80,13 @@ ONE: constant(uint256) = 10 ** 18  # Precision
 
 START_TIME: constant(uint256) = 1600300800  # ts of distribution start
 WEEK: constant(uint256) = 7 * 24 * 3600
-EPOCH_TIMESTAMPS: immutable(uint256[17])
+EPOCH_TIMESTAMPS: constant(uint256[17]) = [
+    0, 0,  # 1
+    4 * 24 * 3600,  # 2
+    0, 5 * 24 * 3600,   # 4
+    0, 0, 0, 6 * 24 * 3600,  # 8
+    0, 0, 0, 0, 0, 0, 0, WEEK,  # 16, next period
+]
 
 target: public(ERC20)  # coin swapped into
 max_fee: public(uint256[9])  # max_fee[Epoch]
@@ -116,14 +122,6 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
     self.max_fee[convert(Epoch.FORWARD, uint256)] = ONE / 100  # 1%
 
     ALL_COINS = ERC20(empty(address))
-
-    timestamps: uint256[17] = empty(uint256[17])
-    # timestamps[1] = 0
-    timestamps[2] = 4 * 24 * 3600
-    timestamps[4] = 5 * 24 * 3600
-    timestamps[8] = 6 * 24 * 3600
-    timestamps[16] = WEEK  # next period
-    EPOCH_TIMESTAMPS = timestamps
 
     self.is_killed[empty(ERC20)] = Epoch.COLLECT | Epoch.FORWARD  # Set burner first
     self.is_killed[_target_coin] = Epoch.COLLECT | Epoch.EXCHANGE  # Keep target coin in contract
