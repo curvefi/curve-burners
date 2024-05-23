@@ -2,8 +2,7 @@ import boa
 import pytest
 
 from boa.util.abi import abi_encode
-from tests.conftest import ETH_ADDRESS, ZERO_ADDRESS, WEEK
-
+from tests.conftest import ETH_ADDRESS, ZERO_ADDRESS, WEEK, Epoch
 
 START_TIME = 1600300800
 
@@ -60,7 +59,11 @@ def hooks(bridger, target):
     #   foreplay: Bytes[8192],  # including method_id
     #   (  # CompensationStrategy
     #       amount: uint256,  # In case of Dutch auction max amount
-    #       last_payout_ts: uint256,
+    #       cooldown: (  # CompensationCooldown
+    #           last_ts: uint64,
+    #           used: uint64,
+    #           limit: uint64,
+    #       ),
     #       start: uint256,
     #       end: uint256,
     #       dutch: bool,
@@ -70,39 +73,43 @@ def hooks(bridger, target):
     return [
         (  # Mandatory
             bridger.address, bridger.bridge.prepare_calldata(target, ZERO_ADDRESS)[:-32],  # omit _receiver
-            (0, 0, 0, 0, False), True,
+            (0, (0, 0, 0), 0, 0, False), True,
         ),
         (  # Optional
             ZERO_ADDRESS, b"",
-            (10 ** 9, 0, 0, 0, False), False,
+            (10 ** 9, (0, 0, 1), 0, 0, False), False,
         ),
         (  # Time frame
             bridger.address, bridger.block_hash_apply.prepare_calldata(b"")[:4],  # only method_id
-            (10 ** 9, 0, 1000, 2000, False), False,
+            (10 ** 9, (0, 0, 1), 1000, 2000, False), False,
         ),
         (  # Overlap time frame
             ZERO_ADDRESS, b"",
-            (10 ** 9, 0, 2000, 1000, False), False,
+            (10 ** 9, (0, 0, 1), 2000, 1000, False), False,
         ),
         (  # Dutch
             ZERO_ADDRESS, b"",
-            (10 ** 18, 0, 0, 0, True), False,
+            (10 ** 18, (0, 0, 1), 0, 0, True), False,
         ),
         (  # Dutch with time frame
             bridger.address, bridger.distribute.prepare_calldata(),
-            (10 ** 18, 0, 2000, 3000, True), False,
+            (10 ** 18, (0, 0, 1), 2000, 3000, True), False,
         ),
         (  # Dutch with overlap time
             ZERO_ADDRESS, b"",
-            (10 ** 18, 0, 3000, 2000, True), False,
+            (10 ** 18, (0, 0, 1), 3000, 2000, True), False,
         ),
         (  # Some time in future
             ZERO_ADDRESS, b"",
-            (10 ** 3, START_TIME + 2 * WEEK, 0, 0, False), False,
+            (10 ** 3, (START_TIME // WEEK + 2, 0, 1), 0, 0, False), False,
         ),
         (  # Extra mandatory hook
             ZERO_ADDRESS, b"",
-            (0, 0, 0, 0, False), True,
+            (0, (0, 0, 0), 0, 0, False), True,
+        ),
+        (  # Several calls
+            ZERO_ADDRESS, b"",
+            (1, (0, 0, 3), 0, 0, False), False,
         ),
     ]
 
@@ -135,13 +142,13 @@ def test_set_hook(hooker, hooks, admin, arve):
 
     with boa.env.prank(admin):
         with boa.reverts():  # Bad start time
-            hooker.set_hooks([(ZERO_ADDRESS, b"", (0, 0, 7 * 24 * 3600, 0, False), False)])
+            hooker.set_hooks([(ZERO_ADDRESS, b"", (0, (0, 0, 0), 7 * 24 * 3600, 0, False), False)])
         with boa.reverts():  # Bad end time
-            hooker.set_hooks([(ZERO_ADDRESS, b"", (0, 0, 0, 7 * 24 * 3600, False), False)])
+            hooker.set_hooks([(ZERO_ADDRESS, b"", (0, (0, 0, 0), 0, 7 * 24 * 3600, False), False)])
 
 
 def test_compensation(hooker, hook_inputs):
-    assert hooker.buffer_amount() == 3 * 10 ** 18 + 3 * 10 ** 9 + 10 ** 3
+    assert hooker.buffer_amount() == 3 * 10 ** 18 + 3 * 10 ** 9 + 10 ** 3 + 3
 
     ts = START_TIME
     assert hooker.calc_compensation(hook_inputs(0), False, ts) == 0,  "Only free mandatory call"
@@ -184,12 +191,19 @@ def test_compensation(hooker, hook_inputs):
         "Dutch overlap in process"
     assert hooker.calc_compensation(hook_inputs(6), False, ts + 2000) == 0, "Dutch overlap ended"
 
-    assert hooker.calc_compensation(hook_inputs(7), False, ts) == 0, "Time has not come yet"
-    assert hooker.calc_compensation(hook_inputs(7), False, ts + 3 * WEEK) == 10 ** 3, "Time has come"
+    with boa.env.anchor():
+        hooker.eval(f"self.duty_counter = {ts // WEEK + 1}")
+        assert hooker.calc_compensation(hook_inputs(7), False, ts) == 0, "Time has not come yet"
+        hooker.eval(f"self.duty_counter = {ts // WEEK + 3}")
+        assert hooker.calc_compensation(hook_inputs(7), False, ts + 3 * WEEK) == 10 ** 3, "Time has come"
 
     assert hooker.calc_compensation(hook_inputs(0, 1, 2, 3), False, ts) == 2 * 10 ** 9, "Static don't sum up"
     assert hooker.calc_compensation(hook_inputs(0, 1, 2, 3), False, ts + 1000) == 2 * 10 ** 9, "Static don't sum up"
     assert hooker.calc_compensation(hook_inputs(0, 1, 2, 3), False, ts + 2000) == 2 * 10 ** 9, "Static don't sum up"
+
+    assert hooker.calc_compensation(hook_inputs(9), False) == 1,  "Does not account with limit"
+    assert hooker.calc_compensation(hook_inputs(9) * 3, False) == 3, "Does not account several"
+    assert hooker.calc_compensation(hook_inputs(9) * 5, False) == 3, "Does not account limit"
 
 
 def test_act(hooker, hook_inputs, fee_collector, target, bridger, arve, burle):
@@ -217,13 +231,9 @@ def test_act(hooker, hook_inputs, fee_collector, target, bridger, arve, burle):
         # Receiver
         with boa.env.anchor():
             assert target.balanceOf(burle) == 0
-            hooker.act(hook_inputs(1), burle, False)
+            returned = hooker.act(hook_inputs(1), burle)
+            assert returned == 10 ** 9
             assert target.balanceOf(burle) == 10 ** 9
-        with boa.env.anchor():
-            with boa.env.prank(fee_collector.address):  # FeeCollector pays out itself
-                returned = hooker.act(hook_inputs(1), burle, False)
-                assert returned == 10 ** 9
-                assert target.balanceOf(burle) == 0
 
         # compensation double spend
         with boa.env.anchor():
@@ -241,21 +251,34 @@ def test_act(hooker, hook_inputs, fee_collector, target, bridger, arve, burle):
             assert gained == 10 ** 9
 
 
-def test_mandatory_hooks(hooker, hook_inputs, arve):
+def test_duty(hooker, fee_collector, hook_inputs, arve, set_epoch):
     with boa.env.prank(arve):
         with boa.env.anchor():
+            set_epoch(Epoch.FORWARD)
+
             hooker.calc_compensation(hook_inputs(0, 8), True)
-            hooker.act(hook_inputs(0, 8), arve, True, value=10 ** 6)
+            prev_duty_counter = hooker.duty_counter()
+            hooker.duty_act(hook_inputs(0, 8), arve, value=10 ** 6)
+            assert hooker.duty_counter() == prev_duty_counter
 
-        with boa.reverts("Not all mandatory hooks"):
+            with boa.env.prank(fee_collector.address):
+                hooker.calc_compensation(hook_inputs(0, 8), True)
+                boa.env.set_balance(fee_collector.address, 2 * 10 ** 6)
+                hooker.duty_act(hook_inputs(0, 8), arve, value=10 ** 6)
+                assert hooker.duty_counter() > prev_duty_counter, "Does not count duties"
+                prev_duty_counter = hooker.duty_counter()
+                hooker.duty_act(hook_inputs(0, 8), arve, value=10 ** 6)
+                assert hooker.duty_counter() == prev_duty_counter, "Count only once"
+
+        with boa.reverts("Not all duties"):
             hooker.calc_compensation(hook_inputs(0), True)
-        with boa.reverts("Not all mandatory hooks"):
-            hooker.act(hook_inputs(0), arve, True, value=10 ** 6)
+        with boa.reverts("Not all duties"):
+            hooker.duty_act(hook_inputs(0), arve, value=10 ** 6)
 
-    with boa.reverts("Not all mandatory hooks"):
+    with boa.reverts("Not all duties"):
         hooker.calc_compensation(hook_inputs(6, 7, 8), True)
-    with boa.reverts("Not all mandatory hooks"):
-        hooker.act(hook_inputs(6, 7, 8), arve, True)
+    with boa.reverts("Not all duties"):
+        hooker.duty_act(hook_inputs(6, 7, 8), arve)
 
 
 def test_one_time_hook(hooker, admin, hooks, burle):

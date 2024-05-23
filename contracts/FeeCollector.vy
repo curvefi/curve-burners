@@ -29,7 +29,7 @@ interface Burner:
     def supportsInterface(_interface_id: bytes4) -> bool: view
 
 interface Hooker:
-    def act(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN], _receiver: address=msg.sender, _mandatory: bool=False) -> uint256: payable
+    def duty_act(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN], _receiver: address=msg.sender) -> uint256: payable
     def buffer_amount() -> uint256: view
     def supportsInterface(_interface_id: bytes4) -> bool: view
 
@@ -92,7 +92,7 @@ target: public(ERC20)  # coin swapped into
 max_fee: public(uint256[9])  # max_fee[Epoch]
 
 BURNER_INTERFACE_ID: constant(bytes4) = 0xa3b5e311
-HOOKER_INTERFACE_ID: constant(bytes4) = 0xb95b1a35
+HOOKER_INTERFACE_ID: constant(bytes4) = 0xe569b44d
 burner: public(Burner)
 hooker: public(Hooker)
 
@@ -308,15 +308,14 @@ def forward(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN], _receiver: address=
     amount -= min(hooker_buffer, amount)
 
     fee: uint256 = self._fee(Epoch.FORWARD, block.timestamp) * amount / ONE
+    target.transfer(_receiver, fee)
 
     target.transfer(hooker.address, amount - fee)
-    act_fee: uint256 = hooker.act(_hook_inputs, _receiver, True, value=msg.value)
-    if self.last_hooker_approve < (block.timestamp - START_TIME) / WEEK:
-        target.approve(hooker.address, hooker_buffer - min(act_fee, hooker_buffer))
+    if self.last_hooker_approve < (block.timestamp - START_TIME) / WEEK:  # First time this week
+        target.approve(hooker.address, hooker_buffer)
         self.last_hooker_approve = (block.timestamp - START_TIME) / WEEK
+    fee += hooker.duty_act(_hook_inputs, _receiver, value=msg.value)
 
-    fee += act_fee
-    target.transfer(_receiver, fee)
     return fee
 
 

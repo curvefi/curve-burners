@@ -8,7 +8,7 @@ from .conftest import Epoch, ETH_ADDRESS, ZERO_ADDRESS, WEEK
 def preset(burner, hooker, admin):
     # Increase hooker.buffer_amount
     with boa.env.prank(admin):
-        hooker.set_hooks([(ZERO_ADDRESS, b"", (10 ** 9, 0, 0, 0, False), False)])
+        hooker.set_hooks([(ZERO_ADDRESS, b"", (10 ** 9, (0, 0, 0), 0, 0, False), False)])
 
 
 @pytest.fixture(scope="module")

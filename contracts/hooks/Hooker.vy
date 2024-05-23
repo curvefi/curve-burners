@@ -13,11 +13,24 @@ interface FeeCollector:
     def target() -> ERC20: view
     def owner() -> address: view
     def emergency_owner() -> address: view
+    def epoch_time_frame(_epoch: Epoch, _ts: uint256=block.timestamp) -> (uint256, uint256): view
 
+
+enum Epoch:
+    SLEEP  # 1
+    COLLECT  # 2
+    EXCHANGE  # 4
+    FORWARD  # 8
+
+
+struct CompensationCooldown:
+    duty_counter: uint64  # last compensation epoch
+    used: uint64
+    limit: uint64  # Maximum number of compensations between duty acts (week)
 
 struct CompensationStrategy:
     amount: uint256  # In case of Dutch auction max amount
-    last_payout_ts: uint256
+    cooldown: CompensationCooldown
     start: uint256
     end: uint256
     dutch: bool
@@ -27,7 +40,7 @@ struct Hook:
     to: address
     foreplay: Bytes[1024]  # including method_id
     compensation_strategy: CompensationStrategy
-    mandatory: bool  # Hooks mandatory to act after fee_collector transfer
+    duty: bool  # Hooks mandatory to act after fee_collector transfer
 
 
 # Property: no future changes in FeeCollector
@@ -42,9 +55,9 @@ SUPPORTED_INTERFACES: constant(bytes4[2]) = [
     # ERC165: method_id("supportsInterface(bytes4)") == 0x01ffc9a7
     0x01ffc9a7,
     # Hooker:
-    #   method_id("act((uint8,uint256,bytes)[],address,bool)") == 0xd0ba45fe
+    #   method_id("duty_act((uint8,uint256,bytes)[],address)") == 0x8c88eb86
     #   method_id("buffer_amount()") == 0x69e15fcb
-    0xb95b1a35,
+    0xe569b44d,
 ]
 
 START_TIME: constant(uint256) = 1600300800  # ts of distribution start
@@ -54,8 +67,10 @@ MAX_HOOKS_LEN: constant(uint256) = 32
 fee_collector: public(immutable(FeeCollector))
 
 hooks: public(DynArray[Hook, MAX_HOOKS_LEN])
-mandatory_hook_mask: uint256
+duties_checklist: uint256  # mask of hooks with `duty` flag
 buffer_amount: public(uint256)
+
+duty_counter: public(uint64)
 
 
 @external
@@ -89,26 +104,28 @@ def _shot(hook: Hook, hook_input: HookInput):
 
 @internal
 @view
-def _compensate(hook: Hook, ts: uint256=block.timestamp) -> uint256:
+def _compensate(hook: Hook, ts: uint256=block.timestamp, _num: uint64=1) -> uint256:
     """
     @notice Calculate compensation of calling hook at timestamp
     @dev Does not update last_payout_ts parameter to keep view mutability
     @param hook Hook to act
     @param ts Timestamp to calculate at (current by default)
+    @param _num Number of executions, needed for view function to track (used/limit)
     @return Amount to compensate according to strategy
     """
     strategy: CompensationStrategy = hook.compensation_strategy
-    if strategy.amount == 0 or ts < strategy.last_payout_ts:  # mandatory hooks or not compensating yet
+    # duty hook or not compensating yet or
+    if strategy.amount == 0 or self.duty_counter < strategy.cooldown.duty_counter or\
+        strategy.cooldown.used + _num > strategy.cooldown.limit:  # limit on number of compensations
         return 0
 
-    since_last_payout: uint256 = ts - strategy.last_payout_ts
     ts = (ts - START_TIME) % WEEK
     if ts < strategy.start:
         ts += WEEK
     end: uint256 = strategy.end
     if end <= strategy.start:
         end += WEEK
-    if end <= ts or since_last_payout <= ts - strategy.start:  # out of bound or already compensated
+    if end <= ts:  # out of bound
         return 0
 
     compensation: uint256 = strategy.amount
@@ -120,67 +137,108 @@ def _compensate(hook: Hook, ts: uint256=block.timestamp) -> uint256:
 @view
 @external
 def calc_compensation(_hook_inputs: DynArray[HookInput, MAX_HOOKS_LEN],
-                      _mandatory: bool=False, _ts: uint256=block.timestamp) -> uint256:
+                      _duty: bool=False, _ts: uint256=block.timestamp) -> uint256:
     """
-    @notice Calculate compensation for acting hooks. Checks input
+    @notice Calculate compensation for acting hooks. Checks input according to execution rules.
+        Older timestamps might work incorrectly.
     @param _hook_inputs HookInput of hooks to act, only ids are used
-    @param _mandatory Bool whether act is through fee_collector (False by default)
+    @param _duty Bool whether act is through fee_collector (False by default).
+        If True, assuming calling from fee_collector if possible
     @param _ts Timestamp at which to calculate compensations (current by default)
     @return Amount of target coin to receive as compensation
     """
-    hook_mask: uint256 = 0
+    current_duty_counter: uint64 = self.duty_counter
+    if _duty:
+        hook_mask: uint256 = 0
+        for solicitation in _hook_inputs:
+            hook_mask |= 1 << solicitation.hook_id
+        duties_checklist: uint256 = self.duties_checklist
+        assert hook_mask & duties_checklist == duties_checklist, "Not all duties"
+
+        time_frame: (uint256, uint256) = fee_collector.epoch_time_frame(Epoch.FORWARD, _ts)
+        if time_frame[0] <= _ts and _ts < time_frame[1]:
+            current_duty_counter = convert((_ts - START_TIME) / WEEK, uint64)
+
     compensation: uint256 = 0
     prev_idx: uint8 = 0
+    num: uint64 = 0
     for solicitation in _hook_inputs:
-        hook: Hook = self.hooks[solicitation.hook_id]
-        compensation += self._compensate(hook, _ts)
-
-        hook_mask |= 1 << solicitation.hook_id
         if prev_idx > solicitation.hook_id:
             raise "Hooks not sorted"
-        prev_idx = solicitation.hook_id
+        else:
+            num = num + 1 if prev_idx == solicitation.hook_id else 1
 
-    if _mandatory:
-        mandatory_hook_mask: uint256 = self.mandatory_hook_mask
-        assert hook_mask & mandatory_hook_mask == mandatory_hook_mask, "Not all mandatory hooks"
+        hook: Hook = self.hooks[solicitation.hook_id]
+        if hook.compensation_strategy.cooldown.duty_counter < current_duty_counter:
+            hook.compensation_strategy.cooldown.used = 0
+        compensation += self._compensate(hook, _ts, num)
+        prev_idx = solicitation.hook_id
 
     return compensation
 
 
-@external
-@payable
-def act(_hook_inputs: DynArray[HookInput, MAX_HOOKS_LEN],
-        _receiver: address=msg.sender, _mandatory: bool=False) -> uint256:
-    """
-    @notice Entry point to run hooks and receive compensation
-    @param _hook_inputs Inputs assembled by keepers
-    @param _receiver Receiver of compensation (sender by default)
-    @param _mandatory Check mandatory hooks to trigger from fee_collector (False by default)
-    @return Compensation received
-    """
-    hook_mask: uint256 = 0
+@internal
+def _act(_hook_inputs: DynArray[HookInput, MAX_HOOKS_LEN], _receiver: address) -> uint256:
+    current_duty_counter: uint64 = self.duty_counter
+
     compensation: uint256 = 0
     prev_idx: uint8 = 0
     for solicitation in _hook_inputs:
         hook: Hook = self.hooks[solicitation.hook_id]
         self._shot(hook, solicitation)
-        compensation += self._compensate(hook)
-        self.hooks[solicitation.hook_id].compensation_strategy.last_payout_ts = block.timestamp
 
-        hook_mask |= 1 << solicitation.hook_id
+        if hook.compensation_strategy.cooldown.duty_counter < current_duty_counter:
+            hook.compensation_strategy.cooldown.used = 0
+            hook.compensation_strategy.cooldown.duty_counter = current_duty_counter
+        hook_compensation: uint256 = self._compensate(hook)
+
+        if hook_compensation > 0:
+            compensation += hook_compensation
+            hook.compensation_strategy.cooldown.used += 1
+            self.hooks[solicitation.hook_id].compensation_strategy.cooldown = hook.compensation_strategy.cooldown
+
         if prev_idx > solicitation.hook_id:
             raise "Hooks not sorted"
         prev_idx = solicitation.hook_id
 
-    if _mandatory:
-        mandatory_hook_mask: uint256 = self.mandatory_hook_mask
-        assert hook_mask & mandatory_hook_mask == mandatory_hook_mask, "Not all mandatory hooks"
-
     # happy ending
-    if msg.sender != fee_collector.address and compensation > 0:
+    if compensation > 0:
         coin: ERC20 = fee_collector.target()
         coin.transferFrom(fee_collector.address, _receiver, compensation)
     return compensation
+
+
+@external
+@payable
+def duty_act(_hook_inputs: DynArray[HookInput, MAX_HOOKS_LEN], _receiver: address=msg.sender) -> uint256:
+    """
+    @notice Entry point to run hooks for FeeCollector
+    @param _hook_inputs Inputs assembled by keepers
+    @param _receiver Receiver of compensation (sender by default)
+    @return Compensation received
+    """
+    if msg.sender == fee_collector.address:
+        self.duty_counter = convert((block.timestamp - START_TIME) / WEEK, uint64)  # assuming time frames are divided weekly
+
+    hook_mask: uint256 = 0
+    for solicitation in _hook_inputs:
+        hook_mask |= 1 << solicitation.hook_id
+    duties_checklist: uint256 = self.duties_checklist
+    assert hook_mask & duties_checklist == duties_checklist, "Not all duties"
+
+    return self._act(_hook_inputs, _receiver)
+
+
+@external
+@payable
+def act(_hook_inputs: DynArray[HookInput, MAX_HOOKS_LEN], _receiver: address=msg.sender) -> uint256:
+    """
+    @notice Entry point to run hooks and receive compensation
+    @param _hook_inputs Inputs assembled by keepers
+    @param _receiver Receiver of compensation (sender by default)
+    @return Compensation received
+    """
+    return self._act(_hook_inputs, _receiver)
 
 
 @internal
@@ -213,11 +271,12 @@ def _set_hooks(new_hooks: DynArray[Hook, MAX_HOOKS_LEN]):
         assert new_hooks[i].compensation_strategy.start < WEEK
         assert new_hooks[i].compensation_strategy.end < WEEK
 
-        buffer_amount += new_hooks[i].compensation_strategy.amount
-        if new_hooks[i].mandatory:
-            mask ^= 1 << i
+        buffer_amount += new_hooks[i].compensation_strategy.amount *\
+                            convert(new_hooks[i].compensation_strategy.cooldown.limit, uint256)
+        if new_hooks[i].duty:
+            mask |= 1 << i
     self.buffer_amount = buffer_amount
-    self.mandatory_hook_mask = mask
+    self.duties_checklist = mask
 
 
 @external
