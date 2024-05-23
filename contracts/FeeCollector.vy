@@ -270,7 +270,7 @@ def collect(_coins: DynArray[ERC20, MAX_LEN], _receiver: address=msg.sender):
 
 @external
 @view
-def exchange(_coins: DynArray[ERC20, MAX_LEN]) -> bool:
+def can_exchange(_coins: DynArray[ERC20, MAX_LEN]) -> bool:
     """
     @notice Check whether coins are allowed to be exchanged
     @param _coins Coins to exchange

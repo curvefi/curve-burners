@@ -190,7 +190,7 @@ def test_killed_all(fee_collector, set_epoch, weth, target, admin, arve, to_kill
 
     # Exchange
     set_epoch(Epoch.EXCHANGE)
-    assert not fee_collector.exchange([weth]) == Epoch.EXCHANGE in to_kill
+    assert not fee_collector.can_exchange([weth]) == Epoch.EXCHANGE in to_kill
 
     # Forward
     set_epoch(Epoch.FORWARD)
@@ -227,10 +227,10 @@ def test_killed(fee_collector, set_epoch, coins, target, admin, burner):
 
     # Exchange
     set_epoch(Epoch.EXCHANGE)
-    assert fee_collector.exchange([coins[0]] + coins[3:])
-    assert not fee_collector.exchange([coins[1]])
-    assert not fee_collector.exchange([coins[2]])
-    assert not fee_collector.exchange([coins[0], coins[2]] + coins[3:])
+    assert fee_collector.can_exchange([coins[0]] + coins[3:])
+    assert not fee_collector.can_exchange([coins[1]])
+    assert not fee_collector.can_exchange([coins[2]])
+    assert not fee_collector.can_exchange([coins[0], coins[2]] + coins[3:])
 
     with boa.env.prank(burner.address):
         with boa.reverts("Killed coin"):

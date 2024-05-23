@@ -20,7 +20,7 @@ interface FeeCollector:
     def emergency_owner() -> address: view
     def epoch_time_frame(_epoch: Epoch, _ts: uint256=block.timestamp) -> (uint256, uint256): view
     def fee(_epoch: Epoch=empty(Epoch), _ts: uint256=block.timestamp) -> uint256: view
-    def exchange(_coins: DynArray[ERC20, MAX_LEN]) -> bool: view
+    def can_exchange(_coins: DynArray[ERC20, MAX_LEN]) -> bool: view
     def transfer(_transfers: DynArray[Transfer, MAX_LEN]): nonpayable
 
 
@@ -322,7 +322,7 @@ def exchange(_transfers: DynArray[Transfer, MAX_LEN], _calls: DynArray[Call3Valu
     coins: DynArray[ERC20, MAX_LEN] = []
     for transfer in _transfers:
         coins.append(transfer.coin)
-    assert fee_collector.exchange(coins)
+    assert fee_collector.can_exchange(coins)
 
     fee_collector.transfer(_transfers)
 

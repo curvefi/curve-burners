@@ -31,7 +31,7 @@ interface FeeCollector:
     def owner() -> address: view
     def emergency_owner() -> address: view
     def epoch_time_frame(epoch: Epoch, ts: uint256=block.timestamp) -> (uint256, uint256): view
-    def exchange(_coins: DynArray[ERC20, MAX_COINS_LEN]) -> bool: view
+    def can_exchange(_coins: DynArray[ERC20, MAX_COINS_LEN]) -> bool: view
     def transfer(_transfers: DynArray[Transfer, MAX_COINS_LEN]): nonpayable
 
 MAX_COINS_LEN: constant(uint256) = 64
@@ -205,7 +205,7 @@ def getTradeableOrder(_owner: address, _sender: address, _ctx: bytes32, _static_
     order: GPv2Order_Data = self._get_order(sell_token)
     order.sellAmount = sell_token.balanceOf(self)
 
-    if order.sellAmount == 0 or not fee_collector.exchange([sell_token]):
+    if order.sellAmount == 0 or not fee_collector.can_exchange([sell_token]):
         start: uint256 = 0
         end: uint256 = 0
         start, end = fee_collector.epoch_time_frame(Epoch.EXCHANGE)
@@ -244,7 +244,7 @@ def verify(
     @param _order The proposed discrete order's `GPv2Order.Data` struct
     """
     sell_token: ERC20 = ERC20(convert(convert(_static_input, bytes20), address))
-    if not fee_collector.exchange([sell_token]):
+    if not fee_collector.can_exchange([sell_token]):
         raw_revert(_abi_encode("NotAllowed", method_id=method_id("OrderNotValid(string)")))
     if _offchain_input != b"":
         raw_revert(_abi_encode("NonZeroOffchainInput", method_id=method_id("OrderNotValid(string)")))
