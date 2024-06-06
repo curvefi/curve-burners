@@ -44,7 +44,7 @@ def isValidSafeSignature(safe: address, sender: address, _hash: bytes32, _domain
 @pytest.fixture(scope="module", autouse=True)
 def burner(admin, fee_collector, cow_swap):
     with boa.env.prank(admin):
-        burner = boa.load("contracts/burners/CowSwapBurner.vy", fee_collector, cow_swap, cow_swap)
+        burner = boa.load("contracts/burners/CowSwapBurner.vy", fee_collector, cow_swap, cow_swap, 1)
         fee_collector.set_burner(burner)
     return burner
 
@@ -129,7 +129,7 @@ def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoc
     assert order[1] == target.address, "Wrong buyToken"
     assert order[2] == fee_collector.address, "Wrong receiver"
     assert order[3] == 10 ** weth.decimals(), "Wrong sellAmount"
-    # buyAmount undefined
+    assert order[4] == burner.target_threshold(), "Wrong buyAmount"
     assert order[5] == fee_collector.epoch_time_frame(Epoch.EXCHANGE)[1]
     assert order[6].hex() == APP_DATA[2:],  "Wrong appData"
     assert order[7] == 0,  "Positive feeAmount"
@@ -210,3 +210,26 @@ def test_verify(burner, coins, arve, target, fee_collector, admin):
     with pytest.raises(BoaError) as error:
         burner.verify(*params)
     assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("NotAllowed")
+
+
+def test_admin(burner, admin, emergency_admin, arve):
+    # Both admins
+    with boa.env.prank(admin):
+        burner.recover([])
+    with boa.env.prank(emergency_admin):
+        burner.recover([])
+
+    # Only ownership admin
+    with boa.env.prank(admin):
+        burner.set_target_threshold(10 ** 18)
+        assert burner.target_threshold() == 10 ** 18
+    with boa.env.prank(emergency_admin):
+        with boa.reverts("Only owner"):
+            burner.set_target_threshold(10 ** 18)
+
+    # Third wheel
+    with boa.env.prank(arve):
+        with boa.reverts("Only owner"):
+            burner.recover([])
+        with boa.reverts("Only owner"):
+            burner.set_target_threshold(10 ** 18)

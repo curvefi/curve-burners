@@ -112,19 +112,25 @@ VERSION: public(constant(String[20])) = "CowSwap"
 
 created: public(HashMap[ERC20, bool])
 
+target_threshold: public(uint256)  # min amount to exchange
+
 
 @external
 def __init__(_fee_collector: FeeCollector,
-    _composable_cow: ComposableCow, _vault_relayer: address):
+    _composable_cow: ComposableCow, _vault_relayer: address, _target_threshold: uint256):
     """
     @notice Contract constructor
     @param _fee_collector FeeCollector to anchor to
     @param _composable_cow Address of ComposableCow contract
     @param _vault_relayer CowSwap's VaultRelayer contract address, all approves go there
+    @param _target_threshold Minimum amount of target to buy per order
     """
     fee_collector = _fee_collector
     vault_relayer = _vault_relayer
     composable_cow = _composable_cow
+
+    assert _target_threshold > 0, "Bad target threshold"
+    self.target_threshold = _target_threshold
 
 
 @external
@@ -166,7 +172,7 @@ def _get_order(sell_token: ERC20) -> GPv2Order_Data:
         buyToken: buy_token,  # token to buy
         receiver: fee_collector.address,  # receiver of the token to buy
         sellAmount: 0,  # Set later
-        buyAmount: 1,
+        buyAmount: self.target_threshold,
         validTo: convert(fee_collector.epoch_time_frame(Epoch.EXCHANGE)[1], uint32),  # timestamp until order is valid
         appData: ADD_DATA,  # extra info about the order
         feeAmount: 0,  # amount of fees in sellToken
@@ -250,7 +256,7 @@ def verify(
         raw_revert(_abi_encode("NonZeroOffchainInput", method_id=method_id("OrderNotValid(string)")))
     order: GPv2Order_Data = self._get_order(sell_token)
     order.sellAmount = _order.sellAmount  # Any amount allowed
-    order.buyAmount = _order.buyAmount  # Price is discovered within CowSwap competition
+    order.buyAmount = max(_order.buyAmount, order.buyAmount)  # Price is discovered within CowSwap competition
     if _abi_encode(order) != _abi_encode(_order):
         raw_revert(_abi_encode("BadOrder", method_id=method_id("OrderNotValid(string)")))
 
@@ -299,6 +305,18 @@ def supportsInterface(_interface_id: bytes4) -> bool:
     """
     assert _interface_id != SIGNATURE_VERIFIER_MUXER_INTERFACE
     return _interface_id in SUPPORTED_INTERFACES
+
+
+@external
+def set_target_threshold(_target_threshold: uint256):
+    """
+    @dev Callable only by owner
+    @param _target_threshold Minimum amount of target to receive, with base=10**18
+    """
+    assert msg.sender == fee_collector.owner(), "Only owner"
+    assert _target_threshold > 0, "Bad target threshold"
+
+    self.target_threshold = _target_threshold
 
 
 @external
