@@ -258,7 +258,7 @@ def _get_price_record(coin: ERC20, week: uint256, smoothing: uint256) -> PriceRe
 
 @internal
 @view
-def _price(coin: ERC20, low_price: uint256, time_amplifier: uint256) -> uint256:
+def _price(low_price: uint256, time_amplifier: uint256) -> uint256:
     # low + high * log_scale(time)
     # high = max_price_amplifier * low
     return low_price + self.max_price_amplifier * low_price * time_amplifier / ONE
@@ -300,7 +300,6 @@ def price(_coin: ERC20, _ts: uint256=block.timestamp) -> uint256:
     @return Price of coin, with base=10**18
     """
     return self._price(
-            _coin,
             self._low(
                 _coin.balanceOf(fee_collector.address),
                 self.target_threshold,
@@ -339,7 +338,6 @@ def exchange(_transfers: DynArray[Transfer, MAX_LEN], _calls: DynArray[Call3Valu
         amount: uint256 = transfer.amount  # fee-on-transfer coins will have a small impact
         price_record: PriceRecord = self._get_price_record(transfer.coin, week, records_smoothing)
         target_amount: uint256 = self._price(
-            transfer.coin,
             self._low(new_balance + transfer.amount, target_threshold, price_record),
             time_amplifier,
         ) * amount / ONE
