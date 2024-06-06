@@ -99,7 +99,7 @@ hooker: public(Hooker)
 last_hooker_approve: uint256
 
 is_killed: public(HashMap[ERC20, Epoch])
-ALL_COINS: immutable(ERC20)  # Auxiliary indicator for all coins (=ZERO_ADDRESS)
+ALL_COINS: constant(ERC20) = empty(ERC20)  # Auxiliary indicator for all coins (=ZERO_ADDRESS)
 
 owner: public(address)
 emergency_owner: public(address)
@@ -121,9 +121,7 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
     self.max_fee[convert(Epoch.COLLECT, uint256)] = ONE / 100  # 1%
     self.max_fee[convert(Epoch.FORWARD, uint256)] = ONE / 100  # 1%
 
-    ALL_COINS = ERC20(empty(address))
-
-    self.is_killed[empty(ERC20)] = Epoch.COLLECT | Epoch.FORWARD  # Set burner first
+    self.is_killed[ALL_COINS] = Epoch.COLLECT | Epoch.FORWARD  # Set burner first
     self.is_killed[_target_coin] = Epoch.COLLECT | Epoch.EXCHANGE  # Keep target coin in contract
 
 

@@ -80,9 +80,9 @@ OFFCHAIN_DATA_LEN: constant(uint256) = 1
 
 vault_relayer: public(immutable(address))
 composable_cow: public(immutable(ComposableCow))
-app_data: public(immutable(bytes32))
-sell_kind: immutable(bytes32)  # Surpluss in target coin
-token_balance: immutable(bytes32)
+ADD_DATA: public(constant(bytes32)) = 0x058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f
+SELL_KIND: constant(bytes32) = keccak256("sell")  # Surpluss in target coin
+TOKEN_BALANCE: constant(bytes32) = keccak256("erc20")
 
 
 # SignatureVerifierMuxer at
@@ -123,10 +123,6 @@ def __init__(_fee_collector: FeeCollector,
     fee_collector = _fee_collector
     vault_relayer = _vault_relayer
     composable_cow = _composable_cow
-
-    app_data = 0x058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f
-    sell_kind = keccak256("sell")
-    token_balance = keccak256("erc20")
 
 
 @external
@@ -170,12 +166,12 @@ def _get_order(sell_token: ERC20) -> GPv2Order_Data:
         sellAmount: 0,  # Set later
         buyAmount: 1,
         validTo: convert(fee_collector.epoch_time_frame(Epoch.EXCHANGE)[1], uint32),  # timestamp until order is valid
-        appData: app_data,  # extra info about the order
+        appData: ADD_DATA,  # extra info about the order
         feeAmount: 0,  # amount of fees in sellToken
-        kind: sell_kind,  # buy or sell
+        kind: SELL_KIND,  # buy or sell
         partiallyFillable: True,  # partially fillable (True) or fill-or-kill (False)
-        sellTokenBalance: token_balance,  # From where the sellToken balance is withdrawn
-        buyTokenBalance: token_balance,  # Where the buyToken is deposited
+        sellTokenBalance: TOKEN_BALANCE,  # From where the sellToken balance is withdrawn
+        buyTokenBalance: TOKEN_BALANCE,  # Where the buyToken is deposited
     })
 
 
