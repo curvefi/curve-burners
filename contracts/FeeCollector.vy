@@ -34,11 +34,28 @@ interface Hooker:
     def supportsInterface(_interface_id: bytes4) -> bool: view
 
 
-event Collected:
-    coin: indexed(address)
-    keeper: indexed(address)
-    amount: uint256
-    fee_paid: uint256
+event SetMaxFee:
+    epoch: indexed(Epoch)
+    max_fee: uint256
+
+event SetBurner:
+    burner: indexed(Burner)
+
+event SetHooker:
+    hooker: indexed(Hooker)
+
+event SetTarget:
+    target: indexed(ERC20)
+
+event SetKilled:
+    coin: indexed(ERC20)
+    epoch_mask: Epoch
+
+event SetOwner:
+    owner: indexed(address)
+
+event SetEmergencyOwner:
+    emergency_owner: indexed(address)
 
 
 enum Epoch:
@@ -124,6 +141,14 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
 
     self.is_killed[ALL_COINS] = Epoch.COLLECT | Epoch.FORWARD  # Set burner first
     self.is_killed[_target_coin] = Epoch.COLLECT | Epoch.EXCHANGE  # Keep target coin in contract
+
+    log SetTarget(_target_coin)
+    log SetOwner(_owner)
+    log SetEmergencyOwner(_emergency_owner)
+    log SetMaxFee(Epoch.COLLECT, ONE / 100)
+    log SetMaxFee(Epoch.FORWARD, ONE / 100)
+    log SetKilled(ALL_COINS, Epoch.COLLECT | Epoch.FORWARD)
+    log SetKilled(_target_coin, Epoch.COLLECT | Epoch.FORWARD)
 
 
 @external
@@ -355,6 +380,8 @@ def set_max_fee(_epoch: Epoch, _max_fee: uint256):
     assert _max_fee <= ONE, "Bad max_fee"
     self.max_fee[convert(_epoch, uint256)] = _max_fee
 
+    log SetMaxFee(_epoch, _max_fee)
+
 
 @external
 def set_burner(_new_burner: Burner):
@@ -366,6 +393,8 @@ def set_burner(_new_burner: Burner):
     assert msg.sender == self.owner, "Only owner"
     assert _new_burner.supportsInterface(BURNER_INTERFACE_ID)
     self.burner = _new_burner
+
+    log SetBurner(_new_burner)
 
 
 @external
@@ -381,6 +410,8 @@ def set_hooker(_new_hooker: Hooker):
     self.target.approve(self.hooker.address, 0)
     self.hooker = _new_hooker
 
+    log SetHooker(_new_hooker)
+
 
 @external
 def set_target(_new_target: ERC20):
@@ -392,6 +423,8 @@ def set_target(_new_target: ERC20):
     assert msg.sender == self.owner, "Only owner"
     self.target = _new_target
     self.is_killed[_new_target] = Epoch.COLLECT | Epoch.EXCHANGE  # Keep target coin in contract
+    log SetTarget(_new_target)
+    log SetKilled(_new_target, Epoch.COLLECT | Epoch.EXCHANGE)
 
 
 @external
@@ -405,6 +438,7 @@ def set_killed(_input: DynArray[KilledInput, MAX_LEN]):
 
     for input in _input:
         self.is_killed[input.coin] = input.killed
+        log SetKilled(input.coin, input.killed)
 
 
 @external
@@ -417,6 +451,7 @@ def set_owner(_new_owner: address):
     assert msg.sender == self.owner, "Only owner"
     assert _new_owner != empty(address)
     self.owner = _new_owner
+    log SetOwner(_new_owner)
 
 
 @external
@@ -429,3 +464,4 @@ def set_emergency_owner(_new_owner: address):
     assert msg.sender == self.owner, "Only owner"
     assert _new_owner != empty(address)
     self.emergency_owner = _new_owner
+    log SetEmergencyOwner(_new_owner)

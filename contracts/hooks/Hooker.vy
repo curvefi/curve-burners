@@ -23,6 +23,18 @@ enum Epoch:
     FORWARD  # 8
 
 
+event DutyAct:
+    pass
+
+event Act:
+    receiver: indexed(address)
+    compensation: uint256
+
+event HookShot:
+    hook_id: indexed(uint8)
+    compensation: uint256
+
+
 struct CompensationCooldown:
     duty_counter: uint64  # last compensation epoch
     used: uint64
@@ -200,6 +212,9 @@ def _act(_hook_inputs: DynArray[HookInput, MAX_HOOKS_LEN], _receiver: address) -
         if prev_idx > solicitation.hook_id:
             raise "Hooks not sorted"
         prev_idx = solicitation.hook_id
+        log HookShot(prev_idx, hook_compensation)
+
+    log Act(_receiver, compensation)
 
     # happy ending
     if compensation > 0:
@@ -225,6 +240,8 @@ def duty_act(_hook_inputs: DynArray[HookInput, MAX_HOOKS_LEN], _receiver: addres
         hook_mask |= 1 << solicitation.hook_id
     duties_checklist: uint256 = self.duties_checklist
     assert hook_mask & duties_checklist == duties_checklist, "Not all duties"
+
+    log DutyAct()
 
     return self._act(_hook_inputs, _receiver)
 
