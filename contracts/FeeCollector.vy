@@ -211,7 +211,7 @@ def _fee(epoch: Epoch, ts: uint256) -> uint256:
     start, end = self._epoch_time_frame(epoch, ts)
     if ts >= end:
         return 0
-    return self.max_fee[convert(epoch, uint256)] * (ts - start) / (end - start)
+    return self.max_fee[convert(epoch, uint256)] * (ts + 1 - start) / (end - start)
 
 
 @external
