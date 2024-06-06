@@ -1,6 +1,8 @@
 # @version 0.3.10
 """
 @title GnosisBridger
+@license MIT
+@author Curve Finance
 @notice Curve Gnosis (prev Xdai) Omni Bridge Wrapper
 """
 from vyper.interfaces import ERC20
@@ -47,6 +49,7 @@ def bridge(_token: BridgedERC20, _to: address, _amount: uint256, _min_amount: ui
 def cost() -> uint256:
     """
     @notice Cost in ETH to bridge
+    @return Amount of ETH to inlcude
     """
     return 0
 
@@ -57,5 +60,6 @@ def check(_account: address) -> bool:
     """
     @notice Check if `_account` may bridge via `transmit_emissions`
     @param _account The account to check
+    @return True if `_account` may bridge
     """
     return True

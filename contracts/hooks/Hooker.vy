@@ -107,7 +107,7 @@ def _shot(hook: Hook, hook_input: HookInput):
 def _compensate(hook: Hook, ts: uint256=block.timestamp, _num: uint64=1) -> uint256:
     """
     @notice Calculate compensation of calling hook at timestamp
-    @dev Does not update last_payout_ts parameter to keep view mutability
+    @dev Does not update compensation strategy to keep view mutability
     @param hook Hook to act
     @param ts Timestamp to calculate at (current by default)
     @param _num Number of executions, needed for view function to track (used/limit)
@@ -297,6 +297,7 @@ def supportsInterface(_interface_id: bytes4) -> bool:
     """
     @dev Interface identification is specified in ERC-165.
     @param _interface_id Id of the interface
+    @return True if contract supports given interface
     """
     return _interface_id in SUPPORTED_INTERFACES
 

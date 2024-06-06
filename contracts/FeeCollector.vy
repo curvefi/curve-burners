@@ -110,8 +110,9 @@ def __init__(_target_coin: ERC20, _weth: wETH, _owner: address, _emergency_owner
     """
     @notice Contract constructor
     @param _target_coin Coin to swap to
-    @param _owner Owner address.
-    @param _emergency_owner Emergency owner address. Can kill the contract.
+    @param _weth Wrapped ETH(native coin) address
+    @param _owner Owner address
+    @param _emergency_owner Emergency owner address. Can kill the contract
     """
     self.target = _target_coin
     WETH = _weth
@@ -217,7 +218,7 @@ def _fee(epoch: Epoch, ts: uint256) -> uint256:
 @view
 def fee(_epoch: Epoch=empty(Epoch), _ts: uint256=block.timestamp) -> uint256:
     """
-    @notice Calculate keeper's fee for calling `collect`
+    @notice Calculate keeper's fee
     @param _epoch Epoch to count fee for
     @param _ts Timestamp of collection
     @return Fee with base 10^18
@@ -232,6 +233,7 @@ def fee(_epoch: Epoch=empty(Epoch), _ts: uint256=block.timestamp) -> uint256:
 def transfer(_transfers: DynArray[Transfer, MAX_LEN]):
     """
     @dev No approvals so can change burner easily
+    @param _transfers Transfers to apply
     """
     assert msg.sender == self.burner.address, "Only Burner"
     epoch: Epoch = self._epoch_ts(block.timestamp)
@@ -344,6 +346,8 @@ def set_max_fee(_epoch: Epoch, _max_fee: uint256):
     """
     @notice Set keeper's max fee
     @dev Callable only by owner
+    @param _epoch Epoch to set fee for
+    @param _max_fee Maximum fee to set
     """
     assert msg.sender == self.owner, "Only owner"
     subset: uint256 = convert(_epoch, uint256)
@@ -355,8 +359,9 @@ def set_max_fee(_epoch: Epoch, _max_fee: uint256):
 @external
 def set_burner(_new_burner: Burner):
     """
-    @notice Set burner for exchanging coins
+    @notice Set burner for exchanging coins, must implement BURNER_INTERFACE
     @dev Callable only by owner
+    @param _new_burner Address of the new contract
     """
     assert msg.sender == self.owner, "Only owner"
     assert _new_burner.supportsInterface(BURNER_INTERFACE_ID)
@@ -366,8 +371,9 @@ def set_burner(_new_burner: Burner):
 @external
 def set_hooker(_new_hooker: Hooker):
     """
-    @notice Set contract for hooks
+    @notice Set contract for hooks, must implement HOOKER_INTERFACE
     @dev Callable only by owner
+    @param _new_hooker Address of the new contract
     """
     assert msg.sender == self.owner, "Only owner"
     assert _new_hooker.supportsInterface(HOOKER_INTERFACE_ID)
@@ -381,6 +387,7 @@ def set_target(_new_target: ERC20):
     """
     @notice Set new coin for fees accumulation
     @dev Callable only by owner
+    @param _new_target Address of the new target coin
     """
     assert msg.sender == self.owner, "Only owner"
     self.target = _new_target
@@ -392,6 +399,7 @@ def set_killed(_input: DynArray[KilledInput, MAX_LEN]):
     """
     @notice Stop a contract or specific coin to be burnt
     @dev Callable only by owner or emergency owner
+    @param _input Array of (coin address, killed phases enum)
     """
     assert msg.sender in [self.owner, self.emergency_owner], "Only owner"
 
@@ -404,6 +412,7 @@ def set_owner(_new_owner: address):
     """
     @notice Set owner of the contract
     @dev Callable only by current owner
+    @param _new_owner Address of the new owner
     """
     assert msg.sender == self.owner, "Only owner"
     assert _new_owner != empty(address)
@@ -415,6 +424,7 @@ def set_emergency_owner(_new_owner: address):
     """
     @notice Set emergency owner of the contract
     @dev Callable only by current owner
+    @param _new_owner Address of the new emergency owner
     """
     assert msg.sender == self.owner, "Only owner"
     assert _new_owner != empty(address)

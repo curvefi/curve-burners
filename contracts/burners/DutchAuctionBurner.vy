@@ -382,6 +382,7 @@ def supportsInterface(_interface_id: bytes4) -> bool:
     """
     @dev Interface identification is specified in ERC-165.
     @param _interface_id Id of the interface
+    @return True if contract supports given interface
     """
     return _interface_id in SUPPORTED_INTERFACES
 

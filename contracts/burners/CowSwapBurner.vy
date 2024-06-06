@@ -1,6 +1,8 @@
 # @version 0.3.10
 """
 @title CowSwapBurner
+@license MIT
+@author Curve Finance
 @notice Exchange tokens using CowSwap
 """
 
@@ -181,6 +183,7 @@ def get_current_order(sell_token: address=empty(address)) -> GPv2Order_Data:
     """
     @notice Get current order parameters
     @param sell_token Address of possible sell token
+    @return Order parameters
     """
     return self._get_order(ERC20(sell_token))
 
@@ -196,6 +199,7 @@ def getTradeableOrder(_owner: address, _sender: address, _ctx: bytes32, _static_
     @param _ctx Execution context
     @param _static_input sellToken encoded as bytes(Bytes[20])
     @param _offchain_input Not used, zero-length bytes
+    @return Order parameters
     """
     sell_token: ERC20 = ERC20(convert(convert(_static_input, bytes20), address))
     order: GPv2Order_Data = self._get_order(sell_token)
@@ -291,6 +295,7 @@ def supportsInterface(_interface_id: bytes4) -> bool:
     @dev Interface identification is specified in ERC-165.
     Fails on SignatureVerifierMuxer for compatability with ComposableCow.
     @param _interface_id Id of the interface
+    @return True if contract supports given interface
     """
     assert _interface_id != SIGNATURE_VERIFIER_MUXER_INTERFACE
     return _interface_id in SUPPORTED_INTERFACES
