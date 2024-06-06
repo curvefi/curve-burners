@@ -91,7 +91,6 @@ ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 WETH: immutable(wETH)
 
 MAX_LEN: constant(uint256) = 64
-MAX_CALL_LEN: constant(uint256) = 64
 MAX_HOOK_LEN: constant(uint256) = 32
 ONE: constant(uint256) = 10 ** 18  # Precision
 
