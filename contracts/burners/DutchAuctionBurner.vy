@@ -131,21 +131,23 @@ def __init__(
 
 
 @external
-def burn(_coins: DynArray[ERC20, MAX_LEN], _receiver: address):
+def burn(_coins: DynArray[ERC20, MAX_LEN], _receiver: address, _just_revise: bool=False):
     """
     @notice Post hook after collect to register coins for burn
     @dev Pays out fee and saves coins on fee_collector.
     @param _coins Which coins to burn
     @param _receiver Receiver of profit
+    @param _just_revise Revise balances of coins without paying out
     """
-    assert msg.sender == fee_collector.address, "Only FeeCollector"
+    if not _just_revise:
+        assert msg.sender == fee_collector.address, "Only FeeCollector"
 
-    fee: uint256 = fee_collector.fee(Epoch.COLLECT)
-    fee_payouts: DynArray[Transfer, MAX_LEN] = []
-    for coin in _coins:
-        amount: uint256 = (coin.balanceOf(fee_collector.address) - self.balances[coin]) * fee / ONE
-        fee_payouts.append(Transfer({coin: coin, to: _receiver, amount: amount}))
-    fee_collector.transfer(fee_payouts)
+        fee: uint256 = fee_collector.fee(Epoch.COLLECT)
+        fee_payouts: DynArray[Transfer, MAX_LEN] = []
+        for coin in _coins:
+            amount: uint256 = (coin.balanceOf(fee_collector.address) - self.balances[coin]) * fee / ONE
+            fee_payouts.append(Transfer({coin: coin, to: _receiver, amount: amount}))
+        fee_collector.transfer(fee_payouts)
 
     for coin in _coins:
         self.balances[coin] = coin.balanceOf(fee_collector.address)

@@ -20,7 +20,7 @@ def test_burn_remained(fee_collector, burner, coins, set_epoch, arve, burle):
         coin._mint_for_testing(fee_collector, amount)
 
     with boa.env.prank(fee_collector.address):
-        burner.burn([coin.address for coin in coins], burle)
+        burner.burn(coins, burle)
 
     payouts = [coin.balanceOf(burle) for coin in coins]
     for coin, amount, payout in zip(coins, amounts, payouts):
@@ -31,7 +31,7 @@ def test_burn_remained(fee_collector, burner, coins, set_epoch, arve, burle):
 
     # Check double spend
     with boa.env.prank(fee_collector.address):
-        burner.burn([coin.address for coin in coins], burle)
+        burner.burn(coins, burle)
 
     for coin, payout in zip(coins, payouts):
         assert coin.balanceOf(burle) == payout
@@ -41,15 +41,28 @@ def test_burn_remained(fee_collector, burner, coins, set_epoch, arve, burle):
         coin._mint_for_testing(fee_collector, amount)
 
     with boa.env.prank(fee_collector.address):
-        burner.burn([coin.address for coin in coins], burle)
+        burner.burn(coins, burle)
 
-    for coin, amount, payout in zip(coins, amounts, payouts):
-        assert coin.balanceOf(burle) >= 2 * payout  # might be greater since Dutch auction for fee
+    payouts_sum = [coin.balanceOf(burle) for coin in coins]
+    for coin, amount, payout, payout_sum in zip(coins, amounts, payouts, payouts_sum):
+        assert payout_sum >= 2 * payout  # might be greater since Dutch auction for fee
 
         assert coin.balanceOf(burner) == 0
-        assert 2 * amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10 ** 18) <= coin.balanceOf(burle) <= \
+        assert 2 * amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10 ** 18) <= payout_sum <= \
                2 * amount * fee_collector.max_fee(Epoch.COLLECT) // 10 ** 18
-        assert coin.balanceOf(burle) + coin.balanceOf(fee_collector) == 2 * amount
+        assert payout_sum + coin.balanceOf(fee_collector) == 2 * amount
+
+    # only_revise
+    coins[0]._mint_for_testing(fee_collector, amounts[0])  # increase balance
+    with boa.env.prank(fee_collector.address):
+        coins[1].transfer(coins[1], amounts[1])  # decrease balance
+
+    burner.burn(coins, burle, True)
+    with boa.env.prank(fee_collector.address):
+        burner.burn(coins, burle)
+
+    for coin, amount, payout_sum in zip(coins, amounts, payouts_sum):
+        assert coin.balanceOf(burle) == payout_sum  # no new coins
 
     with boa.reverts("Only FeeCollector"):
         burner.burn([], arve)
