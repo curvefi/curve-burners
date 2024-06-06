@@ -420,6 +420,11 @@ def set_target(_new_target: ERC20):
     @param _new_target Address of the new target coin
     """
     assert msg.sender == self.owner, "Only owner"
+
+    target: ERC20 = self.target
+    self.is_killed[target] = empty(Epoch)  # allow to collect and exchange
+    log SetKilled(target, empty(Epoch))
+
     self.target = _new_target
     self.is_killed[_new_target] = Epoch.COLLECT | Epoch.EXCHANGE  # Keep target coin in contract
     log SetTarget(_new_target)

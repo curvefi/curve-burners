@@ -49,21 +49,25 @@ def weth(admin):
 
 
 @pytest.fixture(scope="session")
-def target(admin):
+def erc20(admin):
     with boa.env.prank(admin):
-        return boa.load("contracts/testing/ERC20Mock.vy", "Curve Stablecoin", "crvUSD", 18)
+        return boa.load_partial("contracts/testing/ERC20Mock.vy")
 
 
 @pytest.fixture(scope="session")
-def coins(admin, weth, target):
-    with boa.env.prank(admin):
-        return list(sorted([
-            boa.load("contracts/testing/ERC20Mock.vy", "Curve DAO", "CRV", 18),
-            boa.load("contracts/testing/ERC20Mock.vy", "Bitcoin", "BTC", 8),
-            boa.load("contracts/testing/ERC20Mock.vy", "Chinese Yuan", "CNY", 2),
-            weth,
-            target,
-        ], key=lambda contract: int(contract.address, base=16)))
+def target(erc20):
+    return erc20.deploy("Curve Stablecoin", "crvUSD", 18)
+
+
+@pytest.fixture(scope="session")
+def coins(erc20, weth, target):
+    return list(sorted([
+        erc20.deploy("Curve DAO", "CRV", 18),
+        erc20.deploy("Bitcoin", "BTC", 8),
+        erc20.deploy("Chinese Yuan", "CNY", 2),
+        weth,
+        target,
+    ], key=lambda contract: int(contract.address, base=16)))
 
 
 @pytest.fixture(scope="session")

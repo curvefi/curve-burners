@@ -115,8 +115,9 @@ def test_set_hooker_approval(fee_collector, admin, hooker, target, arve):
     assert target.allowance(fee_collector, hooker) == 0
 
 
-def test_admin(fee_collector, admin, emergency_admin, arve, burner, hooker, target):
+def test_admin(fee_collector, admin, emergency_admin, arve, burner, hooker, target, erc20):
     killed = [(arve, Epoch.COLLECT)]
+    new_target = erc20("New Target", "crvUSD", 18)
 
     # Both admins
     with boa.env.anchor():
@@ -134,7 +135,9 @@ def test_admin(fee_collector, admin, emergency_admin, arve, burner, hooker, targ
             fee_collector.set_max_fee(2, 5 * 10 ** (18 - 2))
             fee_collector.set_burner(burner)
             fee_collector.set_hooker(hooker)
-            fee_collector.set_target(target)
+            fee_collector.set_target(new_target)
+            assert fee_collector.is_killed(target) == 0
+            assert fee_collector.is_killed(new_target) == 2 + 4
             fee_collector.set_emergency_owner(arve)
             fee_collector.set_owner(arve)
     with boa.env.prank(emergency_admin):
@@ -145,7 +148,7 @@ def test_admin(fee_collector, admin, emergency_admin, arve, burner, hooker, targ
         with boa.reverts("Only owner"):
             fee_collector.set_hooker(hooker)
         with boa.reverts("Only owner"):
-            fee_collector.set_target(target)
+            fee_collector.set_target(new_target)
         with boa.reverts("Only owner"):
             fee_collector.set_emergency_owner(arve)
         with boa.reverts("Only owner"):
@@ -162,7 +165,7 @@ def test_admin(fee_collector, admin, emergency_admin, arve, burner, hooker, targ
         with boa.reverts("Only owner"):
             fee_collector.set_hooker(hooker)
         with boa.reverts("Only owner"):
-            fee_collector.set_hooker(target)
+            fee_collector.set_target(new_target)
         with boa.reverts("Only owner"):
             fee_collector.set_killed(killed)
         with boa.reverts("Only owner"):
