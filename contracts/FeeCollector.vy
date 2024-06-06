@@ -167,7 +167,7 @@ def _epoch_ts(ts: uint256) -> Epoch:
     for epoch in [Epoch.SLEEP, Epoch.COLLECT, Epoch.EXCHANGE, Epoch.FORWARD]:
         if ts < EPOCH_TIMESTAMPS[2 * convert(epoch, uint256)]:
             return epoch
-    raise "Bad Epoch"
+    raise UNREACHABLE
 
 
 @external
