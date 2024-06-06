@@ -121,9 +121,11 @@ def __init__(
     multicall = Multicall(0xcA11bde05977b3631167028862bE2a173976CA11)  # https://github.com/mds1/multicall/ v3
 
     self.target_threshold = _target_threshold
+    assert _max_price_amplifier <= ONE, "max_price_amplifier has no 10^18 base"
     self.max_price_amplifier = _max_price_amplifier
 
     self._set_records(_initial_records)
+    assert _records_smoothing <= 10 ** 18, "Bad smoothing value"
     self.records_smoothing = _records_smoothing
 
     self.base = 2718281828459045235  # Euler's number
