@@ -180,7 +180,7 @@ def burn(_coin: address) -> bool:
         WETH.deposit(value=self.balance)
     else:
         amount: uint256 = ERC20(_coin).balanceOf(msg.sender)
-        assert ERC20(_coin).transferFrom(msg.sender, self, amount, default_return_value=True)  # safe
+        ERC20(_coin).transferFrom(msg.sender, self, amount)
     return True
 
 
