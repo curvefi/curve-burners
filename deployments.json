@@ -1,0 +1,8 @@
+{
+  "gnosis": {
+    "FeeCollector": "0xa12a9ae863388DA98743127eD2f14DB7E666b8fD",
+    "Hooker": "0xd5233ea2d9F05Fe44b16506Bd465Ef2497905C51",
+    "Burner": "0x3f980034C12d2Abd209E094b40d26F84120FDBbD",
+    "Bridger": "0xc4AA2fB0A8837a06d296b1c0DE1990E401659449"
+  }
+}

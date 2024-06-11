@@ -16,11 +16,12 @@ BURNER = "CowSwap"  # ALTER
 
 NETWORK = f"https://rpc.gnosischain.com"  # ALTER
 
-EMPTY_COMPENSATION = (0, 0, 0, 0, False)
+EMPTY_COMPENSATION = (0, (0, 0, 0), 0, 0, False)
 EMPTY_HOOK_INPUT = (0, 0, b"")
 
+MIN_EXCHANGE_AMOUNT = 1 * 10 ** 18  # ALTER: 1 crvUSD
 MIN_BRIDGE_AMOUNT = 100 * 10 ** 18  # ALTER: 100 crvUSD
-ETHEREUM_FEE_DESTINATION = "0xeCb456EA5365865EbAb8a2661B0c503410e9B347"  # FeeDistributor on Ethereum
+ETHEREUM_FEE_DESTINATION = "0xeCb456EA5365865EbAb8a2661B0c503410e9B347"  # FeeCollector on Ethereum
 
 
 def deploy():
@@ -30,7 +31,7 @@ def deploy():
 
     hooker_inputs = deploy_hooks()
     hooker = boa.load("contracts/hooks/Hooker.vy", fee_collector, *hooker_inputs)
-    # hooker = boa.load_partial("contracts/Hooker.vy").at("")
+    # hooker = boa.load_partial("contracts/hooks/Hooker.vy").at("")
     print(f"Hooker: {hooker.address}")
     fee_collector.set_hooker(hooker)
 
@@ -38,7 +39,7 @@ def deploy():
     print(f"Burner: {burner.address}")
     fee_collector.set_burner(burner)
 
-    fee_collector.set_killed([("0x0000000000000000000000000000000000000000", 0)])
+    fee_collector.set_killed([("0x0000000000000000000000000000000000000000", 0)])  # FeeCollector is set
     fee_collector.set_owner(ADMIN)
 
 
@@ -51,8 +52,18 @@ def deploy_burner(fee_collector):
                         fee_collector,
                         "0xfdaFc9d1902f4e0b84f65F49f244b32b31013b74",  # ALTER: ComposableCow
                         "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",  # ALTER: VaultRelayer
+                        MIN_EXCHANGE_AMOUNT,
                         )
         # return boa.load_partial("contracts/burners/CowSwapBurner.vy").at("")
+    if BURNER == "DutchAuction":
+        return boa.load("contracts/burners/DutchAuctionBurner.vy",
+                        fee_collector,
+                        MIN_EXCHANGE_AMOUNT,
+                        10_000,  # ALTER: max_price_amplifier
+                        [],  # Records in case of huge accrued fees
+                        5 * 10 ** 17,  # ALTER: records_smoothing
+                        )
+        # return boa.load_partial("contracts/burners/DutchAuctionBurner.vy").at("")
     raise ValueError("Burner not specified")
 
 
@@ -61,8 +72,8 @@ def deploy_hooks():
 
     # Custom hooks
     if chain == "gnosis":
-        # bridger = boa.load("contracts/hooks/gnosis/GnosisBridger.vy")
-        bridger = boa.load_partial("contracts/hooks/gnosis/GnosisBridger.vy").at("0xc4AA2fB0A8837a06d296b1c0DE1990E401659449")
+        bridger = boa.load("contracts/hooks/gnosis/GnosisBridger.vy")
+        # bridger = boa.load_partial("contracts/hooks/gnosis/GnosisBridger.vy").at("")
 
     # Bridger
     if chain != "ethereum":
@@ -80,7 +91,11 @@ def deploy_hooks():
 
     # FeeDistributor
     else:
-        pass
+        target = boa.load_partial("contracts/testing/ERC20Mock.vy").at(TARGET)
+        fee_distributor = boa.from_etherscan("0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E", name="FeeDistributor")
+        initial_oth.append((target, target.approve.prepare_calldata(fee_distributor, 2 ** 256 - 1), EMPTY_COMPENSATION, False))
+        initial_oth_inputs.append((0, 0, b""))
+        initial_hooks.append((fee_distributor, fee_distributor.burn.prepare_calldata(target), EMPTY_COMPENSATION, True))
 
     return initial_oth, initial_oth_inputs, initial_hooks
 
