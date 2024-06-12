@@ -1,4 +1,10 @@
 {
+  "ethereum": {
+    "FeeCollector": "0xa2Bcd1a4Efbd04B63cd03f5aFf2561106ebCCE00",
+    "Hooker": "0x9A9DF35cd8E88565694CA6AD5093c236C7f6f69D",
+    "Burner": "0xC0fC3dDfec95ca45A0D2393F518D3EA1ccF44f8b",
+    "FeeDistributor": "0xD16d5eC345Dd86Fb63C6a9C43c517210F1027914"
+  },
   "gnosis": {
     "FeeCollector": "0xa12a9ae863388DA98743127eD2f14DB7E666b8fD",
     "Hooker": "0xd5233ea2d9F05Fe44b16506Bd465Ef2497905C51",
