@@ -262,6 +262,7 @@ def transfer(_transfers: DynArray[Transfer, MAX_LEN]):
     assert msg.sender == self.burner.address, "Only Burner"
     epoch: Epoch = self._epoch_ts(block.timestamp)
     assert epoch in Epoch.COLLECT | Epoch.EXCHANGE, "Wrong Epoch"
+    assert not self.is_killed[ALL_COINS] in epoch, "Killed epoch"
 
     for transfer in _transfers:
         assert not self.is_killed[transfer.coin] in epoch, "Killed coin"
