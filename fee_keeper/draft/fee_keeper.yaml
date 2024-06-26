@@ -1,0 +1,44 @@
+# High-level settings
+# Supported chains are listed in utils.py::Chain
+chain: Gnosis
+
+SourceFetcherType: CurveAPISourceFetcher  # CurveAPISourceFetcher
+FeeSourceType: FeeSourceBrownie  # FeeSourceBrownie
+PriceSourceType: CurveAPIPrices  # IdPriceSource|CurveAPIPrices|CoinGeckoPrices
+FeeApplierType: OfflineFeeApplier  # OfflineFeeApplier|OnlineFeeApplier
+CalculatorType: ThresholdCalculator  # ThresholdCalculator|
+TxSenderType: TxPrinter  # TxPrinter|TxSenderWeb3Py|TxSenderBrownie|
+
+
+# SourceFetchers
+CurveAPISourceFetcher:
+
+
+# FeeSources
+FeeSourceBrownie:
+
+
+# Calculators
+ThresholdCalculator:
+  threshold: 2.0  # USD
+  max_n_sources: 20
+  Ethereum:
+    threshold: 100.0
+
+
+# PriceSources
+CurveAPIPrices:
+  ttl: 600  # sec
+
+
+# FeeAppliers
+
+
+# TransactionSenders
+TxBrownieSender:
+  sender: test
+  sender_password: password
+  Ethereum:
+    send_params:
+      priority_fee: "0.5 gwei"
+      max_base_fee: "120 gwei"

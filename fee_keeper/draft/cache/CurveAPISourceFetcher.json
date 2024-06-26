@@ -1,0 +1,12 @@
+{
+  "Gnosis": [
+    {
+      "source_type": "STABLE_POOL",
+      "address": "0x29b963ad4CD578c41e1c5dDe5A8C6FDC4ec1257a",
+      "coins": [
+        "0x8e5bBbb09Ed1ebdE8674Cda39A0c169401db4252",
+        "0x6aC78efae880282396a335CA2F79863A1e6831D4"
+      ]
+    }
+  ]
+}
