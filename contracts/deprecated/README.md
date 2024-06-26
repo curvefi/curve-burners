@@ -1,3 +1,6 @@
+# Deprecated burners
+except [`SafeTransferer`](SafeTransferer.vy) which is used to transfer unusual coins from `Proxy` to `FeeCollector` on Ethereum.
+
 ## About
 
 - SwapBurner for all `exchange`s. (1)
