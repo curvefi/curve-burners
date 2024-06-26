@@ -120,4 +120,4 @@ def recover(_coins: DynArray[ERC20, MAX_LEN]):
         if coin.address == ETH_ADDRESS:
             raw_call(fee_collector.address, b"", value=self.balance)
         else:
-            coin.transfer(fee_collector.address, coin.balanceOf(self))  # do not need safe transfer
+            coin.transfer(fee_collector.address, coin.balanceOf(self), default_return_value=True)

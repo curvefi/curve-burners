@@ -4,7 +4,7 @@ import pytest
 import boa
 from boa import BoaError
 
-from ..conftest import Epoch, ZERO_ADDRESS
+from ..conftest import Epoch, ZERO_ADDRESS, ETH_ADDRESS
 
 
 APP_DATA = "0x058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"
@@ -233,3 +233,18 @@ def test_admin(burner, admin, emergency_admin, arve):
             burner.recover([])
         with boa.reverts("Only owner"):
             burner.set_target_threshold(10 ** 18)
+
+
+def test_recover_balance(burner, fee_collector, admin, emergency_admin, arve, coins):
+    for coin in coins:
+        coin._mint_for_testing(burner, 10 ** coin.decimals())
+    boa.env.set_balance(burner.address, 10 ** 18)
+
+    with boa.env.prank(admin):
+        burner.recover(coins + [ETH_ADDRESS])
+
+    for coin in coins:
+        assert coin.balanceOf(burner) == 0
+        assert coin.balanceOf(fee_collector) == 10 ** coin.decimals()
+    assert boa.env.get_balance(burner.address) == 0
+    assert boa.env.get_balance(fee_collector.address) == 10 ** 18

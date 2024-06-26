@@ -55,16 +55,22 @@ def erc20(admin):
 
 
 @pytest.fixture(scope="session")
+def erc20_no_return(admin):
+    with boa.env.prank(admin):
+        return boa.load_partial("contracts/testing/ERC20MockNoReturn.vy")
+
+
+@pytest.fixture(scope="session")
 def target(erc20):
     return erc20.deploy("Curve Stablecoin", "crvUSD", 18)
 
 
 @pytest.fixture(scope="session")
-def coins(erc20, weth, target):
+def coins(erc20, erc20_no_return, weth, target):
     return list(sorted([
         erc20.deploy("Curve DAO", "CRV", 18),
         erc20.deploy("Bitcoin", "BTC", 8),
-        erc20.deploy("Chinese Yuan", "CNY", 2),
+        erc20_no_return.deploy("Chinese Yuan", "CNY", 2),
         weth,
         target,
     ], key=lambda contract: int(contract.address, base=16)))

@@ -180,7 +180,7 @@ def burn(_coin: address) -> bool:
         WETH.deposit(value=self.balance)
     else:
         amount: uint256 = ERC20(_coin).balanceOf(msg.sender)
-        ERC20(_coin).transferFrom(msg.sender, self, amount)
+        assert ERC20(_coin).transferFrom(msg.sender, self, amount, default_return_value=True)
     return True
 
 
@@ -363,7 +363,7 @@ def recover(_recovers: DynArray[RecoverInput, MAX_LEN], _receiver: address):
         else:
             if amount == max_value(uint256):
                 amount = input.coin.balanceOf(self)
-            input.coin.transfer(_receiver, amount)  # do not need safe transfer
+            input.coin.transfer(_receiver, amount, default_return_value=True)  # do not need safe transfer
 
 
 @external

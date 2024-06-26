@@ -322,14 +322,16 @@ def test_erc165(hooker):
     assert hooker.supportsInterface(bytes.fromhex("01ffc9a7"))
 
 
-def test_recover_balance(hooker, fee_collector, admin, emergency_admin, arve, weth):
-    weth._mint_for_testing(hooker, 10 ** 18)
-    boa.env.set_balance(hooker.address, 10 ** 18)
+def test_recover_balance(burner, fee_collector, admin, emergency_admin, arve, coins):
+    for coin in coins:
+        coin._mint_for_testing(burner, 10 ** coin.decimals())
+    boa.env.set_balance(burner.address, 10 ** 18)
 
     with boa.env.prank(admin):
-        hooker.recover([weth.address, ETH_ADDRESS])
+        burner.recover(coins + [ETH_ADDRESS])
 
-    assert weth.balanceOf(hooker) == 0
-    assert boa.env.get_balance(hooker.address) == 0
-    assert weth.balanceOf(fee_collector) == 10 ** 18
+    for coin in coins:
+        assert coin.balanceOf(burner) == 0
+        assert coin.balanceOf(fee_collector) >= 10 ** coin.decimals()
+    assert boa.env.get_balance(burner.address) == 0
     assert boa.env.get_balance(fee_collector.address) == 10 ** 18

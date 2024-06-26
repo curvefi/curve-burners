@@ -26,6 +26,6 @@ pip install -r requirements.in
 
 Run:
 ```bash
-pytest test
+pytest tests
 ```
 

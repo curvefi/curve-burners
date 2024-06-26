@@ -311,7 +311,7 @@ def test_recover(fee_collector, coins, admin, arve):
     amounts.append(10 ** 18 // 3)
 
     with boa.env.prank(admin):
-        fee_collector.recover([(coin.address if hasattr(coin, "address") else coin, amount)
+        fee_collector.recover([(coin if hasattr(coin, "address") else coin, amount)
                                for coin, amount in zip(coins, amounts)], arve)
 
     for coin in coins[:-2]:
