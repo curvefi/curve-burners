@@ -21,7 +21,7 @@ EMPTY_HOOK_INPUT = (0, 0, b"")
 
 MIN_EXCHANGE_AMOUNT = 1 * 10 ** 18  # ALTER: 1 crvUSD
 MIN_BRIDGE_AMOUNT = 100 * 10 ** 18  # ALTER: 100 crvUSD
-ETHEREUM_FEE_DESTINATION = "0xeCb456EA5365865EbAb8a2661B0c503410e9B347"  # FeeCollector on Ethereum
+ETHEREUM_FEE_DESTINATION = "0xa2Bcd1a4Efbd04B63cd03f5aFf2561106ebCCE00"  # FeeCollector on Ethereum
 
 
 def deploy():
@@ -82,8 +82,8 @@ def deploy_hooks():
         initial_oth_inputs.append(EMPTY_HOOK_INPUT)
         initial_hooks.append(
             (
-                bridger,
-                bridger.bridge.prepare_calldata(TARGET, ETHEREUM_FEE_DESTINATION, 2 ** 256 - 1, MIN_BRIDGE_AMOUNT),
+                str(bridger.address),
+                bridger.bridge.prepare_calldata(TARGET, ETHEREUM_FEE_DESTINATION, 2 ** 256 - 1, MIN_BRIDGE_AMOUNT).hex(),
                 EMPTY_COMPENSATION,
                 True,
             )
@@ -92,7 +92,7 @@ def deploy_hooks():
     # FeeDistributor
     else:
         target = boa.load_partial("contracts/testing/ERC20Mock.vy").at(TARGET)
-        fee_distributor = boa.from_etherscan("0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E", name="FeeDistributor")
+        fee_distributor = boa.from_etherscan("0xD16d5eC345Dd86Fb63C6a9C43c517210F1027914", name="FeeDistributor")
         initial_oth.append((target, target.approve.prepare_calldata(fee_distributor, 2 ** 256 - 1), EMPTY_COMPENSATION, False))
         initial_oth_inputs.append((0, 0, b""))
         initial_hooks.append((fee_distributor, fee_distributor.burn.prepare_calldata(target), EMPTY_COMPENSATION, True))
