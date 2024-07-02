@@ -8,7 +8,7 @@
 
 
 interface ERC20:
-    def approve(_to: address, _value: uint256): nonpayable
+    def approve(_to: address, _value: uint256) -> bool: nonpayable
     def transfer(_to: address, _value: uint256) -> bool: nonpayable
     def transferFrom(_from: address, _to: address, _value: uint256) -> bool: nonpayable
     def balanceOf(_owner: address) -> uint256: view
@@ -18,6 +18,7 @@ interface FeeCollector:
     def target() -> ERC20: view
     def owner() -> address: view
     def emergency_owner() -> address: view
+    def epoch(ts: uint256=block.timestamp) -> Epoch: view
     def epoch_time_frame(_epoch: Epoch, _ts: uint256=block.timestamp) -> (uint256, uint256): view
     def fee(_epoch: Epoch=empty(Epoch), _ts: uint256=block.timestamp) -> uint256: view
     def can_exchange(_coins: DynArray[ERC20, MAX_LEN]) -> bool: view
@@ -150,6 +151,8 @@ def burn(_coins: DynArray[ERC20, MAX_LEN], _receiver: address, _just_revise: boo
             amount: uint256 = (coin.balanceOf(fee_collector.address) - self.balances[coin]) * fee / ONE
             fee_payouts.append(Transfer({coin: coin, to: _receiver, amount: amount}))
         fee_collector.transfer(fee_payouts)
+    else:
+        assert fee_collector.epoch() != Epoch.EXCHANGE,  "Can't update at Exchange"
 
     for coin in _coins:
         self.balances[coin] = coin.balanceOf(fee_collector.address)
@@ -336,13 +339,13 @@ def exchange(_transfers: DynArray[Transfer, MAX_LEN], _calls: DynArray[Call3Valu
 
     target_total: uint256 = 0
     for transfer in _transfers:
-        new_balance: uint256 = transfer.coin.balanceOf(fee_collector.address)
-        amount: uint256 = transfer.amount  # fee-on-transfer coins will have a small impact
+        new_balance: uint256 = self.balances[transfer.coin]
         price_record: PriceRecord = self._get_price_record(transfer.coin, week, records_smoothing)
+        # fee-on-transfer coins will have a small impact
         target_amount: uint256 = self._price(
             self._low(new_balance + transfer.amount, target_threshold, price_record),
             time_amplifier,
-        ) * amount / ONE
+        ) * transfer.amount / ONE
 
         assert target_amount >= target_threshold,  "Target threshold"
         target_total += target_amount
@@ -350,8 +353,8 @@ def exchange(_transfers: DynArray[Transfer, MAX_LEN], _calls: DynArray[Call3Valu
         price_record.cur.target_amount += target_amount
         self.records[transfer.coin] = price_record
 
-        self.balances[transfer.coin] = new_balance
-        log Exchanged(transfer.coin, msg.sender, amount, target_amount)
+        self.balances[transfer.coin] = new_balance - transfer.amount
+        log Exchanged(transfer.coin, msg.sender, transfer.amount, target_amount)
 
     results: DynArray[MulticallResult, MAX_CALL_LEN] = multicall.aggregate3Value(_calls, value=msg.value)
 

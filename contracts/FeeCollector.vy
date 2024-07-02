@@ -8,7 +8,7 @@
 
 
 interface ERC20:
-    def approve(_to: address, _value: uint256): nonpayable
+    def approve(_to: address, _value: uint256) -> bool: nonpayable
     def transfer(_to: address, _value: uint256) -> bool: nonpayable
     def transferFrom(_from: address, _to: address, _value: uint256) -> bool: nonpayable
     def balanceOf(_owner: address) -> uint256: view
@@ -337,7 +337,7 @@ def forward(_hook_inputs: DynArray[HookInput, MAX_HOOK_LEN], _receiver: address=
 
     target.transfer(hooker.address, amount - fee)
     if self.last_hooker_approve < (block.timestamp - START_TIME) / WEEK:  # First time this week
-        target.approve(hooker.address, hooker_buffer)
+        assert target.approve(hooker.address, hooker_buffer, default_return_value=True)
         self.last_hooker_approve = (block.timestamp - START_TIME) / WEEK
     fee += hooker.duty_act(_hook_inputs, _receiver, value=msg.value)
 

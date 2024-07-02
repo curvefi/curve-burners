@@ -9,7 +9,7 @@
 
 
 interface ERC20:
-    def approve(_to: address, _value: uint256): nonpayable
+    def approve(_to: address, _value: uint256) -> bool: nonpayable
     def transfer(_to: address, _value: uint256) -> bool: nonpayable
     def transferFrom(_from: address, _to: address, _value: uint256) -> bool: nonpayable
     def balanceOf(_owner: address) -> uint256: view

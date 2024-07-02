@@ -8,7 +8,7 @@
 
 
 interface ERC20:
-    def approve(_to: address, _value: uint256): nonpayable
+    def approve(_to: address, _value: uint256) -> bool: nonpayable
     def transfer(_to: address, _value: uint256) -> bool: nonpayable
     def transferFrom(_from: address, _to: address, _value: uint256) -> bool: nonpayable
     def balanceOf(_owner: address) -> uint256: view
@@ -153,7 +153,7 @@ def burn(_coins: DynArray[ERC20, MAX_COINS_LEN], _receiver: address):
                 salt: empty(bytes32),
                 staticData: concat(b"", convert(coin.address, bytes20)),
             }), True)
-            coin.approve(vault_relayer, max_value(uint256))
+            assert coin.approve(vault_relayer, max_value(uint256), default_return_value=True)
             self.created[coin] = True
         amount: uint256 = coin.balanceOf(fee_collector.address) * fee / ONE
         fee_payouts.append(Transfer({coin: coin, to: _receiver, amount: amount}))
