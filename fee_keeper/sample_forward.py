@@ -10,24 +10,24 @@ from web3.middleware import geth_poa_middleware
 from getpass import getpass
 from eth_account import account
 
-chain = "ethereum"  # ethereum|gnosis
+chain = "ethereum"  # ethereum|xdai
 RPC = {
     "ethereum": f"http://localhost:8545",
-    "gnosis": f"https://rpc.gnosischain.com",
+    "xdai": f"https://rpc.gnosischain.com",
 }
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
 CRVUSD = {
     "ethereum": "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E",
-    "gnosis": "0xaBEf652195F98A91E490f047A5006B71c85f058d",
+    "xdai": "0xaBEf652195F98A91E490f047A5006B71c85f058d",
 }[chain]
 FEE_COLLECTOR = {
     "ethereum": "0xa2Bcd1a4Efbd04B63cd03f5aFf2561106ebCCE00",
-    "gnosis": "0xBb7404F9965487a9DdE721B3A5F0F3CcfA9aa4C5",
+    "xdai": "0xBb7404F9965487a9DdE721B3A5F0F3CcfA9aa4C5",
 }[chain]
 PROXY = {
     "ethereum": "0xeCb456EA5365865EbAb8a2661B0c503410e9B347",
-    "gnosis": "0x3B48eE129D74A63461FE54Ec7226C019F5b6b203",
+    "xdai": "0x3B48eE129D74A63461FE54Ec7226C019F5b6b203",
 }[chain]
 EMPTY_HOOK_INPUT = (0, 0, b"")
 
@@ -35,13 +35,8 @@ web3 = Web3(
     provider=Web3.HTTPProvider(
         RPC[chain],
     ),
-#     provider=Web3.AsyncHTTPProvider(
-#         RPC[chain],
-#         {"verify_ssl": False}
-#     ),
-#     modules={"eth": (AsyncEth,)},
 )
-if chain == "gnosis":
+if chain == "xdai":
     web3.middleware_onion.inject(geth_poa_middleware, layer=0)
 
 
@@ -102,12 +97,10 @@ class DataFetcher:
             "0xEC0820EfafC41D8943EE8dE495fC9Ba8495B15cf",  # sfrxETH 2
             "0x1C91da0223c763d2e0173243eAdaA0A2ea47E704",  # tBTC
             "0x8472A9A7632b173c8Cf3a86D3afec50c35548e76",  # sfrxETH
-        ]
+        ] if chain == "ethereum" else []
 
         self.bridge_txs = [  # ((contract, data), amount * 10 ** 18)
-            (("0x4C36d2919e407f0Cc2Ee3c993ccF8ac26d9CE64e", "0x23caab490000000000000000000000000000000000000000000000000000000000000040000000000000000000000000000000000000000000000000000000000000012000000000000000000000000000000000000000000000000000000000000000b500050000a7823d6f1e31569f51861e345b30c6bebf70ebe7000000000001584ef6a78083ca3e2a662d6dd1703c939c8ace2e268d88ad09518695c6c3712ac10a214be5109a655671000927c00101806401272255bb000000000000000000000000f939e0a03fb07f59a73314e73794be0e57ac1b4e000000000000000000000000a2bcd1a4efbd04b63cd03f5aff2561106ebcce000000000000000000000000000000000000000000000019aabf10cc3105ee01a300000000000000000000000000000000000000000000000000000000000000000000000000000000000105041c1b1b1b428ee6cd7dfaeb3c18948700c93c744ebe5da4cc8d91b8bc7fdf8267a39d23bf14300e4dcb570aa5e318e69a0f26fca9988ff0f469638b33dddd2870d07721583c211d7dbb6c79dc5db6db43bf518055dd85731a28a734227e62d03a6e614c1e69cbc29395ba6d44812cd846ab5634bc4fabdd40cfb8625913afdd788dc0ecfd0b1c14203d4e9c2ef2b758563d0c8fa9949bc404ab7c5d83a2a4cd5262a37ffc030a95dd116566413c4b3264ccd6f09f2ce973b5a546459f14ab778add72c00d24399b50246867f26d817ca0544f642da951a00b448d8051de357ff10eb85e025e9c541350d4a26af28efb52c4eb2159b99a83593057e53e59330e7502bcf3a0000000000000000000000000000000000000000000000000000000"), 121_000 * 10 ** 18),
         ]
-
 
     async def get_amounts(self):
         pool_amounts = {}
@@ -235,7 +228,7 @@ async def run():
         else:
             safe_amount = 1000
         fee = 0.01 * ((ts - 1600300800) % (24 * 3600)) / (24 * 3600)
-        safe_threshold = int(safe_amount / fee) * 10 ** 18
+        safe_threshold = int(safe_amount / fee) * 10 ** 18 if chain == "ethereum" else 100 * 10 ** 18
 
         pools, controllers, bridge_txs, balance, proxy_balance = await data_fetcher.get_amounts()
         calls, cnt, total = [], 0, 0
