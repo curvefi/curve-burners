@@ -11,7 +11,7 @@ from getpass import getpass
 from eth_account import account
 
 
-chain = "xdai"  # ethereum|xdai
+chain = "ethereum"  # ethereum|xdai
 RPC = {
     "ethereum": f"http://localhost:8545",
     "xdai": f"https://rpc.gnosischain.com",
@@ -30,6 +30,14 @@ PROXY = {
     "ethereum": "0xeCb456EA5365865EbAb8a2661B0c503410e9B347",
     "xdai": "0x3B48eE129D74A63461FE54Ec7226C019F5b6b203",
 }[chain]
+RECEIVER = {
+    "ethereum": "0xcb78EA4Bc3c545EB48dDC9b8302Fa9B03d1B1B61",
+    "xdai": "0x8C95d2ad015f12B03ad4712a48a37c2A68970f62",
+}[chain]
+EXTREME_AMOUNT = {  # basically CoWBurner target_threshold
+    "ethereum": 400,
+    "xdai": 1,
+}[chain]
 
 web3 = Web3(
     provider=Web3.HTTPProvider(
@@ -47,13 +55,11 @@ class DataFetcher:
         ),
         modules={"eth": (AsyncEth,)},
     )
-    POOL_BLACKLIST = [
-        "0xF9440930043eb3997fc70e1339dBb11F341de7A8", "0xa1F8A6807c402E4A15ef4EBa36528A3FED24E577",
-    ]
-    COINS_BLACKLIST = [CRVUSD, "0xab5eB14c09D416F0aC63661E57EDB7AEcDb9BEfA", "0x8Cd52ee292313C4D851e71A7064F096504aB3eE9", "0x84CeCB5525c6B1C20070E742da870062E84Da178", "0xBed58C1053fd347843883eadE0781f562A66f623", "0xDB6925eA42897ca786a045B252D95aA7370f44b4", "0xfed2B54453F75634bcdaEA5e5b11a3f99b9C28Fa", "0x2A8e1E676Ec238d8A992307B495b45B3fEAa5e86", "0xd7C9F0e536dC865Ae858b0C0453Fe76D13c3bEAc", "0x530824DA86689C9C17CdC2871Ff29B058345b44a", "0xE8449F1495012eE18dB7Aa18cD5706b47e69627c"]
+    POOL_BLACKLIST = ["0xF9440930043eb3997fc70e1339dBb11F341de7A8", "0xa1F8A6807c402E4A15ef4EBa36528A3FED24E577",]
+    COINS_BLACKLIST = [CRVUSD, "0xE8449F1495012eE18dB7Aa18cD5706b47e69627c", "0x4D1941a887eC788F059b3bfcC8eE1E97b968825B", "0x470EBf5f030Ed85Fc1ed4C2d36B9DD02e77CF1b7"]
     I128_BALANCES_LIST = ["0x93054188d876f558f4a66b2ef1d97d16edf0895b", "0x7fc77b5c7614e1533320ea6ddc2eb61fa00a9714", "0xa5407eae9ba41422680e2e00537571bcc53efbfd", "0x52EA46506B9CC5Ef470C5bf89f17Dc28bB35D85C", "0xA2B47E3D5c44877cca798226B7B8118F9BFb7A56", "0x79a8C46DeA5aDa233ABaFFD40F3A0A2B1e5A4F27", "0x06364f10B501e868329afBc005b3492902d6C763"]
     PROXY_RECEIVER = {
-        "ethereum": [],
+        "ethereum": [],  # need to fill in
         "xdai": ["0x7f90122BF0700F9E7e1F688fe926940E8839F353"],
     }[chain]
 
@@ -109,7 +115,7 @@ class DataFetcher:
 
     def fetch_sources(self):
         stable_data = []
-        for registry in ["main", "factory", "factory-crvusd"]:  # "factory-stable-ng"
+        for registry in ["main", "factory", "factory-crvusd"]:  # "factory-stable-ng" should withdraw automatically, may be not all
             stable_data.extend(requests.get(
                 f"https://api.curve.fi/api/getPools/{chain}/{registry}",
             ).json().get("data", {}).get("poolData", []))
@@ -178,7 +184,7 @@ def account_load_pkey(fname):
         pkey = account.decode_keyfile_json(json.load(f), getpass())
         return pkey
 wallet_address = "0x71F718D3e4d1449D1502A6A7595eb84eBcCB1683"
-# wallet_pk = account_load_pkey("curve")
+wallet_pk = account_load_pkey("curve")
 
 
 BUILDERS = [
@@ -189,7 +195,7 @@ BUILDERS = [
 ]
 
 
-def collect(withdraw_proxy, burn, withdraw_fc, pk_profit, collect):
+def collect_l1(withdraw_proxy, burn, withdraw_fc, pk_profit, collect):
     # multicall = web3.eth.contract("0xcA11bde05977b3631167028862bE2a173976CA11", abi=[{"inputs": [{"components": [{"internalType": "address", "name": "target", "type": "address"},{"internalType": "bool", "name": "allowFailure", "type": "bool"},{"internalType": "bytes", "name": "callData", "type": "bytes"}], "internalType": "struct Multicall3.Call3[]","name": "calls","type": "tuple[]"}],"name": "aggregate3", "outputs": [{"components": [{"internalType": "bool", "name": "success", "type": "bool"},{"internalType": "bytes", "name": "returnData", "type": "bytes"}],"internalType": "struct Multicall3.Result[]", "name": "returnData", "type": "tuple[]"}],"stateMutability": "payable","type": "function"}, ])
     fee_collector = web3.eth.contract(FEE_COLLECTOR, abi=[
         {"stateMutability":"nonpayable", "type": "function", "name": "withdraw_many", "inputs": [{"name": "_pools", "type": "address[]"}], "outputs": []},
@@ -197,12 +203,13 @@ def collect(withdraw_proxy, burn, withdraw_fc, pk_profit, collect):
 
     nonce = web3.eth.get_transaction_count(wallet_address)
     max_fee = 20 * 10 ** 9  # even 10 GWEI should be enough for Wednesday morning
-    max_priority = 2 * 10 ** 9
+    max_priority = 2 * 10 ** 9 + 10 ** 8
 
     txs = []
     if withdraw_proxy:  # proxy.burn() has tx.origin check
         withdraw_proxy = [web3.to_checksum_address(coin) for coin in withdraw_proxy]
-        withdraw_proxy += [ZERO_ADDRESS] * (20 - (len(withdraw_proxy) % 20))
+        if len(withdraw_proxy) % 20:
+            withdraw_proxy += [ZERO_ADDRESS] * (20 - (len(withdraw_proxy) % 20))
         proxy = web3.eth.contract(PROXY, abi=[{"name":"withdraw_many","outputs":[],"inputs":[{"type":"address[20]","name":"_pools"}],"stateMutability":"nonpayable","type":"function","gas":93116},])
         for i in range(0, len(withdraw_proxy), 20):
             print("WITHDRAW PROXY", withdraw_proxy[i: i + 20])
@@ -244,14 +251,19 @@ def collect(withdraw_proxy, burn, withdraw_fc, pk_profit, collect):
             }))
             nonce += 1
 
+    if ETH_ADDRESS.lower() in collect:
+        collect.remove(ETH_ADDRESS.lower())
+        if "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".lower() not in collect:
+            collect.append("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2".lower())
     collect = list(sorted(collect, key=lambda coin: int(coin, base=16)))
     collect = [web3.to_checksum_address(coin) for coin in collect]
     print("COLLECT", collect)
-    txs.append(fee_collector.functions.collect(collect, "0xcb78EA4Bc3c545EB48dDC9b8302Fa9B03d1B1B61").build_transaction({
-        "from": wallet_address, "nonce": nonce,
-        "maxFeePerGas": max_fee, "maxPriorityFeePerGas": max_priority,
-    }))
-    nonce += 1
+    for i in range(0, len(collect), 64):
+        txs.append(fee_collector.functions.collect(collect[i: min(i + 64, len(collect))], RECEIVER).build_transaction({
+            "from": wallet_address, "nonce": nonce,
+            "maxFeePerGas": max_fee, "maxPriorityFeePerGas": max_priority,
+        }))
+        nonce += 1
 
     iters = 0
     while web3.eth.get_transaction_count(wallet_address) < nonce and iters < 5:
@@ -311,13 +323,14 @@ def collect_l2(withdraw_proxy, burn, withdraw_fc, collect):
     txs = []
     if withdraw_proxy:  # proxy.burn() has tx.origin check
         withdraw_proxy = [web3.to_checksum_address(coin) for coin in withdraw_proxy]
-        withdraw_proxy += [ZERO_ADDRESS] * (20 - (len(withdraw_proxy) % 20))
+        if len(withdraw_proxy) % 20:
+            withdraw_proxy += [ZERO_ADDRESS] * (20 - (len(withdraw_proxy) % 20))
         proxy = web3.eth.contract(PROXY, abi=[{"name":"withdraw_many","outputs":[],"inputs":[{"type":"address[20]","name":"_pools"}],"stateMutability":"nonpayable","type":"function","gas":93116},])
         for i in range(0, len(withdraw_proxy), 20):
             print("WITHDRAW PROXY", withdraw_proxy[i: i + 20])
-            txs.append(proxy.functions.withdraw_many(withdraw_proxy[i: i + 20]).build_transaction({
-                "from": wallet_address, "nonce": nonce,
-            }))
+            txs.append(proxy.functions.withdraw_many(withdraw_proxy[i: i + 20]).build_transaction({"from": wallet_address}))
+            txs[-1]["nonce"] = nonce
+            txs[-1]["gas"] = int(1.1 * txs[-1]["gas"])
             nonce += 1
 
     if burn:
@@ -327,29 +340,36 @@ def collect_l2(withdraw_proxy, burn, withdraw_fc, collect):
         proxy = web3.eth.contract(PROXY, abi=[{"name":"burn_many","outputs":[],"inputs":[{"type":"address[20]","name":"_coins"}],"stateMutability":"nonpayable","type":"function","gas":780568},])
         for i in range(0, len(burn), 20):
             print("BURN PROXY", burn[i: i + 20])
-            txs.append(proxy.functions.burn_many(burn[i: i + 20]).build_transaction({
-                "from": wallet_address, "nonce": nonce,
-            }))
+            txs.append(proxy.functions.burn_many(burn[i: i + 20]).build_transaction({"from": wallet_address}))
+            txs[-1]["nonce"] = nonce
+            txs[-1]["gas"] = int(1.1 * txs[-1]["gas"])
             nonce += 1
     if withdraw_fc:
         withdraw_fc = [web3.to_checksum_address(coin) for coin in withdraw_fc]
         print("WITHDRAW FC", withdraw_fc)
-        txs.append(fee_collector.functions.withdraw_many(withdraw_fc).build_transaction({
-            "from": wallet_address, "nonce": nonce,
-        }))
+        txs.append(fee_collector.functions.withdraw_many(withdraw_fc).build_transaction({"from": wallet_address}))
+        txs[-1]["nonce"] = nonce
+        txs[-1]["gas"] = int(1.1 * txs[-1]["gas"])
         nonce += 1
 
     collect = list(sorted(collect, key=lambda coin: int(coin, base=16)))
     collect = [web3.to_checksum_address(coin) for coin in collect]
     print("COLLECT", collect)
-    txs.append(fee_collector.functions.collect(collect, "0xcb78EA4Bc3c545EB48dDC9b8302Fa9B03d1B1B61").build_transaction({
-        "from": wallet_address, "nonce": nonce,
-    }))
+    txs.append(fee_collector.functions.collect(collect, RECEIVER).build_transaction({"from": wallet_address}))
+    txs[-1]["nonce"] = nonce
+    txs[-1]["gas"] = int(1.1 * txs[-1]["gas"])
 
     for tx in txs:
         signed_tx = web3.eth.account.sign_transaction(tx, private_key=wallet_pk)
         web3.eth.send_raw_transaction(signed_tx.rawTransaction)
     print("Go check ur wallet, I dit sth for ya ^&^")
+
+
+def collect(withdraw_proxy, burn, withdraw_fc, pk_profit, collect):
+    if chain == "ethereum":
+        collect_l1(withdraw_proxy, burn, withdraw_fc, pk_profit, collect)
+    else:
+        collect_l2(withdraw_proxy, burn, withdraw_fc, collect)
 
 
 async def run():
@@ -366,7 +386,8 @@ async def run():
         else:
             safe_amount = 1000
         fee = 0.02 * ((ts - 1600300800) % (24 * 3600)) / (24 * 3600)
-        safe_threshold = int(safe_amount / fee) if chain == "ethereum" else 100
+        safe_threshold = max(int(safe_amount / fee) if chain == "ethereum" else 100, EXTREME_AMOUNT)
+        print(f"Safe amount: {safe_threshold}")
 
         stable_pools, proxy_balances, pks, fc_balances = await data_fetcher.get_amounts()
         proxy_withdraw, to_burn, fc_withdraw, to_collect = [], set(), [], set()
@@ -379,7 +400,7 @@ async def run():
                         proxy_withdraw.append(pool["address"])
                         to_burn.update(cs)
                     else:
-                        fc_withdraw.append(pool["address"])
+                        proxy_withdraw.append(pool["address"])
                     to_collect.update(cs)
                     cnt += 1 ; total += pool["amount"]
             except Exception as e:
@@ -408,10 +429,7 @@ async def run():
 
         if cnt > 0:
             print(f"Trying to profit {total * fee:.2f} crvUSD from {cnt} sources")
-            if chain == "ethereum":
-                collect(proxy_withdraw, list(to_burn), fc_withdraw, pk_profit, list(to_collect))
-            else:
-                collect_l2(proxy_withdraw, list(to_burn), fc_withdraw, list(to_collect))
+            collect(proxy_withdraw, list(to_burn), fc_withdraw, pk_profit, list(to_collect))
 
         latest_block = web3.eth.get_block("latest")
         base_fee = latest_block["baseFeePerGas"]
