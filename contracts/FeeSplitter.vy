@@ -49,6 +49,12 @@ def __init__(_crvusd: address, distribution_weight: uint256, distribution_receiv
     @param incentives_receiver The address to receive the incentives amount
     @param owner The address of the contract owner
     """
+    assert _crvusd != empty(address)
+    assert distribution_receiver != empty(address)
+    assert incentives_receiver != empty(address)
+    assert owner != empty(address)
+    assert distribution_weight <= MAX_BPS
+
     crvusd = _crvusd
     self.distribution_weight = distribution_weight
     self.incentives_receiver = incentives_receiver
@@ -108,6 +114,7 @@ def set_distribution_receiver(distribution_receiver: address):
         crvUSD for distribution to veCRV holders
     """
     assert msg.sender == self.owner, "Only owner"
+    assert distribution_receiver != empty(address)
     self.distribution_receiver = distribution_receiver
 
     log SetDistributionReceiver(distribution_receiver)
@@ -121,6 +128,7 @@ def set_incentives_receiver(incentives_receiver: address):
         crvUSD to be used for incentives
     """
     assert msg.sender == self.owner, "Only owner"
+    assert incentives_receiver != empty(address)
     self.incentives_receiver = incentives_receiver
 
     log SetIncentivesReceiver(incentives_receiver)
