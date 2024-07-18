@@ -64,7 +64,7 @@ def __init__(_crvusd: address, _factory: address, collector_weight: uint256, col
     assert incentives_manager != empty(address), "zeroaddr: incentives_receiver"
     assert owner != empty(address), "zeroaddr: owner"
 
-    assert collector_weight <= MAX_BPS, "wrongarg: collector_weight > MAX_BPS"
+    assert collector_weight <= MAX_BPS, "weights: collector_weight > MAX_BPS"
 
     # setting immutables
     crvusd = ERC20(_crvusd)
@@ -118,9 +118,8 @@ def set_weights(collector_weight: uint256):
     @dev Up to 100% (MAX_BPS)
     @param collector_weight The new collector weight
     """
-    assert msg.sender == self.owner, "Only owner"
-    if collector_weight > MAX_BPS:
-        raise "Weight bigger than 100%"
+    assert msg.sender == self.owner, "auth: only owner"
+    assert collector_weight <= MAX_BPS, "weights: collector weight > MAX_BPS"
 
     self.collector_weight = collector_weight
 
@@ -134,8 +133,8 @@ def set_collector(collector: address):
         to veCRV holders.
     @param collector_receiver The address that will receive crvUSD
     """
-    assert msg.sender == self.owner, "Only owner"
-    assert collector != empty(address)
+    assert msg.sender == self.owner, "auth: only owner"
+    assert collector != empty(address), "zeroaddr: collector"
 
     self.collector = collector
 
@@ -149,8 +148,8 @@ def set_incentives_manager(incentives_manager: address):
     @param incentives_manager The address that will receive
         crvUSD to be used for incentives
     """
-    assert msg.sender == self.owner, "Only owner"
-    assert incentives_manager != empty(address)
+    assert msg.sender == self.owner, "auth: only owner"
+    assert incentives_manager != empty(address), "zeroaddr: incentives_manager"
 
     self.incentives_manager = incentives_manager
 
@@ -163,8 +162,8 @@ def set_owner(new_owner: address):
     @dev Callable only by current owner
     @param new_owner Address of the new owner
     """
-    assert msg.sender == self.owner, "Only owner"
-    assert new_owner != empty(address)
+    assert msg.sender == self.owner, "auth: only owner"
+    assert new_owner != empty(address), "zeroaddr: new_owner"
 
     self.owner = new_owner
 
