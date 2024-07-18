@@ -38,6 +38,7 @@ MAX_CONTROLLERS: constant(uint256) = 100
 MAX_BPS: constant(uint256) = 10_000
 
 controllers: public(DynArray[Controller, MAX_CONTROLLERS])
+allowed_controllers: public(HashMap[Controller, bool])
 collector_weight: uint256
 collector: public(address)
 incentives_manager: public(address)
@@ -80,7 +81,9 @@ def update_controllers():
     old_len: uint256 = len(self.controllers)
     new_len: uint256 = factory.n_collaterals()
     for i in range(old_len, new_len, bound=MAX_CONTROLLERS):
-        self.controllers.append(Controller(factory.controllers(i)))
+        c: address = factory.controllers(i)
+        self.allowed_controllers[c] = True
+        self.controllers.append(Controller(c))
 
 @nonreentrant("lock")
 @external
@@ -94,8 +97,8 @@ def claim_controller_fees(controllers: DynArray[Controller, MAX_CONTROLLERS]=emp
             c.collect_fees()
     else:
         for c in controllers:
-            if c not in self.controllers:
-                raise "Controller not found"
+            if not self.allowed_controllers[c]:
+                raise "controller: not in factory"
             c.collect_fees()
 
     balance: uint256 = crvusd.balanceOf(self)
