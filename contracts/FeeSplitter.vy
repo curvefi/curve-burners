@@ -20,8 +20,6 @@ event SetDistributionReceiver:
 event SetIncentivesReceiver:
     incentives_receiver: address
 
-event SetControllers:
-    controllers: DynArray[address, 20]
 
 event SetOwner:
     owner: address
@@ -29,18 +27,27 @@ event SetOwner:
 interface Controller:
     def collect_fees() -> uint256: nonpayable
 
+interface ControllerFactory:
+    def controllers(index: uint256) -> address: nonpayable
+    def n_collaterals() -> uint256: nonpayable
 
+version: public(constant(String[8])) = "0.1.0"
+# maximum number of claims in a single transaction
+MAX_CONTROLLERS: constant(uint256) = 100
+# maximum basis points (100%)
 MAX_BPS: constant(uint256) = 10_000
 
-controllers: DynArray[address, 20]
+controllers: DynArray[address, MAX_CONTROLLERS]
 distribution_weight: uint256
 distribution_receiver: public(address)
 incentives_receiver: public(address)
 owner: public(address)
+
+factory: immutable(address)
 crvusd: immutable(address)
 
 @external
-def __init__(_crvusd: address, distribution_weight: uint256, distribution_receiver: address, incentives_receiver: address, owner: address):
+def __init__(_crvusd: address, _factory: address, distribution_weight: uint256, distribution_receiver: address, incentives_receiver: address, owner: address, factory: address):
     """
     @notice Contract constructor
     @param _crvusd The address of the crvUSD token contract
@@ -49,27 +56,48 @@ def __init__(_crvusd: address, distribution_weight: uint256, distribution_receiv
     @param incentives_receiver The address to receive the incentives amount
     @param owner The address of the contract owner
     """
-    assert _crvusd != empty(address)
-    assert distribution_receiver != empty(address)
-    assert incentives_receiver != empty(address)
-    assert owner != empty(address)
-    assert distribution_weight <= MAX_BPS
+    assert _crvusd != empty(address), "zeroaddr: crvusd"
+    assert _factory != empty(address), "zeroaddr: factory"
 
+    assert distribution_receiver != empty(address), "zeroaddr: distribution_receiver"
+    assert incentives_receiver != empty(address), "zeroaddr: incentives_receiver"
+    assert owner != empty(address), "zeroaddr: owner"
+
+    assert distribution_weight <= MAX_BPS, "wrongarg: distribution_weight > MAX_BPS"
+
+    # setting immutables
     crvusd = _crvusd
+    factory = _factory
+
+    # setting storage vars
     self.distribution_weight = distribution_weight
     self.incentives_receiver = incentives_receiver
     self.distribution_receiver = distribution_receiver
     self.owner = owner
 
+@external
+def update_controllers():
+    factory: ControllerFactory = ControllerFactory(self.factory)
+    old_len: uint256 = len(self.controllers)
+    new_len: uint256 = factory.n_collaterals()
+    for i in range(old_len, new_len, bound=MAX_CONTROLLERS):
+        self.controllers.append(factory.controllers(i))
+
 @nonreentrant("lock")
 @external
-def claim_controller_fees():
+def claim_controller_fees(controllers: DynArray[address, MAX_CONTROLLERS]=empty(DynArray[address, MAX_CONTROLLERS])):
     """
     @notice Claim fees from all controllers and distribute them
     @dev Splits and transfers the balance according to the distribution weight
     """
-    for controller in self.controllers:
-        Controller(controller).collect_fees()
+    if len(controllers) == 0:
+        for c in self.controllers:
+            Controller(c).collect_fees()
+    else:
+        for c in controllers:
+            if c not in self.controllers:
+                raise "Controller not found"
+            Controller(c).collect_fees()
 
     balance: uint256 = ERC20(crvusd).balanceOf(self)
 
@@ -89,21 +117,11 @@ def set_weights(distribution_weight: uint256):
     assert msg.sender == self.owner, "Only owner"
     if distribution_weight > MAX_BPS:
         raise "Weight bigger than 100%"
+
     self.distribution_weight = distribution_weight
 
-    log SetWeights(distribution_weight)
+    log SetWeights(distribution_weight, self.incentives_weight())
 
-
-@external
-def set_controllers(controllers: DynArray[address, 20]):
-    """
-    @notice Set the list of controller addresses
-    @param controllers The new list of controller addresses
-    """
-    assert msg.sender == self.owner, "Only owner"
-    self.controllers = controllers
-
-    log SetControllers(controllers)
 
 @external
 def set_distribution_receiver(distribution_receiver: address):
@@ -115,6 +133,7 @@ def set_distribution_receiver(distribution_receiver: address):
     """
     assert msg.sender == self.owner, "Only owner"
     assert distribution_receiver != empty(address)
+
     self.distribution_receiver = distribution_receiver
 
     log SetDistributionReceiver(distribution_receiver)
@@ -129,6 +148,7 @@ def set_incentives_receiver(incentives_receiver: address):
     """
     assert msg.sender == self.owner, "Only owner"
     assert incentives_receiver != empty(address)
+
     self.incentives_receiver = incentives_receiver
 
     log SetIncentivesReceiver(incentives_receiver)
@@ -142,7 +162,9 @@ def set_owner(new_owner: address):
     """
     assert msg.sender == self.owner, "Only owner"
     assert new_owner != empty(address)
+
     self.owner = new_owner
+
     log SetOwner(new_owner)
 
 @external
