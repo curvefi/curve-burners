@@ -14,10 +14,10 @@ from vyper.interfaces import ERC20
 event SetWeights:
     distribution_weight: uint256
 
-event SetDistributionReceiver:
+event SetCollector:
     distribution_receiver: address
 
-event SetIncentivesReceiver:
+event SetIncentivesManager:
     incentives_receiver: address
 
 
@@ -37,121 +37,121 @@ MAX_CONTROLLERS: constant(uint256) = 100
 # maximum basis points (100%)
 MAX_BPS: constant(uint256) = 10_000
 
-controllers: DynArray[address, MAX_CONTROLLERS]
-distribution_weight: uint256
-distribution_receiver: public(address)
-incentives_receiver: public(address)
+controllers: public(DynArray[Controller, MAX_CONTROLLERS])
+collector_weight: uint256
+collector: public(address)
+incentives_manager: public(address)
 owner: public(address)
 
-factory: immutable(address)
-crvusd: immutable(address)
+factory: immutable(ControllerFactory)
+crvusd: immutable(ERC20)
 
 @external
-def __init__(_crvusd: address, _factory: address, distribution_weight: uint256, distribution_receiver: address, incentives_receiver: address, owner: address, factory: address):
+def __init__(_crvusd: address, _factory: address, collector_weight: uint256, collector: address, incentives_manager: address, owner: address):
     """
     @notice Contract constructor
     @param _crvusd The address of the crvUSD token contract
-    @param distribution_weight The initial weight for distribution (scaled by 1e18)
-    @param distribution_receiver The address to receive the distribution amount
-    @param incentives_receiver The address to receive the incentives amount
+    @param collector_weight The initial weight for veCRV distribution (scaled by 1e18)
+    @param collector The address to receive the amount for veCRV holders
+    @param incentives_manager The address to receive the incentives amount
     @param owner The address of the contract owner
     """
     assert _crvusd != empty(address), "zeroaddr: crvusd"
     assert _factory != empty(address), "zeroaddr: factory"
 
-    assert distribution_receiver != empty(address), "zeroaddr: distribution_receiver"
-    assert incentives_receiver != empty(address), "zeroaddr: incentives_receiver"
+    assert collector != empty(address), "zeroaddr: distribution_receiver"
+    assert incentives_manager != empty(address), "zeroaddr: incentives_receiver"
     assert owner != empty(address), "zeroaddr: owner"
 
-    assert distribution_weight <= MAX_BPS, "wrongarg: distribution_weight > MAX_BPS"
+    assert collector_weight <= MAX_BPS, "wrongarg: collector_weight > MAX_BPS"
 
     # setting immutables
-    crvusd = _crvusd
-    factory = _factory
+    crvusd = ERC20(_crvusd)
+    factory = ControllerFactory(_factory)
 
     # setting storage vars
-    self.distribution_weight = distribution_weight
-    self.incentives_receiver = incentives_receiver
-    self.distribution_receiver = distribution_receiver
+    self.collector_weight = collector_weight
+    self.incentives_manager = incentives_manager
+    self.collector = collector
     self.owner = owner
 
 @external
 def update_controllers():
-    factory: ControllerFactory = ControllerFactory(self.factory)
     old_len: uint256 = len(self.controllers)
     new_len: uint256 = factory.n_collaterals()
     for i in range(old_len, new_len, bound=MAX_CONTROLLERS):
-        self.controllers.append(factory.controllers(i))
+        self.controllers.append(Controller(factory.controllers(i)))
 
 @nonreentrant("lock")
 @external
-def claim_controller_fees(controllers: DynArray[address, MAX_CONTROLLERS]=empty(DynArray[address, MAX_CONTROLLERS])):
+def claim_controller_fees(controllers: DynArray[Controller, MAX_CONTROLLERS]=empty(DynArray[Controller, MAX_CONTROLLERS])) -> (uint256, uint256):
     """
     @notice Claim fees from all controllers and distribute them
-    @dev Splits and transfers the balance according to the distribution weight
+    @dev Splits and transfers the balance according to the distribution weights
     """
     if len(controllers) == 0:
         for c in self.controllers:
-            Controller(c).collect_fees()
+            c.collect_fees()
     else:
         for c in controllers:
             if c not in self.controllers:
                 raise "Controller not found"
-            Controller(c).collect_fees()
+            c.collect_fees()
 
-    balance: uint256 = ERC20(crvusd).balanceOf(self)
+    balance: uint256 = crvusd.balanceOf(self)
 
-    distribution_amount: uint256 = balance * self.distribution_weight / MAX_BPS
-    incentives_amount: uint256 = balance - distribution_amount
+    collector_amount: uint256 = balance * self.collector_weight / MAX_BPS
+    incentives_amount: uint256 = balance - collector_amount
 
-    ERC20(crvusd).transfer(self.distribution_receiver, distribution_amount)
-    ERC20(crvusd).transfer(self.incentives_receiver, incentives_amount)
+    crvusd.transfer(self.collector, collector_amount)
+    crvusd.transfer(self.incentives_manager, incentives_amount)
+
+    return collector_amount, incentives_amount
 
 @external
-def set_weights(distribution_weight: uint256):
+def set_weights(collector_weight: uint256):
     """
-    @notice Set the distribution weight
+    @notice Set the collector weight (and implicitly the incentives weight)
     @dev Up to 100% (MAX_BPS)
-    @param distribution_weight The new distribution weight
+    @param collector_weight The new collector weight
     """
     assert msg.sender == self.owner, "Only owner"
-    if distribution_weight > MAX_BPS:
+    if collector_weight > MAX_BPS:
         raise "Weight bigger than 100%"
 
-    self.distribution_weight = distribution_weight
+    self.collector_weight = collector_weight
 
-    log SetWeights(distribution_weight, self.incentives_weight())
+    log SetWeights(collector_weight)
 
 
 @external
-def set_distribution_receiver(distribution_receiver: address):
+def set_collector(collector: address):
     """
     @notice Set the address that will receive crvUSD for distribution
         to veCRV holders.
-    @param distribution_receiver The address that will receive
-        crvUSD for distribution to veCRV holders
+    @param collector_receiver The address that will receive crvUSD
     """
     assert msg.sender == self.owner, "Only owner"
-    assert distribution_receiver != empty(address)
+    assert collector != empty(address)
 
-    self.distribution_receiver = distribution_receiver
+    self.collector = collector
 
-    log SetDistributionReceiver(distribution_receiver)
+    log SetCollector(collector)
 
 @external
-def set_incentives_receiver(incentives_receiver: address):
+def set_incentives_manager(incentives_manager: address):
     """
     @notice Set the address that will receive crvUSD that
         will be used for incentives
-    @param incentives_receiver The address that will receive
+    @param incentives_manager The address that will receive
         crvUSD to be used for incentives
     """
     assert msg.sender == self.owner, "Only owner"
-    assert incentives_receiver != empty(address)
+    assert incentives_manager != empty(address)
 
-    self.incentives_receiver = incentives_receiver
+    self.incentives_manager = incentives_manager
 
-    log SetIncentivesReceiver(incentives_receiver)
+    log SetIncentivesManager(incentives_manager)
 
 @external
 def set_owner(new_owner: address):
@@ -171,6 +171,6 @@ def set_owner(new_owner: address):
 def incentives_weight() -> uint256:
     """
     @notice Getter to compute the weight for incentives
-    @return The weight for incentives
+    @return The weight for voting incentives
     """
-    return MAX_BPS - self.distribution_weight
+    return MAX_BPS - self.collector_weight
