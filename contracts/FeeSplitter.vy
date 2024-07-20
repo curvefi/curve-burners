@@ -39,7 +39,7 @@ MAX_BPS: constant(uint256) = 10_000
 
 controllers: public(DynArray[Controller, MAX_CONTROLLERS])
 allowed_controllers: public(HashMap[Controller, bool])
-collector_weight: uint256
+collector_weight: public(uint256)
 collector: public(address)
 incentives_manager: public(address)
 owner: public(address)
