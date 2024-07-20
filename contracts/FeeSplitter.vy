@@ -78,6 +78,10 @@ def __init__(_crvusd: address, _factory: address, collector_weight: uint256, col
 
 @external
 def update_controllers():
+    """
+    @notice Update the list of controllers so that it corresponds to the
+        list of controllers in the factory
+    """
     old_len: uint256 = len(self.controllers)
     new_len: uint256 = factory.n_collaterals()
     for i in range(new_len - old_len, bound=MAX_CONTROLLERS):
@@ -91,6 +95,7 @@ def update_controllers():
 def claim_controller_fees(controllers: DynArray[Controller, MAX_CONTROLLERS]=empty(DynArray[Controller, MAX_CONTROLLERS])) -> (uint256, uint256):
     """
     @notice Claim fees from all controllers and distribute them
+    @param controllers The list of controllers to claim fees from (default: all)
     @dev Splits and transfers the balance according to the distribution weights
     """
     if len(controllers) == 0:
@@ -160,7 +165,6 @@ def set_incentives_manager(incentives_manager: address):
 def set_owner(new_owner: address):
     """
     @notice Set owner of the contract
-    @dev Callable only by current owner
     @param new_owner Address of the new owner
     """
     assert msg.sender == self.owner, "auth: only owner"
