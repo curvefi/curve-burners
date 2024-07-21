@@ -60,8 +60,8 @@ def __init__(_crvusd: address, _factory: address, collector_weight: uint256, col
     assert _crvusd != empty(address), "zeroaddr: crvusd"
     assert _factory != empty(address), "zeroaddr: factory"
 
-    assert collector != empty(address), "zeroaddr: distribution_receiver"
-    assert incentives_manager != empty(address), "zeroaddr: incentives_receiver"
+    assert collector != empty(address), "zeroaddr: collector"
+    assert incentives_manager != empty(address), "zeroaddr: incentives_manager"
     assert owner != empty(address), "zeroaddr: owner"
 
     assert collector_weight <= MAX_BPS, "weights: collector_weight > MAX_BPS"

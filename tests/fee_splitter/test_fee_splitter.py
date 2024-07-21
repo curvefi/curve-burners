@@ -1,6 +1,56 @@
 import boa
 import pytest
 
+def test_constructor_expected(fee_splitter_deployer):
+    crvusd = boa.env.generate_address()
+    factory = boa.env.generate_address()
+    _collector = boa.env.generate_address()
+    _incentives_manager = boa.env.generate_address()
+    _owner = boa.env.generate_address()
+
+    splitter = fee_splitter_deployer(crvusd, factory, 5000, _collector, _incentives_manager, _owner)
+
+    assert splitter._immutables.crvusd == crvusd
+    assert splitter._immutables.factory == factory
+    assert splitter.collector_weight() == 5000
+    assert splitter.collector() == _collector
+    assert splitter.incentives_manager() == _incentives_manager
+    assert splitter.owner() == _owner
+
+def test_constructor_zero_address(fee_splitter_deployer):
+    crvusd = boa.env.generate_address()
+    factory = boa.env.generate_address()
+    _collector = boa.env.generate_address()
+    _incentives_manager = boa.env.generate_address()
+    _owner = boa.env.generate_address()
+
+    zero = boa.eval('empty(address)')
+
+    with boa.reverts("zeroaddr: crvusd"):
+        fee_splitter_deployer(zero, factory, 5000, _collector, _incentives_manager, _owner)
+
+    with boa.reverts("zeroaddr: factory"):
+        fee_splitter_deployer(crvusd, zero, 5000, _collector, _incentives_manager, _owner)
+
+    with boa.reverts("zeroaddr: collector"):
+        fee_splitter_deployer(crvusd, factory, 5000, zero, _incentives_manager, _owner)
+
+    with boa.reverts("zeroaddr: incentives_manager"):
+        fee_splitter_deployer(crvusd, factory, 5000, _collector, zero, _owner)
+
+    with boa.reverts("zeroaddr: owner"):
+        fee_splitter_deployer(crvusd, factory, 5000, _collector, _incentives_manager, zero)
+
+def test_constructor_out_of_bounds(fee_splitter_deployer):
+    crvusd = boa.env.generate_address()
+    factory = boa.env.generate_address()
+    _collector = boa.env.generate_address()
+    _incentives_manager = boa.env.generate_address()
+    _owner = boa.env.generate_address()
+
+    with boa.reverts("weights: collector_weight > MAX_BPS"):
+        fee_splitter_deployer(crvusd, factory, 10001, _collector, _incentives_manager, _owner)
+
 
 def test_update_controllers_expected(fee_splitter, mock_factory):
     factory = mock_factory
