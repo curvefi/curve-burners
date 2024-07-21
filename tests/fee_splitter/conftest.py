@@ -30,28 +30,12 @@ def fee_splitter_deployer():
 
 @fixture()
 def mock_factory():
-    mock_code = """
-    n_collaterals: public(uint256)
-    controllers: public(DynArray[address, 10000])
-    
-    @external
-    def add_controller(controller: address):
-        self.controllers.append(controller)
-        self.n_collaterals = len(self.controllers)
-    """
-
-    return boa.loads(mock_code)
+    return boa.load('contracts/testing/ControllerFactoryMock.vy')
 
 
 @fixture
 def mock_controller_deployer():
-    mock_code = """
-    @external
-    def collect_fees() -> uint256:
-        return 1234
-    """
-
-    return boa.loads_partial(mock_code)
+    return boa.load_partial('contracts/testing/ControllerMock.vy')
 
 
 @fixture

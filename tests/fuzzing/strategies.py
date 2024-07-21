@@ -4,18 +4,7 @@ from hypothesis.strategies import composite, just, integers
 
 @composite
 def factory(draw):
-    mock_code = """
-    n_collaterals: public(uint256)
-    controllers: public(DynArray[address, 10000])
-
-    @external
-    def add_controller(controller: address):
-        self.controllers.append(controller)
-        self.n_collaterals = len(self.controllers)
-        print("n_collaterals set to", self.n_collaterals)
-    """
-
-    return boa.loads(mock_code)
+    return boa.load("contracts/testing/ControllerFactoryMock.vy")
 
 
 @composite
