@@ -174,6 +174,7 @@ def set_owner(new_owner: address):
 
     log SetOwner(new_owner)
 
+@view
 @external
 def incentives_weight() -> uint256:
     """
