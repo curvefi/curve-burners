@@ -1,7 +1,7 @@
 import boa
 import pytest
 
-from .conftest import Epoch, ETH_ADDRESS, ZERO_ADDRESS, WEEK
+from unitary.conftest import Epoch, ETH_ADDRESS, ZERO_ADDRESS, WEEK
 
 
 @pytest.fixture(scope="module", autouse=True)

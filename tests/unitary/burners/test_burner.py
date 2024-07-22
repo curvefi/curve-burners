@@ -1,7 +1,7 @@
 import boa
 
 
-from ..conftest import ETH_ADDRESS, Epoch
+from unitary.conftest import ETH_ADDRESS, Epoch
 
 
 def test_version(burner):
