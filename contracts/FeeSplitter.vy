@@ -2,8 +2,8 @@
 
 """
 @title FeeSplitter
-@notice A contract that collects fees from multiple controllers in a single
-transaction and distributes them according to some weights.
+@notice A contract that collects fees from multiple crvUSD controllers
+in a single transaction and distributes them according to some weights.
 @license Copyright (c) Curve.Fi, 2020-2024 - all rights reserved
 @author curve.fi
 @custom:security security@curve.fi
