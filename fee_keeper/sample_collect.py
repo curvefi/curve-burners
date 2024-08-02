@@ -195,7 +195,7 @@ BUILDERS = [
 ]
 
 
-def collect_l1(withdraw_proxy, burn, withdraw_fc, pk_profit, collect):
+def collect_l1(withdraw_proxy, burn, withdraw_fc, pk_profit, collect, iters=5):
     # multicall = web3.eth.contract("0xcA11bde05977b3631167028862bE2a173976CA11", abi=[{"inputs": [{"components": [{"internalType": "address", "name": "target", "type": "address"},{"internalType": "bool", "name": "allowFailure", "type": "bool"},{"internalType": "bytes", "name": "callData", "type": "bytes"}], "internalType": "struct Multicall3.Call3[]","name": "calls","type": "tuple[]"}],"name": "aggregate3", "outputs": [{"components": [{"internalType": "bool", "name": "success", "type": "bool"},{"internalType": "bytes", "name": "returnData", "type": "bytes"}],"internalType": "struct Multicall3.Result[]", "name": "returnData", "type": "tuple[]"}],"stateMutability": "payable","type": "function"}, ])
     fee_collector = web3.eth.contract(FEE_COLLECTOR, abi=[
         {"stateMutability":"nonpayable", "type": "function", "name": "withdraw_many", "inputs": [{"name": "_pools", "type": "address[]"}], "outputs": []},
@@ -265,17 +265,17 @@ def collect_l1(withdraw_proxy, burn, withdraw_fc, pk_profit, collect):
         }))
         nonce += 1
 
-    iters = 0
-    while web3.eth.get_transaction_count(wallet_address) < nonce and iters < 5:
-        try:
-            for tx in txs:
-                gas_estimate = web3.eth.estimate_gas(tx)
-                tx["gas"] = int(1.1 * gas_estimate)
-        except Exception as e:
-            print("Could not estimate gas", repr(e))
-            return
-        signed_txs = [web3.eth.account.sign_transaction(tx, private_key=wallet_pk) for tx in txs]
-        block = web3.eth.get_block_number() + 2
+    try:
+        for tx in txs:
+            gas_estimate = web3.eth.estimate_gas(tx)
+            tx["gas"] = int(2 * gas_estimate)
+    except Exception as e:
+        print("Could not estimate gas", repr(e))
+        return
+    signed_txs = [web3.eth.account.sign_transaction(tx, private_key=wallet_pk) for tx in txs]
+    # block = web3.eth.get_block_number()
+    while web3.eth.get_transaction_count(wallet_address) < nonce and iters > 0:
+        block = web3.eth.get_block_number() + 1
         print(f"Trying block: {block}")
         for builder in BUILDERS:
             if "flashbots" in builder:
@@ -304,8 +304,9 @@ def collect_l1(withdraw_proxy, burn, withdraw_fc, pk_profit, collect):
                     ]
                 })
             print(builder, r.json())
-        iters += 1
-        time.sleep(3 * 12)  # wait for a couple of blocks
+        iters -= 1
+        # block += 1
+        time.sleep(6)  # wait some time between blocks
     if web3.eth.get_transaction_count(wallet_address) > nonce:
         print("Go check ur wallet, I dit sth for ya ^&^")
 
@@ -365,9 +366,9 @@ def collect_l2(withdraw_proxy, burn, withdraw_fc, collect):
     print("Go check ur wallet, I dit sth for ya ^&^")
 
 
-def collect(withdraw_proxy, burn, withdraw_fc, pk_profit, collect):
+def collect(withdraw_proxy, burn, withdraw_fc, pk_profit, collect, iters=None):
     if chain == "ethereum":
-        collect_l1(withdraw_proxy, burn, withdraw_fc, pk_profit, collect)
+        collect_l1(withdraw_proxy, burn, withdraw_fc, pk_profit, collect, **({"iters": iters} if iters else {}))
     else:
         collect_l2(withdraw_proxy, burn, withdraw_fc, collect)
 
@@ -443,5 +444,6 @@ if __name__ == "__main__":
     #     withdraw_fc=[],
     #     pk_profit=[],
     #     collect=[],
+    #     iters=50,
     # )
     asyncio.run(run())

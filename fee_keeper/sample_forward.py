@@ -138,6 +138,7 @@ def forward(prev_tx, calls):
             "from": wallet_address, "nonce": nonce,
             "maxFeePerGas": max_fee, "maxPriorityFeePerGas": max_priority,
         }))
+    print(calls)
     txs.append(multicall.functions.aggregate3(calls).build_transaction({
         "from": wallet_address, "nonce": nonce + (1 if prev_tx else 0),
         "maxFeePerGas": max_fee, "maxPriorityFeePerGas": max_priority,
@@ -148,7 +149,7 @@ def forward(prev_tx, calls):
         try:
             for tx in txs:
                 gas_estimate = web3.eth.estimate_gas(tx)
-                tx["gas"] = int(1.1 * gas_estimate)
+                tx["gas"] = int(2 * gas_estimate)
         except Exception as e:
             print("Could not estimate gas", repr(e))
             return
@@ -242,7 +243,7 @@ async def run():
                 return
         for controller, amount in controllers.items():
             try:
-                if amount >= safe_threshold:
+                if amount >= safe_threshold:  # TODO check balance of controller in case of rug_debt_ceiling
                     calls.append((controller, False, bytes.fromhex("1e0cfcef")))
                     cnt += 1 ; total += amount
             except Exception as e:
