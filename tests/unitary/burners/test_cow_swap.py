@@ -4,7 +4,7 @@ import pytest
 import boa
 from boa import BoaError
 
-from ..conftest import Epoch, ZERO_ADDRESS, ETH_ADDRESS
+from unitary.conftest import Epoch, ZERO_ADDRESS, ETH_ADDRESS
 
 
 APP_DATA = "0x058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"
