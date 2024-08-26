@@ -130,10 +130,10 @@ class DataFetcher:
                     "decimals": [int(dec) for dec in pool_dict["decimals"] if int(dec) > 0],})
 
         self.peg_keepers = [
-            ("0x5B49b9adD1ecfe53E19cc2cFc8a33127cD6bA4C6", "0x4DEcE678ceceb27446b35C672dC7d61F30bAD69E".lower()),
-            ("0xFF78468340EE322ed63C432BF74D817742b392Bf", "0x390f3595bCa2Df7d23783dFd126427CCeb997BF4".lower()),
-            ("0x68e31e1eDD641B13cAEAb1Ac1BE661B19CC021ca", "0x625E92624Bc2D88619ACCc1788365A69767f6200".lower()),
-            ("0x0B502e48E950095d93E8b739aD146C72b4f6C820", "0x34D655069F4cAc1547E4C8cA284FfFF5ad4A8db0".lower()),
+            ("0x9201da0D97CaAAff53f01B2fB56767C7072dE340", "0x4DEcE678ceceb27446b35C672dC7d61F30bAD69E".lower()),  # USDC
+            ("0xFb726F57d251aB5C731E5C64eD4F5F94351eF9F3", "0x390f3595bCa2Df7d23783dFd126427CCeb997BF4".lower()),  # USDT
+            ("0x3fA20eAa107DE08B38a8734063D605d5842fe09C", "0x625E92624Bc2D88619ACCc1788365A69767f6200".lower()),  # pyUSD
+            ("0x0a05FF644878B908eF8EB29542aa88C07D9797D3", "0x34D655069F4cAc1547E4C8cA284FfFF5ad4A8db0".lower()),  # TUSD
         ] if chain == "ethereum" else []
         # Add crypto pools
 
