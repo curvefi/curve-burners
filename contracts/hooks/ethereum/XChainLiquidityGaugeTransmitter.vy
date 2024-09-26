@@ -173,7 +173,7 @@ def get_gas_top_ups(_gauges: DynArray[RootGauge, MAX_LEN]) -> DynArray[GasTopUp,
 @view
 @internal
 def _get_weight(gauge: RootGauge, time: uint256) -> uint256:
-    t: uint256 = staticcall GAUGE_CONTROLLER.time_weight(gauge.address)
+    t: uint256 = min(staticcall GAUGE_CONTROLLER.time_weight(gauge.address), time)
     if t > 0:
         pt: Point = staticcall GAUGE_CONTROLLER.points_weight(gauge.address, t)
         for i: uint256 in range(500):
