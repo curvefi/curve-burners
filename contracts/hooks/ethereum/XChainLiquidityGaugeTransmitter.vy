@@ -14,7 +14,11 @@ from ethereum.ercs import IERC20
 interface Bridger:
     def cost() -> uint256: view
 
+interface GaugeFactory:
+    def transmit_emissions(_gauge: address): nonpayable
+
 interface RootGauge:
+    def factory() -> GaugeFactory: view
     def transmit_emissions(): nonpayable
     def total_emissions() -> uint256: view
     def last_period() -> uint256: view
@@ -76,7 +80,8 @@ RATE_REDUCTION_TIME: constant(uint256) = YEAR
 def _transmit(_gauge: RootGauge) -> uint256:
     transmitted: uint256 = staticcall _gauge.total_emissions() - staticcall CRV.balanceOf(_gauge.address)
 
-    extcall _gauge.transmit_emissions()
+    factory: GaugeFactory = staticcall _gauge.factory()
+    extcall factory.transmit_emissions(_gauge.address)
 
     return staticcall _gauge.total_emissions() - transmitted - staticcall CRV.balanceOf(_gauge.address)
 
