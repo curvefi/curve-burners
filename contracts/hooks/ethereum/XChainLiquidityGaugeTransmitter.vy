@@ -105,6 +105,8 @@ def transmit(
     self._top_up(_gas_top_ups if len(_gas_top_ups) > 0 else self._get_gas_top_ups(_gauges), _eth_refund)
     surpassed: uint256 = 0
     for gauge: RootGauge in _gauges:
+        # Check that address is actually approved contract
+        type: int128 = staticcall GAUGE_CONTROLLER.gauge_types(gauge.address)
         if self._transmit(gauge) >= _min_amount:
             surpassed += 1
     return surpassed
@@ -148,8 +150,6 @@ def _get_gas_top_ups(gauges: DynArray[RootGauge, MAX_LEN]) -> DynArray[GasTopUp,
         else:
             bal: uint256 = gauge.address.balance
             cost: uint256 = staticcall bridger.cost()
-            print("Balance ", bal)
-            print("Cost ", cost)
             top_ups.append(
                 GasTopUp(
                     amount = max(staticcall bridger.cost(), bal) - bal,
