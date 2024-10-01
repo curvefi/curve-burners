@@ -126,7 +126,7 @@ def _top_up(top_ups: DynArray[GasTopUp, MAX_LEN], eth_refund: address):
                 # transfer coins beforehand
                 extcall top_up.token.transfer(top_up.receiver, top_up.amount)
     if eth_refund != empty(address):
-        send(eth_refund, msg.value - eth_sent)
+        send(eth_refund, self.balance - eth_sent)
 
 
 @external
