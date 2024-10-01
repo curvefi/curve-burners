@@ -7,6 +7,7 @@
 @custom:version 0.0.1
 """
 
+version: public(constant(String[8])) = "0.0.1"
 
 
 from ethereum.ercs import IERC20
@@ -181,18 +182,25 @@ def _get_weight(gauge: RootGauge, time: uint256) -> uint256:
     t: uint256 = min(staticcall GAUGE_CONTROLLER.time_weight(gauge.address), time)
     if t > 0:
         pt: Point = staticcall GAUGE_CONTROLLER.points_weight(gauge.address, t)
-        for i: uint256 in range(500):
-            if t >= time:
-                break
-            t += WEEK
-            d_bias: uint256 = pt.slope * WEEK
-            if pt.bias > d_bias:
-                pt.bias -= d_bias
-                # d_slope: uint256 = staticcall GAUGE_CONTROLLER.changes_weight(gauge_addr, t)
-                # pt.slope -= d_slope
-            else:
-                pt.bias = 0
-                pt.slope = 0
+        if t < time:
+            d_slope: uint256 = 0  # Will hallucinate up
+            # Try interpolation if at least 2 points known
+            prev_pt: Point = staticcall GAUGE_CONTROLLER.points_weight(gauge.address, t - WEEK)
+            if prev_pt.slope > pt.slope:
+                d_slope = prev_pt.slope - pt.slope
+
+            for i: uint256 in range(500):
+                if t >= time:
+                    break
+                t += WEEK
+                d_bias: uint256 = pt.slope * WEEK
+                if pt.bias > d_bias:
+                    pt.bias -= d_bias
+    #                d_slope: uint256 = staticcall GAUGE_CONTROLLER.points_weight(gauge_addr, t - WEEK)
+                    pt.slope -= d_slope
+                else:
+                    pt.bias = 0
+                    pt.slope = 0
         return pt.bias
     else:
         return 0
@@ -204,18 +212,25 @@ def _get_sum(gauge_type: int128, time: uint256) -> uint256:
     t: uint256 = min(staticcall GAUGE_CONTROLLER.time_sum(convert(gauge_type, uint256)), time)
     if t > 0:
         pt: Point = staticcall GAUGE_CONTROLLER.points_sum(gauge_type, t)
-        for i: uint256 in range(500):
-            if t >= time:
-                break
-            t += WEEK
-            d_bias: uint256 = pt.slope * WEEK
-            if pt.bias > d_bias:
-                pt.bias -= d_bias
-                # d_slope: uint256 = staticcall GAUGE_CONTROLLER.changes_sum(gauge_type, t)
-                # pt.slope -= d_slope
-            else:
-                pt.bias = 0
-                pt.slope = 0
+        if t < time:
+            d_slope: uint256 = 0  # Will hallucinate up
+            # Try interpolation if at least 2 points known
+            prev_pt: Point = staticcall GAUGE_CONTROLLER.points_sum(gauge_type, t - WEEK)
+            if prev_pt.slope > pt.slope:
+                d_slope = prev_pt.slope - pt.slope
+
+            for i: uint256 in range(500):
+                if t >= time:
+                    break
+                t += WEEK
+                d_bias: uint256 = pt.slope * WEEK
+                if pt.bias > d_bias:
+                    pt.bias -= d_bias
+                    # d_slope: uint256 = staticcall GAUGE_CONTROLLER.changes_sum(gauge_type, t)
+                    pt.slope -= d_slope
+                else:
+                    pt.bias = 0
+                    pt.slope = 0
         return pt.bias
     else:
         return 0
@@ -297,7 +312,7 @@ def calculate_emissions(
     """
     @notice Calculate amounts of CRV being transmitted at `_ts`.
         Gas-guzzling function, considered for off-chain use.
-        Also not precise, better to simulate txs beforehand.
+        Might hallucinate, better to simulate txs beforehand.
     @dev Replicated logic from GaugeController, but not precise because some variables are private.
     @param _gauges List of gauge addresses
     @param _ts Timestamp at which to calculate
