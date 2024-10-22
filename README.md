@@ -29,3 +29,7 @@ Run:
 pytest tests
 ```
 
+## CowSwap
+In order to swap accumulated coins into crvUSD, one should post orders to CowSwap backend.
+This can be done by running [WatchTower](https://github.com/cowprotocol/watch-tower).
+Instruction for setup can be found [here](fee_keeper/WatchTower.md).
