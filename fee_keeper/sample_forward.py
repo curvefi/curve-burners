@@ -31,6 +31,8 @@ PROXY = {
 }[chain]
 EMPTY_HOOK_INPUT = (0, 0, b"")
 
+COLLECT_FEES_CALL = bytes.fromhex("1e0cfcef")
+
 web3 = Web3(
     provider=Web3.HTTPProvider(
         RPC[chain],
@@ -53,7 +55,7 @@ BUILDERS = [
     "https://rpc.beaverbuild.org/",
     "https://rpc.titanbuilder.xyz/",
     "https://rsync-builder.xyz",
-    "https://relay.flashbots.net",
+    # "https://relay.flashbots.net",
 ]
 
 class DataFetcher:
@@ -124,9 +126,13 @@ class DataFetcher:
 def forward(prev_tx, calls):
     multicall = web3.eth.contract("0xcA11bde05977b3631167028862bE2a173976CA11", abi=[{"inputs": [{"components": [{"internalType": "address", "name": "target", "type": "address"},{"internalType": "bool", "name": "allowFailure", "type": "bool"},{"internalType": "bytes", "name": "callData", "type": "bytes"}], "internalType": "struct Multicall3.Call3[]","name": "calls","type": "tuple[]"}],"name": "aggregate3", "outputs": [{"components": [{"internalType": "bool", "name": "success", "type": "bool"},{"internalType": "bytes", "name": "returnData", "type": "bytes"}],"internalType": "struct Multicall3.Result[]", "name": "returnData", "type": "tuple[]"}],"stateMutability": "payable","type": "function"}, ])
     fee_collector = web3.eth.contract(FEE_COLLECTOR, abi=[{"stateMutability": "payable", "type": "function", "name": "forward", "inputs": [{"name": "_hook_inputs", "type": "tuple[]","components": [{"name": "hook_id", "type": "uint8"}, {"name": "value", "type": "uint256"},{"name": "data", "type": "bytes"}]}], "outputs": [{"name": "", "type": "uint256"}]},{"stateMutability": "payable", "type": "function", "name": "forward", "inputs": [{"name": "_hook_inputs", "type": "tuple[]","components": [{"name": "hook_id", "type": "uint8"}, {"name": "value", "type": "uint256"},{"name": "data", "type": "bytes"}]}, {"name": "_receiver", "type": "address"}],"outputs": [{"name": "", "type": "uint256"}]}, ], )
+    fee_splitter = web3.eth.contract("0x2dFd89449faff8a532790667baB21cF733C064f2", abi=[{"anonymous":False,"inputs":[],"name":"SetReceivers","type":"event"},{"anonymous":False,"inputs":[],"name":"LivenessProtectionTriggered","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"name":"receiver","type":"address"},{"indexed":False,"name":"weight","type":"uint256"}],"name":"FeeDispatched","type":"event"},{"anonymous":False,"inputs":[{"indexed":True,"name":"previous_owner","type":"address"},{"indexed":True,"name":"new_owner","type":"address"}],"name":"OwnershipTransferred","type":"event"},{"inputs":[{"name":"new_owner","type":"address"}],"name":"transfer_ownership","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"renounce_ownership","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"owner","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"update_controllers","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"n_controllers","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[{"name":"arg0","type":"address"}],"name":"allowed_controllers","outputs":[{"name":"","type":"bool"}],"stateMutability":"view","type":"function"},{"inputs":[{"name":"arg0","type":"uint256"}],"name":"controllers","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"dispatch_fees","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"name":"controllers","type":"address[]"}],"name":"dispatch_fees","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[{"components":[{"name":"addr","type":"address"},{"name":"weight","type":"uint256"}],"name":"receivers","type":"tuple[]"}],"name":"set_receivers","outputs":[],"stateMutability":"nonpayable","type":"function"},{"inputs":[],"name":"excess_receiver","outputs":[{"name":"","type":"address"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"n_receivers","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},{"inputs":[],"name":"version","outputs":[{"name":"","type":"string"}],"stateMutability":"view","type":"function"},{"inputs":[{"name":"arg0","type":"uint256"}],"name":"receivers","outputs":[{"components":[{"name":"addr","type":"address"},{"name":"weight","type":"uint256"}],"name":"","type":"tuple"}],"stateMutability":"view","type":"function"},{"inputs":[{"name":"_crvusd","type":"address"},{"name":"_factory","type":"address"},{"components":[{"name":"addr","type":"address"},{"name":"weight","type":"uint256"}],"name":"receivers","type":"tuple[]"},{"name":"owner","type":"address"}],"outputs":[],"stateMutability":"nonpayable","type":"constructor"}])
 
     nonce = web3.eth.get_transaction_count(wallet_address)
+    controllers = [addr for addr, _, method in calls if method == COLLECT_FEES_CALL]
+    calls = [call for call in calls if call[2] != COLLECT_FEES_CALL]
     calls += [
+        (fee_splitter.address, False, fee_splitter.encodeABI("dispatch_fees", (controllers,))),
         (fee_collector.address, False, fee_collector.encodeABI("forward", ([EMPTY_HOOK_INPUT], "0xcb78EA4Bc3c545EB48dDC9b8302Fa9B03d1B1B61"))),
     ]
     max_fee = 20 * 10 ** 9  # even 10 GWEI should be enough for Wednesday morning
@@ -138,18 +144,25 @@ def forward(prev_tx, calls):
             "from": wallet_address, "nonce": nonce,
             "maxFeePerGas": max_fee, "maxPriorityFeePerGas": max_priority,
         }))
-    print(calls)
+    print(prev_tx, calls, controllers)
     txs.append(multicall.functions.aggregate3(calls).build_transaction({
         "from": wallet_address, "nonce": nonce + (1 if prev_tx else 0),
         "maxFeePerGas": max_fee, "maxPriorityFeePerGas": max_priority,
     }))
 
     iters = 0
-    while web3.eth.get_transaction_count(wallet_address) <= nonce and iters < 2:
+    while web3.eth.get_transaction_count(wallet_address) <= nonce and iters < 3:
         try:
             for tx in txs:
                 gas_estimate = web3.eth.estimate_gas(tx)
-                tx["gas"] = int(2 * gas_estimate)
+                assert gas_estimate < 30_000_000, "Block gas exceeded"
+                tx["gas"] = max(
+                    min(int(2.0 * gas_estimate), 20 * 10 ** 6),
+                    min(int(1.5 * gas_estimate), 25 * 10 ** 6),
+                    min(int(1.1 * gas_estimate), 30 * 10 ** 6),
+                )
+                if tx["gas"] > 20 * 10 ** 6:
+                    print(f"WARNING: huge gas = {tx['gas']}")
         except Exception as e:
             print("Could not estimate gas", repr(e))
             return
@@ -166,7 +179,7 @@ def forward(prev_tx, calls):
                         {
                             "version": "v0.1",
                             "inclusion": {"block": str(hex(block)), "maxBlock": str(hex(block))},
-                            "body": [{"tx": tx.rawTransaction.hex(), "canRevert": True} for tx in signed_txs],
+                            "body": [{"tx": tx.raw_transaction.hex(), "canRevert": True} for tx in signed_txs],
                         }
                     ]
                 })
@@ -177,7 +190,7 @@ def forward(prev_tx, calls):
                     "method": "eth_sendBundle",
                     "params": [
                         {
-                            "txs": [tx.rawTransaction.hex() for tx in signed_txs],
+                            "txs": [tx.raw_transaction.hex() for tx in signed_txs],
                             "blockNumber": str(hex(block)),
                         }
                     ]
@@ -244,7 +257,7 @@ async def run():
         for controller, amount in controllers.items():
             try:
                 if amount >= safe_threshold:  # TODO check balance of controller in case of rug_debt_ceiling
-                    calls.append((controller, False, bytes.fromhex("1e0cfcef")))
+                    calls.append((controller, False, COLLECT_FEES_CALL))
                     cnt += 1 ; total += amount
             except Exception as e:
                 print(f"{controller} admin_fees() {repr(e)}")
@@ -276,4 +289,14 @@ async def run():
 
 
 if __name__ == "__main__":
+    # forward(
+    #     prev_tx=None,
+    #     calls=[
+    #         ("0xA920De414eA4Ab66b97dA1bFE9e6EcA7d4219635", False, COLLECT_FEES_CALL),  # ETH
+    #         ("0x4e59541306910aD6dC1daC0AC9dFB29bD9F15c67", False, COLLECT_FEES_CALL),  # wBTC
+    #         ("0x100dAa78fC509Db39Ef7D04DE0c1ABD299f4C6CE", False, COLLECT_FEES_CALL),  # wstETH
+    #         ("0x1C91da0223c763d2e0173243eAdaA0A2ea47E704", False, COLLECT_FEES_CALL),  # tBTC
+    #         ("0xEC0820EfafC41D8943EE8dE495fC9Ba8495B15cf", False, COLLECT_FEES_CALL),  # sfrxETH v2
+    #     ]
+    # )
     asyncio.run(run())
