@@ -1,4 +1,4 @@
-# @version 0.4.0
+# pragma version 0.4.3
 """
 @title XChainLiquidityGaugeTransmitter
 @license MIT
@@ -17,6 +17,8 @@ interface Bridger:
 
 interface GaugeFactory:
     def transmit_emissions(_gauge: address): nonpayable
+    def get_gauge_count(_chain_id: uint256) -> uint256: view
+    def get_gauge(_chain_id: uint256, _idx: uint256) -> address: view
 
 interface RootGauge:
     def factory() -> GaugeFactory: view
@@ -25,6 +27,7 @@ interface RootGauge:
     def last_period() -> uint256: view
     def bridger() -> Bridger: view
     def inflation_params() -> InflationParams: view
+    def is_killed() -> bool: view
 
 interface GaugeController:
     def checkpoint_gauge(addr: address): nonpayable
@@ -61,10 +64,16 @@ struct GasTopUp:
     token: IERC20  # ETH_ADDRESS for raw ETH
     receiver: address
 
+struct GaugeInfo:
+    gauge: RootGauge
+    chain_id: uint256
+
 
 CRV: public(constant(IERC20)) = IERC20(0xD533a949740bb3306d119CC777fa900bA034cd52)
 ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
-MAX_LEN: constant(uint256) = 64
+MAX_LEN: constant(uint256) = 128
+MAX_GAUGES_PER_CHAIN: constant(uint256) = 1024  # Used in get_active_gauges view function
+MAX_GAUGES: constant(uint256) = 1024  # Used in get_active_gauges view function
 
 MINTER: public(constant(Minter)) = Minter(0xd061D61a4d941c39E5453435B6345Dc261C2fcE0)
 
@@ -170,6 +179,34 @@ def get_gas_top_ups(_gauges: DynArray[RootGauge, MAX_LEN]) -> DynArray[GasTopUp,
     """
     return self._get_gas_top_ups(_gauges)
 
+
+@view
+@external
+def get_active_gauges(_factory: GaugeFactory, _chain_ids: DynArray[uint256, MAX_LEN]) -> DynArray[GaugeInfo, MAX_GAUGES]:
+    """
+    @notice Get active xchain gauges.
+        Gas-guzzling function, considered for off-chain use.
+    @param _factory Root gauge factory address
+    @param _chain_ids Chain IDs of networks to check gauges for
+    """
+    gauges: DynArray[GaugeInfo, MAX_GAUGES] = empty(DynArray[GaugeInfo, MAX_GAUGES])
+    for chain_id: uint256 in _chain_ids:
+        gauge_count: uint256 = staticcall _factory.get_gauge_count(chain_id)
+        for idx: uint256 in range(gauge_count, bound=MAX_GAUGES_PER_CHAIN):
+            gauge: RootGauge = RootGauge(staticcall _factory.get_gauge(chain_id, idx))
+            success: bool = False
+            response: Bytes[32] = b""
+            success, response = raw_call(
+                GAUGE_CONTROLLER.address,
+                abi_encode(gauge.address, method_id=method_id("gauge_types(address)")),
+                max_outsize=32,
+                is_static_call=True,
+                revert_on_failure=False,
+            )
+            if success and not (staticcall gauge.is_killed()):
+                gauges.append(GaugeInfo(gauge=gauge, chain_id=chain_id))
+
+    return gauges
 
 ### GAUGE_CONTROLLER replication
 ### Can not follow fully bc of private variables,
