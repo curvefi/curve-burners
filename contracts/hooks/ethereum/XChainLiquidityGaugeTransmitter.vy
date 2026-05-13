@@ -122,6 +122,44 @@ def transmit(
     return surpassed
 
 
+@internal
+def _transmit_no_revert(gauge: RootGauge) -> uint256:
+    transmitted: uint256 = staticcall gauge.total_emissions() - staticcall CRV.balanceOf(gauge.address)
+
+    factory: GaugeFactory = staticcall gauge.factory()
+    success: bool = raw_call(
+        factory.address,
+        abi_encode(gauge.address, method_id=method_id("transmit_emissions(address)")),
+        max_outsize=0,
+        revert_on_failure=False,
+    )
+    if not success:
+        return 0
+
+    return staticcall gauge.total_emissions() - transmitted - staticcall CRV.balanceOf(gauge.address)
+
+
+@external
+@payable
+def transmit_no_revert(
+    _gauges: DynArray[RootGauge, MAX_LEN],
+    _gas_top_ups: DynArray[GasTopUp, MAX_LEN]=[],
+    _eth_refund: address=msg.sender,
+) -> DynArray[uint256, MAX_LEN]:
+    """
+    @notice Transmit emissions for xchain gauges without reverting
+    @param _gauges Gauges to transmit emissions for
+    @param _gas_top_ups Gas amount to send
+    @param _eth_refund Receiver of excess ETH (msg.sender by default)
+    @return Number of gauges surpassed `_min_amount` emissions
+    """
+    self._top_up(_gas_top_ups if len(_gas_top_ups) > 0 else self._get_gas_top_ups(_gauges), _eth_refund)
+    transmitted: DynArray[uint256, MAX_LEN] = empty(DynArray[uint256, MAX_LEN])
+    for gauge: RootGauge in _gauges:
+        transmitted.append(self._transmit_no_revert(gauge))
+    return transmitted
+
+
 @payable
 @internal
 def _top_up(top_ups: DynArray[GasTopUp, MAX_LEN], eth_refund: address):
@@ -135,7 +173,7 @@ def _top_up(top_ups: DynArray[GasTopUp, MAX_LEN], eth_refund: address):
                 # transfer coins beforehand
                 extcall top_up.token.transfer(top_up.receiver, top_up.amount)
     if eth_refund != empty(address):
-        send(eth_refund, self.balance - eth_sent)
+        send(eth_refund, self.balance)
 
 
 @external
