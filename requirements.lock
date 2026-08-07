@@ -1,0 +1,91 @@
+# Python 3.12 lock for the Vyper-master/Titanoboa-master test environment.
+# Direct Git dependencies are immutable commit pins; transitive dependencies
+# are the versions resolved from a clean environment on 2026-07-16.
+#
+# Legacy compatibility:
+# - VVM 0.3.2 compiles repository contracts pinned to Vyper 0.3.10.
+# - boa-solidity 0.1.1 is incompatible with Titanoboa 0.2.8; the pinned
+#   boa-solidity 0.1.2 revision supports Titanoboa >=0.2.5.
+# - Run `python scripts/bootstrap_test_compilers.py` to install and verify
+#   Vyper 0.3.10+commit.91361694 and solc 0.8.12 before running all tests.
+
+annotated-types==0.7.0
+attrs==26.1.0
+babel==2.18.0
+bitarray==3.9.0
+boa-solidity @ git+https://github.com/z80dev/boa-solidity@3e00649f643ce69108f266942c90bffc717b18b7
+cached-property==2.0.1
+cbor2==5.9.0
+certifi==2026.6.17
+charset-normalizer==3.4.9
+ckzg==2.1.8
+click==8.4.2
+colorama==0.4.6
+coverage==7.15.2
+cytoolz==1.1.0
+eth_abi==5.2.0
+eth-account==0.13.7
+eth-bloom==3.1.0
+eth-hash==0.8.0
+eth-keyfile==0.8.1
+eth-keys==0.7.0
+eth-rlp==2.2.0
+eth-stdlib==0.2.8
+eth-typing==6.0.0
+eth-utils==6.0.0
+ghp-import==2.1.0
+hexbytes==1.3.1
+hypothesis==6.102.4
+idna==3.18
+immutables==0.21
+iniconfig==2.3.0
+Jinja2==3.1.6
+lark==1.3.1
+lru-dict==1.4.1
+Markdown==3.10.2
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+mdurl==0.1.2
+mergedeep==1.3.4
+mkdocs==1.6.1
+mkdocs-get-deps==0.2.2
+mkdocs-material==9.5.41
+mkdocs-material-extensions==1.3.1
+packaging==24.2
+paginate==0.5.7
+parsimonious==0.10.0
+pathspec==1.1.1
+platformdirs==4.10.0
+pluggy==1.6.0
+py-ecc==8.0.0
+py-evm==0.12.1b1
+py-solc-x==2.0.5
+pycryptodome==3.23.0
+pydantic==2.13.4
+pydantic_core==2.46.4
+Pygments==2.20.0
+pymdown-extensions==10.21.3
+pytest==9.1.1
+pytest-cov==7.1.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.0.1
+PyYAML==6.0.3
+pyyaml_env_tag==1.1
+regex==2026.7.10
+requests==2.34.2
+rich==15.0.0
+rlp==4.1.0
+setuptools==83.0.0
+six==1.17.0
+snekmate @ git+https://github.com/pcaversaccio/snekmate@7008a6af169d5c10b939a463b0b85331f99fe4ff
+sortedcontainers==2.4.0
+titanoboa @ git+https://github.com/vyperlang/titanoboa@7740c2efd9094973debb98c5cfe7923bc2552ce6
+toolz==1.1.0
+trie==3.1.0
+typing_extensions==4.16.0
+typing-inspection==0.4.2
+urllib3==2.7.0
+vvm==0.3.2
+vyper @ git+https://github.com/vyperlang/vyper@03e096e74b53993e652ed83dddecbee6f889fcc5
+watchdog==6.0.0
+wheel==0.47.0
