@@ -1,0 +1,28 @@
+"""
+@title IOrderValidator
+@author Curve Finance
+@license MIT
+@notice Protocol validator adapter called by the auction's ERC-1271 dispatcher.
+@dev validate() must be stateless and view: it recomputes the protocol EIP-712
+     digest from the payload and returns the normalized order for core economic
+     checks. It never holds funds, never receives allowance, and is reached only
+     through staticcall. The struct is the single-source
+     contracts/auction/adapter_types.vy NormalizedOrder.
+     ABI: validate(address,bytes32,bytes) returns a single static tuple
+     (bytes32,bytes32,uint256,address,address,address,address,address,
+     uint256,uint256,uint256,bool); the dispatcher calls it via raw_call with
+     revert_on_failure=False and abi_decode of the exact-size return data.
+     Bytes[4096] matches adapter_types.MAX_ADAPTER_PAYLOAD.
+"""
+
+from contracts.auction import adapter_types
+
+
+@external
+@view
+def validate(
+    _auction: address,
+    _digest: bytes32,
+    _payload: Bytes[4096],
+) -> adapter_types.NormalizedOrder:
+    ...

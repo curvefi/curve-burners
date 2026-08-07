@@ -1,0 +1,53 @@
+"""
+@title IDutchAuction
+@author Curve Finance
+@license MIT
+@notice Minimal Dutch auction ABI compatible with a subset of Yearn Auction:
+        want/available/price/getAmountNeeded/take.
+@dev Only these five selectors from Yearn Auction (yearn/
+     tokenized-strategy-periphery, src/Auctions/Auction.sol) are implemented.
+     Yearn's additional surface is absent — Vyper has no overloading — namely
+     the getAmountNeeded(address) and timestamp overloads, the shortened take
+     overloads, price(address,uint256), and the isActive/kicked/auctions
+     views; Yearn tooling relying on them will not work unchanged. price()
+     here is a WAD-scaled (1e18) unit price over raw token amounts and
+     differs from Yearn's decimal-normalized price for sell tokens with
+     non-18 decimals: integrators MUST quote with getAmountNeeded() instead
+     of multiplying price(). Yearn's code is AGPL-3.0: only the selectors and
+     their intended semantics were copied, the implementation behind this
+     interface is independent.
+"""
+
+
+@external
+@view
+def want() -> address:
+    ...
+
+
+@external
+@view
+def available(_from: address) -> uint256:
+    ...
+
+
+@external
+@view
+def price(_from: address) -> uint256:
+    ...
+
+
+@external
+@view
+def getAmountNeeded(_from: address, amountToTake: uint256) -> uint256:
+    ...
+
+
+@external
+def take(
+    _from: address,
+    maxAmount: uint256,
+    takerReceiver: address,
+    data: Bytes[8192],
+) -> uint256:
+    ...

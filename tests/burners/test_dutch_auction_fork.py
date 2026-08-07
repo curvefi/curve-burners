@@ -24,6 +24,7 @@ from .test_dutch_auction_v2 import (
     LOT_END,
     LOT_INITIAL_AMOUNT,
     LOT_START,
+    MAX_UINT256,
     ORDER_BUY_AMOUNT,
     ORDER_BUY_BALANCE,
     ORDER_BUY_TOKEN,
@@ -209,9 +210,24 @@ def _abi_contract(abi: list[dict[str, Any]], name: str, address: str) -> Any:
 
 
 def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
+    """Production-like Gnosis fork simulation of the CoW rail.
+
+    Real components: deployed ComposableCoW (order generation and signature
+    encoding), GPv2Settlement (domain separator, ERC-1271 caller) and
+    GPv2VaultRelayer (allowance spend, Settlement-only access control).
+    Simulated boundary: the solver-side settlement netting is external to the
+    chain, so the target payment is modeled as a direct transfer of the exact
+    on-chain quote to the FeeCollector instead of a full GPv2 settle() batch.
+
+    Skips without a Gnosis RPC; set REQUIRE_GNOSIS_FORK=1 (CI quality gate)
+    to turn the skip into a hard failure.
+    """
     rpc_url = _rpc_url()
     if rpc_url is None:
-        pytest.skip(f"Gnosis fork RPC unavailable; set one of {', '.join(RPC_ENV_KEYS)}")
+        message = f"Gnosis fork RPC unavailable; set one of {', '.join(RPC_ENV_KEYS)}"
+        if os.environ.get("REQUIRE_GNOSIS_FORK"):
+            pytest.fail(message)
+        pytest.skip(message)
 
     fork_env = boa.Env()
     with boa.swap_env(fork_env):
@@ -233,6 +249,7 @@ def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
         keeper = boa.env.generate_address("keeper")
         simulated_solver = boa.env.generate_address("simulated_solver")
 
+        handler = boa.load("contracts/cow/WatchtowerHandler.vy")
         erc20 = boa.load_partial("contracts/testing/ERC20Mock.vy")
         target = erc20.deploy("Fork Target", "TARGET", 18)
         sell_token = erc20.deploy("Fork Sell Token", "SELL", 18)
@@ -249,15 +266,24 @@ def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
             STEP_DURATION,
             COW_ORDER_VALIDITY,
             APP_DATA,
+            ZERO_ADDRESS,
+            ZERO_ADDRESS,
         )
         with boa.env.prank(owner):
             fee_collector.set_burner(burner)
             fee_collector.set_killed([(ZERO_ADDRESS, 0)])
-            burner.configure_cow(COMPOSABLE_COW, GPV2_VAULT_RELAYER)
+            burner.configure_cow(GPV2_SETTLEMENT, COMPOSABLE_COW, handler)
             burner.enable_cow()
 
+        # The relayer and domain separator are read from the real settlement.
+        assert burner.vault_relayer() == GPV2_VAULT_RELAYER
+        assert bytes(burner.cow_domain_separator()) == bytes(
+            settlement.domainSeparator()
+        )
         assert burner.supportsInterface(BURNER_INTERFACE)
-        assert burner.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
+        # The generator interface lives on the standalone handler now.
+        assert not burner.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
+        assert handler.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
 
         _move_to_epoch(fee_collector, Epoch.COLLECT)
         amount = 1_000 * WAD
@@ -266,16 +292,16 @@ def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
             fee_collector.collect([sell_token.address], keeper)
 
         lot = burner.lots(sell_token)
+        # The contract stores no time bounds; extend the record so LOT_START
+        # and LOT_END keep indexing the epoch window.
+        lot = (*lot, *burner.epoch_bounds(lot[0]))
         assert lot[LOT_INITIAL_AMOUNT] > 0
-        assert (
-            sell_token.allowance(burner, GPV2_VAULT_RELAYER)
-            == lot[LOT_INITIAL_AMOUNT]
-        )
+        assert sell_token.allowance(burner, GPV2_VAULT_RELAYER) == MAX_UINT256
         _move_to_timestamp(lot[LOT_START])
 
         generation = burner.cow_generation()
         static_input = _static_input(sell_token, generation)
-        params = (burner.address, ZERO_BYTES32, static_input)
+        params = (handler.address, ZERO_BYTES32, static_input)
         order, signature = composable_cow.getTradeableOrderWithSignature(
             burner.address, params, b"", []
         )
@@ -297,6 +323,19 @@ def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
         order_digest = _gpv2_order_digest(order, settlement.domainSeparator())
         with boa.env.prank(GPV2_SETTLEMENT):
             assert burner.isValidSignature(order_digest, signature) == ERC1271_MAGIC_VALUE
+            # Yearn-style self-published rail: the bare abi-encoded order is a
+            # valid ERC-1271 signature all by itself — no registration needed.
+            bare_signature = encode(
+                [
+                    "(address,address,address,uint256,uint256,uint32,bytes32,"
+                    "uint256,bytes32,bool,bytes32,bytes32)"
+                ],
+                [tuple(order)],
+            )
+            assert (
+                burner.isValidSignature(order_digest, bare_signature)
+                == ERC1271_MAGIC_VALUE
+            )
 
         # The real relayer enforces Settlement-only access and spends the burner's allowance.
         partial_amount = order[ORDER_SELL_AMOUNT] // 3
@@ -314,9 +353,14 @@ def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
         assert sell_token.balanceOf(burner) == lot[LOT_INITIAL_AMOUNT] - partial_amount
         assert (
             sell_token.allowance(burner, GPV2_VAULT_RELAYER)
-            == lot[LOT_INITIAL_AMOUNT] - partial_amount
+            == MAX_UINT256 - partial_amount
         )
         assert burner.available(sell_token) == lot[LOT_INITIAL_AMOUNT] - partial_amount
+
+        # Anyone can top the shared-router allowance back up while CoW holds a ref.
+        with boa.env.prank(keeper):
+            burner.sync_router_approvals(GPV2_VAULT_RELAYER, [sell_token.address])
+        assert sell_token.allowance(burner, GPV2_VAULT_RELAYER) == MAX_UINT256
 
         payment = burner.getAmountNeeded(sell_token, partial_amount)
         target._mint_for_testing(simulated_solver, payment)
@@ -330,7 +374,7 @@ def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
         domain_separator = settlement.domainSeparator()
         invalid_digest = _gpv2_order_digest(invalid_order, domain_separator)
         with boa.reverts():
-            burner.verify(
+            handler.verify(
                 burner.address,
                 GPV2_SETTLEMENT,
                 invalid_digest,

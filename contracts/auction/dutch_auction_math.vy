@@ -18,6 +18,26 @@
 """
 
 
+error DivisionByZero:
+    pass
+
+
+error MulDivOverflow:
+    pass
+
+
+error ZeroStep:
+    pass
+
+
+error FloorAboveStart:
+    pass
+
+
+error GrowthFactor:
+    pass
+
+
 RAY: constant(uint256) = 10**27
 WAD: constant(uint256) = 10**18
 UINT256_MAX: constant(uint256) = max_value(uint256)
@@ -50,7 +70,7 @@ def mul_div_up(a: uint256, b: uint256, denominator: uint256) -> uint256:
          2**256. Eight Newton steps derive all 256 inverse bits from the fact that
          every odd integer is its own inverse modulo 2.
     """
-    assert denominator != 0, "Division by zero"
+    assert denominator != 0, DivisionByZero()
 
     if a == 0 or b == 0:
         return 0
@@ -66,13 +86,13 @@ def mul_div_up(a: uint256, b: uint256, denominator: uint256) -> uint256:
     if product_high == 0:
         quotient: uint256 = product_low // denominator
         if remainder != 0:
-            assert quotient != UINT256_MAX, "mulDiv overflow"
+            assert quotient != UINT256_MAX, MulDivOverflow()
             quotient += 1
         return quotient
 
     # The high word must be smaller than the denominator for the floor quotient
     # to fit in uint256. The final increment separately checks ceil overflow.
-    assert denominator > product_high, "mulDiv overflow"
+    assert denominator > product_high, MulDivOverflow()
 
     # Make the 512-bit numerator exactly divisible by denominator.
     if remainder > product_low:
@@ -100,7 +120,7 @@ def mul_div_up(a: uint256, b: uint256, denominator: uint256) -> uint256:
 
     quotient: uint256 = unsafe_mul(product_low, inverse)
     if remainder != 0:
-        assert quotient != UINT256_MAX, "mulDiv overflow"
+        assert quotient != UINT256_MAX, MulDivOverflow()
         quotient += 1
     return quotient
 
@@ -146,9 +166,9 @@ def total_price(
          The integrating contract must enforce the supported factor/step domain
          documented above when validating immutable deployment parameters.
     """
-    assert step_duration != 0, "Zero step"
-    assert floor_total <= start_total, "Floor above start"
-    assert decay_factor_ray <= RAY, "Growth factor"
+    assert step_duration != 0, ZeroStep()
+    assert floor_total <= start_total, FloorAboveStart()
+    assert decay_factor_ray <= RAY, GrowthFactor()
 
     steps: uint256 = elapsed // step_duration
     decayed_total: uint256 = self.mul_div_up(

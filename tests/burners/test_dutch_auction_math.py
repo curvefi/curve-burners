@@ -6,6 +6,8 @@ import vyper
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from .conftest import custom_err
+
 
 RAY = 10**27
 WAD = 10**18
@@ -26,7 +28,7 @@ NON_DIVISIBLE_DURATION_DECAY_FACTOR_RAY = 992_036_788_574_402_203_131_884_429
 MATH_HARNESS = """
 # pragma version 0.5.0a4
 
-import contracts.burners.modules.dutch_auction_math as auction_math
+import contracts.auction.dutch_auction_math as auction_math
 
 
 @external
@@ -116,7 +118,7 @@ def test_compiler_pin():
 def test_mul_div_up_matches_unbounded_integer_model(auction_math, a, b, denominator):
     expected = ceil_div(a * b, denominator)
     if expected > MAX_UINT256:
-        with boa.reverts("mulDiv overflow"):
+        with boa.reverts(custom_err("MulDivOverflow()")):
             auction_math.mul_div_up(a, b, denominator)
     else:
         assert auction_math.mul_div_up(a, b, denominator) == expected
@@ -137,12 +139,12 @@ def test_mul_div_up_boundaries(auction_math, a, b, denominator):
 
 
 def test_mul_div_up_reverts_on_zero_denominator(auction_math):
-    with boa.reverts("Division by zero"):
+    with boa.reverts(custom_err("DivisionByZero()")):
         auction_math.mul_div_up(1, 1, 0)
 
 
 def test_mul_div_up_reverts_when_result_overflows(auction_math):
-    with boa.reverts("mulDiv overflow"):
+    with boa.reverts(custom_err("MulDivOverflow()")):
         auction_math.mul_div_up(MAX_UINT256, MAX_UINT256, 1)
 
 
@@ -154,7 +156,7 @@ def test_mul_div_up_reverts_when_only_ceil_overflows(auction_math):
     product = a * b
     assert product // denominator == MAX_UINT256
     assert product % denominator != 0
-    with boa.reverts("mulDiv overflow"):
+    with boa.reverts(custom_err("MulDivOverflow()")):
         auction_math.mul_div_up(a, b, denominator)
 
 
@@ -414,11 +416,11 @@ def test_reference_geometric_price_vectors(auction_math, window_percent, expecte
 
 
 def test_total_price_rejects_invalid_parameters(auction_math):
-    with boa.reverts("Zero step"):
+    with boa.reverts(custom_err("ZeroStep()")):
         auction_math.total_price(1, 0, RAY, 0, 0)
-    with boa.reverts("Floor above start"):
+    with boa.reverts(custom_err("FloorAboveStart()")):
         auction_math.total_price(1, 2, RAY, 0, 1)
-    with boa.reverts("Growth factor"):
+    with boa.reverts(custom_err("GrowthFactor()")):
         auction_math.total_price(1, 0, RAY + 1, 0, 1)
 
 
@@ -431,21 +433,21 @@ def test_total_price_rejects_invalid_parameters(auction_math):
 def test_quote_helpers_round_up(auction_math, total, amount, initial_amount):
     payment = ceil_div(total * amount, initial_amount)
     if payment > MAX_UINT256:
-        with boa.reverts("mulDiv overflow"):
+        with boa.reverts(custom_err("MulDivOverflow()")):
             auction_math.proportional_payment(total, amount, initial_amount)
     else:
         assert auction_math.proportional_payment(total, amount, initial_amount) == payment
 
     unit_quote = ceil_div(total * WAD, initial_amount)
     if unit_quote > MAX_UINT256:
-        with boa.reverts("mulDiv overflow"):
+        with boa.reverts(custom_err("MulDivOverflow()")):
             auction_math.unit_quote_wad(total, initial_amount)
     else:
         assert auction_math.unit_quote_wad(total, initial_amount) == unit_quote
 
 
 def test_quote_helpers_zero_denominator(auction_math):
-    with boa.reverts("Division by zero"):
+    with boa.reverts(custom_err("DivisionByZero()")):
         auction_math.unit_quote_wad(1, 0)
-    with boa.reverts("Division by zero"):
+    with boa.reverts(custom_err("DivisionByZero()")):
         auction_math.proportional_payment(1, 1, 0)
