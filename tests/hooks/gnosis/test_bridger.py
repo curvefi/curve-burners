@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import boa
 import pytest
 
@@ -5,6 +7,7 @@ import pytest
 @pytest.fixture(scope="module")
 def bridge():
     return boa.loads("""
+# pragma version 0.3.10
 from vyper.interfaces import ERC20
 @external
 def relayTokens(_token: ERC20, _receiver: address, _value: uint256):
@@ -19,7 +22,7 @@ def bridger():
 
 @pytest.fixture(scope="module")
 def target(bridge):
-    source_code = boa.load_partial("contracts/testing/ERC20Mock.vy").compiler_data.source_code
+    source_code = Path("contracts/testing/ERC20Mock.vy").read_text(encoding="utf-8")
     return boa.loads(source_code + f"""
 @external
 @view

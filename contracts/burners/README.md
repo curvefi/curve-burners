@@ -12,31 +12,39 @@ Coins are priced via CowSwap solvers' internal auction.
 
 
 ## DutchAuctionBurner
-Sell coins using custom DutchAuction.
-Using these formulas to price coins:
 
-$$ price = low + max\\_price\\_amplifier \cdot low \cdot \frac{base ^ {time} - 1}{base - 1} $$  
+During `FeeCollector`'s COLLECT phase, each token's full burner balance is
+snapshotted as the lot for the upcoming calendar EXCHANGE week. The snapshot
+fixes `initial_amount`, `start_total`, `floor_total`, and the auction time
+frame; partial fills do not resize the lot or restart its curve.
 
-$$ low = \frac{record_c(t) \cdot smoothing + target\\_threshold}{record_c(c) \cdot smoothing + balance_c} $$
+While the lot is active, its total target-token price follows a discrete
+geometric decay:
 
-### target_threshold
-In limit, auction will be triggered when the price crosses $amount \cdot coin \  price - tx \  cost$.
-In times of $amount \approx \frac{tx \  cost}{coin \  price}$ the whole profit will be reduced.
-To prevent this, `target_threshold` is introduced describing minimum exchange amount possible.
-We have no information about arbitrary coin price, though we can estimate `tx_cost` for different chains.
-This parameter also makes possible to anchor to some minimum price and support any prices of coins.
+```text
+steps       = floor((timestamp - start) / step_duration)
+total_price = max(floor_total, ceil(start_total * decay_factor^steps))
+payment     = ceil(total_price * amount / initial_amount)
+```
 
-### low
-`low` price is chosen, so $balance_c \cdot low \ge target\\_threshold$.
-It accounts previous exchange values, so $weighted \  price \ge low \ge \frac{target\\_threshold}{balance_c}$,
-where weight is calculated from previous exchanges and time applying `records_smoothing`.  
-Note: exchange leads to ascent of `low` hence ascent of the current price, so it kinda fluctuates around the actual price for some time.  
+The total price therefore starts at `start_total`, steps down toward the hard
+`floor_total`, and becomes inactive at the EXCHANGE end. `price(from)` is the
+corresponding upward-rounded WAD unit quote; `getAmountNeeded(from, amount)` is
+the canonical exact raw-token payment quote.
 
-### Parameters
-| parameter           | description                                        | reference formula                                          | reference value                                            |
-|---------------------|----------------------------------------------------|------------------------------------------------------------|------------------------------------------------------------|
-| target_threshold    | Minimum amount to exchange                         | $$\frac{tx \  cost}{acceptable \  keeper \  fee}$$        | $$\frac{0.1 \  USD}{1\%} = 0.1 \cdot 100 = 10 \  crvUSD$$ |
-| max_price_amplifier | Prices range                                       | $$\frac{max \  possible \  amount}{target\\_threshold}$$ | $$\frac{100\,000}{10} = 10\,000$$                        |
-| base                | Constant for exponential price movement            | TBD depending on block time                                | $$100$$                                                  |
-| records_smoothing   | Previous exchanges contribution into current price | TBD basically not dependent on anything                    | $$\frac{1}{2}$$                                          |
+Native settlement exposes the Yearn-compatible `want`, `available`, `price`,
+`getAmountNeeded`, and `take` selectors, including the optional atomic taker
+callback. `take_with_limits` additionally binds inclusion to a deadline,
+expected week, minimum amount, and maximum payment.
 
+CoW integration starts unconfigured and disabled. The owner calls
+`configure_cow` while disabled and then `enable_cow`; each reconfiguration
+increments the generation so stale registrations cannot validate. Tokens are
+registered for the current generation during COLLECT. The Vault Relayer gets a
+finite lot-sized allowance, and native fills reduce the same allowance that
+CoW fills consume, making it a shared settlement budget. Retired relayer
+allowances can be explicitly revoked.
+
+This burner and its modules target the Cancun EVM. Deployment requires a
+Cancun-compatible chain because Vyper's global nonreentrancy lock uses
+transient-storage opcodes.

@@ -10,7 +10,7 @@ chain = "gnosis"  # ALTER
 TARGET = "0xaBEf652195F98A91E490f047A5006B71c85f058d"  # ALTER: crvUSD
 WETH = "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d"  # ALTER: wrapped native coin
 ADMIN = "0x71F718D3e4d1449D1502A6A7595eb84eBcCB1683"  # ALTER
-EMERGENCY_ADMIN = "0x71F718D3e4d1449D1502A6A7595eb84eBcCB1683"  # ALTER
+EMERGENCY_ADMIN = "0x6d447e544D01a59cb0774763bf15526574CffFeD"  # ALTER
 
 BURNER = "CowSwap"  # ALTER
 
@@ -19,7 +19,7 @@ NETWORK = f"https://rpc.gnosischain.com"  # ALTER
 EMPTY_COMPENSATION = (0, (0, 0, 0), 0, 0, False)
 EMPTY_HOOK_INPUT = (0, 0, b"")
 
-MIN_EXCHANGE_AMOUNT = 1 * 10 ** 18  # ALTER: 1 crvUSD
+MIN_EXCHANGE_AMOUNT = 5 * 10 ** 18  # ALTER: 1 crvUSD
 MIN_BRIDGE_AMOUNT = 100 * 10 ** 18  # ALTER: 100 crvUSD
 ETHEREUM_FEE_DESTINATION = "0xa2Bcd1a4Efbd04B63cd03f5aFf2561106ebCCE00"  # FeeCollector on Ethereum
 
@@ -56,13 +56,25 @@ def deploy_burner(fee_collector):
                         )
         # return boa.load_partial("contracts/burners/CowSwapBurner.vy").at("")
     if BURNER == "DutchAuction":
-        return boa.load("contracts/burners/DutchAuctionBurner.vy",
-                        fee_collector,
-                        MIN_EXCHANGE_AMOUNT,
-                        10_000,  # ALTER: max_price_amplifier
-                        [],  # Records in case of huge accrued fees
-                        5 * 10 ** 17,  # ALTER: records_smoothing
-                        )
+        # Run scripts/dutch_auction_preflight.py against the final chain config first.
+        burner = boa.load("contracts/burners/DutchAuctionBurner.vy",
+                          fee_collector,
+                          100_000 * 10 ** 18,  # ALTER: start_total
+                          MIN_EXCHANGE_AMOUNT,  # ALTER: floor_total
+                          996_566_004_328_933_169_904_721_721,  # ALTER: 30s decay over 2879 active steps
+                          30,  # ALTER: step_duration
+                          120,  # ALTER: cow_order_validity
+                          bytes.fromhex("058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"),
+                          )
+
+        cow_enabled = True  # ALTER: False on chains without CoW
+        if cow_enabled:
+            burner.configure_cow(
+                "0xfdaFc9d1902f4e0b84f65F49f244b32b31013b74",  # ALTER: ComposableCow
+                "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110",  # ALTER: VaultRelayer
+            )
+            burner.enable_cow()
+        return burner
         # return boa.load_partial("contracts/burners/DutchAuctionBurner.vy").at("")
     raise ValueError("Burner not specified")
 
@@ -109,12 +121,12 @@ def account_load(fname):
 
 if __name__ == "__main__":
     if '--fork' in sys.argv[1:]:
-        boa.env.fork(NETWORK)
+        boa.fork(NETWORK)
 
         boa.env.eoa = '0x71F718D3e4d1449D1502A6A7595eb84eBcCB1683'
     else:
         boa.set_network_env(NETWORK)
         boa.env.add_account(account_load('curve'))  # ALTER: account to use
-        boa.env._fork_try_prefetch_state = False
+        # boa.env._fork_try_prefetch_state = False
     deploy()
     print("All set!")

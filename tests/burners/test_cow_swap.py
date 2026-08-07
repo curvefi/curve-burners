@@ -46,6 +46,7 @@ def burner(admin, fee_collector, cow_swap):
     with boa.env.prank(admin):
         burner = boa.load("contracts/burners/CowSwapBurner.vy", fee_collector, cow_swap, cow_swap, 1)
         fee_collector.set_burner(burner)
+        fee_collector.set_killed([(ZERO_ADDRESS, 0)])
     return burner
 
 
@@ -115,13 +116,13 @@ def test_burn(burner, fee_collector, coins, arve, burle, set_epoch):
 
 def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoch, admin):
     def poll_try_at_epoch_error(ts, msg):
-        return bytes(boa.eval(f'_abi_encode(convert({ts}, uint256), "{msg}",'
+        return bytes(boa.eval(f'abi_encode(convert({ts}, uint256), "{msg}",'
                               f'method_id=method_id("PollTryAtEpoch(uint256,string)"))'))
 
     next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.evm.vm.state.timestamp + 7 * 24 * 3600)[0]
     with pytest.raises(BoaError) as error:
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
-    assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "ZeroBalance")
+    assert error.value.call_trace.output == poll_try_at_epoch_error(next_ts, "ZeroBalance")
 
     weth._mint_for_testing(burner, 10 ** weth.decimals())
     order = burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
@@ -147,7 +148,7 @@ def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoc
     set_epoch(Epoch.FORWARD)
     with pytest.raises(BoaError) as error:  # Outdated
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
-    assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "NotAllowed")
+    assert error.value.call_trace.output == poll_try_at_epoch_error(next_ts, "NotAllowed")
 
     set_epoch(Epoch.EXCHANGE)
     next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.evm.vm.state.timestamp + 7 * 24 * 3600)[0]
@@ -155,12 +156,12 @@ def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoc
         fee_collector.set_killed([(weth.address, Epoch.EXCHANGE)])
     with pytest.raises(BoaError) as error:  # killed
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
-    assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "NotAllowed")
+    assert error.value.call_trace.output == poll_try_at_epoch_error(next_ts, "NotAllowed")
 
 
 def test_verify(burner, coins, arve, target, fee_collector, admin):
     def order_not_valid_error(msg):
-        return bytes(boa.eval(f'_abi_encode("{msg}", method_id=method_id("OrderNotValid(string)"))'))
+        return bytes(boa.eval(f'abi_encode("{msg}", method_id=method_id("OrderNotValid(string)"))'))
 
     coins = [coin for coin in coins if coin != target]
     coin = coins[0]
@@ -184,7 +185,7 @@ def test_verify(burner, coins, arve, target, fee_collector, admin):
     invalid_params[6] = bytes.fromhex("00")
     with pytest.raises(BoaError) as error:
         burner.verify(*invalid_params)
-    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("NonZeroOffchainInput")
+    assert error.value.call_trace.output == order_not_valid_error("NonZeroOffchainInput")
 
     invalid_params[6] = bytes.fromhex("0100")
     with boa.reverts():  # Overflow error
@@ -196,20 +197,20 @@ def test_verify(burner, coins, arve, target, fee_collector, admin):
     invalid_params[5] = bytes.fromhex(coins[1].address[2:])  # Wrong sellToken
     with pytest.raises(BoaError) as error:
         burner.verify(*invalid_params)
-    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("BadOrder")
+    assert error.value.call_trace.output == order_not_valid_error("BadOrder")
 
     invalid_params = deepcopy(params)
     invalid_params[7] = list(invalid_params[7])
     invalid_params[7][1] = coins[1].address  # Wrong buyToken
     with pytest.raises(BoaError) as error:
         burner.verify(*invalid_params)
-    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("BadOrder")
+    assert error.value.call_trace.output == order_not_valid_error("BadOrder")
 
     with boa.env.prank(admin):
         fee_collector.set_killed([(coin.address, Epoch.EXCHANGE)])
     with pytest.raises(BoaError) as error:
         burner.verify(*params)
-    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("NotAllowed")
+    assert error.value.call_trace.output == order_not_valid_error("NotAllowed")
 
 
 def test_admin(burner, admin, emergency_admin, arve):
