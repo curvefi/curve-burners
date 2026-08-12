@@ -33,9 +33,6 @@ error ZeroCowQuote:
 struct Lot:
     epoch: uint256
     initial_amount: uint256
-    native_remaining: uint256
-    start_total: uint256
-    floor_total: uint256
 
 
 interface DutchAuction:
@@ -48,6 +45,8 @@ interface DutchAuction:
     def app_data() -> bytes32: view
     def want() -> address: view
     def proceeds_receiver() -> address: view
+    def start_total() -> uint256: view
+    def floor_total() -> uint256: view
     def decay_factor_ray() -> uint256: view
     def step_duration() -> uint256: view
     def lots(_token: address) -> Lot: view
@@ -88,11 +87,11 @@ def _bucket_quote(
     _amount: uint256,
     _quote_time: uint256,
 ) -> uint256:
-    # Recomputed from the published lot snapshot, epoch window, and curve
+    # Recomputed from the published lot snapshot, epoch window, and live curve
     # parameters — must match the auction's own quote at the same timestamp.
     total: uint256 = auction_math.total_price(
-        _lot.start_total,
-        _lot.floor_total,
+        staticcall _auction.start_total(),
+        staticcall _auction.floor_total(),
         staticcall _auction.decay_factor_ray(),
         _quote_time - _lot_start,
         staticcall _auction.step_duration(),
@@ -176,8 +175,8 @@ def verify(
     lot_start, lot_end = staticcall auction.epoch_bounds(lot.epoch)
     if lot.epoch == 0 or block.timestamp < lot_start or block.timestamp >= lot_end:
         gpv2._order_not_valid("NotAllowed")
-    # available() folds cancellation, epoch staleness, kill masks, and drained
-    # balances into one liveness signal the handler cannot recompute itself.
+    # available() folds epoch staleness, kill masks, and drained balances
+    # into one liveness signal the handler cannot recompute itself.
     if staticcall auction.available(token) == 0:
         gpv2._order_not_valid("NotAllowed")
 

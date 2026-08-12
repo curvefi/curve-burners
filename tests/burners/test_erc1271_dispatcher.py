@@ -100,7 +100,7 @@ GPV2_BUY_BALANCE = 11
 # Lot struct tuple indices fixed by the core ABI.
 LOT_EPOCH = 0
 LOT_INITIAL_AMOUNT = 1
-LOT_END = 6
+LOT_END = 3
 
 
 def encode_envelope(adapter_id: bytes, adapter_version: int, payload: bytes) -> bytes:
@@ -201,7 +201,10 @@ def sell_token(erc20_deployer):
 @pytest.fixture(scope="module")
 def registry(owner, emergency_owner):
     with boa.env.prank(owner):
-        return boa.load("contracts/AdapterRegistry.vy", owner, emergency_owner)
+        role_source = boa.load(
+            "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner
+        )
+        return boa.load("contracts/AdapterRegistry.vy", role_source.address)
 
 
 @pytest.fixture(scope="module")
@@ -213,7 +216,7 @@ def settlement(vault_relayer):
 
 @pytest.fixture(scope="module")
 def cow_validator(settlement):
-    return boa.load("contracts/cow/OrderValidator.vy", settlement.address)
+    return boa.load("contracts/burners/cow/OrderValidator.vy", settlement.address)
 
 
 @pytest.fixture(scope="module")
@@ -520,7 +523,7 @@ def test_dirty_bool_word_invalid(harness, lot, valid_order, validator_mock, mock
 WRITER_VALIDATOR_SOURCE = """
 # pragma version 0.5.0a4
 
-from contracts.auction import adapter_types
+from contracts.burners.auction import adapter_types
 
 calls: public(uint256)
 response: adapter_types.NormalizedOrder
@@ -630,10 +633,13 @@ def test_unsellable_token_invalid(harness, lot, valid_order, validator_mock, moc
     assert is_valid(harness, mock_signature) == INVALID_SIGNATURE
 
 
-def test_cancelled_lot_invalid(harness, lot, valid_order, validator_mock, mock_signature,
-                               sell_token):
+def test_drained_lot_invalid(harness, lot, valid_order, validator_mock, mock_signature,
+                             sell_token):
     validator_mock.set_order(valid_order())
-    harness.cancel(sell_token.address, lot[LOT_EPOCH])
+    with boa.env.prank(harness.address):
+        sell_token.transfer(
+            boa.env.generate_address(), sell_token.balanceOf(harness)
+        )
     assert is_valid(harness, mock_signature) == INVALID_SIGNATURE
 
 
@@ -845,17 +851,17 @@ def test_cow_validator_deployment_pins_settlement(cow_validator, settlement, vau
 
 def test_cow_validator_rejects_bad_settlement(vault_relayer):
     with boa.reverts(custom_err("BadSettlement()")):
-        boa.load("contracts/cow/OrderValidator.vy", ZERO_ADDRESS)
+        boa.load("contracts/burners/cow/OrderValidator.vy", ZERO_ADDRESS)
     dead_settlement = boa.load(
         "contracts/testing/dutch_auction/SettlementMock.vy", ZERO_BYTES32, vault_relayer
     )
     with boa.reverts(custom_err("BadDomainSeparator()")):
-        boa.load("contracts/cow/OrderValidator.vy", dead_settlement.address)
+        boa.load("contracts/burners/cow/OrderValidator.vy", dead_settlement.address)
     relayerless = boa.load(
         "contracts/testing/dutch_auction/SettlementMock.vy", DOMAIN_SEPARATOR, ZERO_ADDRESS
     )
     with boa.reverts(custom_err("BadVaultRelayer()")):
-        boa.load("contracts/cow/OrderValidator.vy", relayerless.address)
+        boa.load("contracts/burners/cow/OrderValidator.vy", relayerless.address)
 
 
 def test_cow_validate_normalizes_order(cow_validator, harness, lot, make_gpv2_order, settlement,

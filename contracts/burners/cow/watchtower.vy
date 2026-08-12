@@ -13,7 +13,7 @@
      the handler can weaken what settles. The importing contract stays the
      conditional-order owner because custody and vault-relayer approvals live
      there; order generation and verification logic live in the standalone
-     handler contract (contracts/cow/WatchtowerHandler.vy).
+     handler contract (contracts/burners/cow/WatchtowerHandler.vy).
 """
 
 from . import gpv2

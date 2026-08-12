@@ -11,9 +11,9 @@
 @custom:kill Testing-only contract, never deployed to production.
 """
 
-from contracts.auction import dutch_auction
-from contracts.auction import adapters
-from contracts.auction import adapter_types
+from contracts.burners.auction import dutch_auction
+from contracts.burners.auction import adapters
+from contracts.burners.auction import adapter_types
 
 initializes: dutch_auction
 initializes: adapters
@@ -102,11 +102,6 @@ def stage(_token: address) -> uint256:
     return dutch_auction._stage_lot(
         dutch_auction.ERC20(_token), self.frame_start // WEEK
     )
-
-
-@external
-def cancel(_token: address, _epoch: uint256):
-    dutch_auction._cancel_lot(dutch_auction.ERC20(_token), _epoch)
 
 
 @external

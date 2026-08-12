@@ -3,7 +3,7 @@
 @author Curve Finance
 @license MIT
 @notice Read interface of the validator adapter catalog used by the dispatcher.
-@dev The struct is the single-source contracts/auction/adapter_types.vy
+@dev The struct is the single-source contracts/burners/auction/adapter_types.vy
      AdapterConfig. adapter_id is the registry lookup key and is deliberately
      not duplicated inside AdapterConfig (deviation from the prompt's Solidity
      sketch): the dispatcher already resolves the config by the envelope's
@@ -14,7 +14,7 @@
      config (validator == empty(address)).
 """
 
-from contracts.auction import adapter_types
+from contracts.burners.auction import adapter_types
 
 
 @external

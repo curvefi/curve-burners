@@ -77,9 +77,16 @@ def validator(owner):
 
 
 @pytest.fixture(scope="module")
-def registry(owner, emergency_owner):
+def role_source(owner, emergency_owner):
+    return boa.load(
+        "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner
+    )
+
+
+@pytest.fixture(scope="module")
+def registry(role_source, owner):
     with boa.env.prank(owner):
-        return boa.load("contracts/AdapterRegistry.vy", owner, emergency_owner)
+        return boa.load("contracts/AdapterRegistry.vy", role_source.address)
 
 
 @pytest.fixture(scope="module")
@@ -115,19 +122,25 @@ def make_config(validator, verifier, executor):
 # Deployment
 
 
-def test_constructor_sets_roles(registry, owner, emergency_owner):
+def test_constructor_derives_roles_from_source(registry, role_source, owner, emergency_owner):
+    assert registry.role_source() == role_source.address
     assert registry.owner() == owner
     assert registry.emergency_owner() == emergency_owner
-    assert registry.future_owner() == ZERO_ADDRESS
 
 
-def test_constructor_rejects_zero_owner(emergency_owner):
-    with boa.reverts(custom_err("ZeroOwner()")):
-        boa.load("contracts/AdapterRegistry.vy", ZERO_ADDRESS, emergency_owner)
+def test_constructor_rejects_source_with_zero_owner(emergency_owner):
+    bad_source = boa.load(
+        "contracts/testing/dutch_auction/RoleSourceMock.vy", ZERO_ADDRESS, emergency_owner
+    )
+    with boa.reverts(custom_err("BadRoleSource()")):
+        boa.load("contracts/AdapterRegistry.vy", bad_source.address)
 
 
 def test_constructor_allows_zero_emergency_owner_sentinel(owner):
-    registry = boa.load("contracts/AdapterRegistry.vy", owner, ZERO_ADDRESS)
+    source = boa.load(
+        "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, ZERO_ADDRESS
+    )
+    registry = boa.load("contracts/AdapterRegistry.vy", source.address)
     assert registry.emergency_owner() == ZERO_ADDRESS
 
 
@@ -427,29 +440,10 @@ def test_owner_can_reactivate_after_emergency_disable(
 # Ownership
 
 
-def test_commit_transfer_ownership_only_owner(registry, attacker):
-    with boa.env.prank(attacker):
-        with boa.reverts(custom_err("OnlyOwner()")):
-            registry.commit_transfer_ownership(attacker)
-
-
-def test_transfer_ownership_flow(registry, make_config, owner, attacker):
+def test_roles_follow_source_owner_change(registry, role_source, make_config, owner, attacker):
     new_owner = boa.env.generate_address("new_owner")
-    with boa.env.prank(owner):
-        registry.commit_transfer_ownership(new_owner)
-    assert last_event(registry, "CommitOwnership").future_owner == new_owner
-    assert registry.owner() == owner
-    assert registry.future_owner() == new_owner
-
-    with boa.env.prank(attacker):
-        with boa.reverts(custom_err("OnlyFutureOwner()")):
-            registry.accept_transfer_ownership()
-
-    with boa.env.prank(new_owner):
-        registry.accept_transfer_ownership()
-    assert last_event(registry, "SetOwner").owner == new_owner
+    role_source.set_owner(new_owner)
     assert registry.owner() == new_owner
-    assert registry.future_owner() == ZERO_ADDRESS
 
     # The old owner lost every write path; the new owner gained them.
     with boa.env.prank(owner):
@@ -459,22 +453,11 @@ def test_transfer_ownership_flow(registry, make_config, owner, attacker):
         registry.set_adapter(ADAPTER_ID, make_config())
 
 
-def test_commit_can_be_overwritten_before_accept(registry, owner):
-    stale_owner = boa.env.generate_address("stale_owner")
-    with boa.env.prank(owner):
-        registry.commit_transfer_ownership(stale_owner)
-        registry.commit_transfer_ownership(ZERO_ADDRESS)
-    with boa.env.prank(stale_owner):
-        with boa.reverts(custom_err("OnlyFutureOwner()")):
-            registry.accept_transfer_ownership()
-    assert registry.owner() == owner
-
-
-def test_set_emergency_owner(registry, make_config, owner, emergency_owner):
+def test_roles_follow_source_emergency_owner_change(
+    registry, role_source, make_config, owner, emergency_owner
+):
     new_emergency_owner = boa.env.generate_address("new_emergency_owner")
-    with boa.env.prank(owner):
-        registry.set_emergency_owner(new_emergency_owner)
-    assert last_event(registry, "SetEmergencyOwner").emergency_owner == new_emergency_owner
+    role_source.set_emergency_owner(new_emergency_owner)
     assert registry.emergency_owner() == new_emergency_owner
 
     with boa.env.prank(owner):
@@ -487,13 +470,3 @@ def test_set_emergency_owner(registry, make_config, owner, emergency_owner):
     with boa.env.prank(new_emergency_owner):
         registry.disable_adapter(ADAPTER_ID)
     assert not registry.get_adapter(ADAPTER_ID).active
-
-
-def test_set_emergency_owner_only_owner_and_zero_sentinel(registry, owner, attacker):
-    with boa.env.prank(attacker):
-        with boa.reverts(custom_err("OnlyOwner()")):
-            registry.set_emergency_owner(attacker)
-    # empty(address) is the documented "no emergency owner" sentinel.
-    with boa.env.prank(owner):
-        registry.set_emergency_owner(ZERO_ADDRESS)
-    assert registry.emergency_owner() == ZERO_ADDRESS

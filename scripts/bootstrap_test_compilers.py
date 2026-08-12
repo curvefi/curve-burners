@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import subprocess
 
-import solcx
 import vvm
-from solcx.install import get_executable as get_solc_executable
 from vvm.install import get_executable
 
 
 LEGACY_VYPER_VERSION = "0.3.10"
 LEGACY_VYPER_BUILD = "0.3.10+commit.91361694"
-SOLC_VERSION = "0.8.12"
 
 
 def _version_output(executable: str) -> str:
@@ -35,17 +32,9 @@ def install_compilers() -> dict[str, str]:
             f"unexpected Vyper {LEGACY_VYPER_VERSION} build: {vyper_build}"
         )
 
-    solcx.install_solc(SOLC_VERSION)
-    solc_executable = get_solc_executable(SOLC_VERSION)
-    solc_build = _version_output(str(solc_executable))
-    if f"Version: {SOLC_VERSION}" not in solc_build:
-        raise RuntimeError(f"unexpected solc {SOLC_VERSION} build: {solc_build}")
-
     return {
         "vyper": vyper_build,
         "vyper_path": str(vyper_executable),
-        "solc": solc_build,
-        "solc_path": str(solc_executable),
     }
 
 

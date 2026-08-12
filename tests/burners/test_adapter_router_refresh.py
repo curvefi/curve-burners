@@ -45,7 +45,7 @@ DIGEST = keccak(b"protocol order digest")
 # Lot struct tuple indices fixed by the core ABI.
 LOT_EPOCH = 0
 LOT_INITIAL_AMOUNT = 1
-LOT_END = 6
+LOT_END = 3
 
 
 def encode_envelope(adapter_id: bytes, adapter_version: int, payload: bytes = b"") -> bytes:
@@ -146,7 +146,10 @@ def validator_mock():
 @pytest.fixture(scope="module")
 def registry(owner, emergency_owner):
     with boa.env.prank(owner):
-        return boa.load("contracts/AdapterRegistry.vy", owner, emergency_owner)
+        role_source = boa.load(
+            "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner
+        )
+        return boa.load("contracts/AdapterRegistry.vy", role_source.address)
 
 
 @pytest.fixture(scope="module")

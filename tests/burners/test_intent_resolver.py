@@ -236,22 +236,21 @@ def test_solver_executes_call_step_and_proceeds_receiver_is_paid(
     assert auction.available(sell_token) == 0
 
 
-@pytest.mark.parametrize("payment_mode", [PAY_COLLECTOR, PAY_BURNER])
 def test_solver_routes_fill_through_callback_aggregator(
     auction, resolver, stage, make_payload, sell_token, want, taker, solver,
-    proceeds_receiver, payment_mode
+    proceeds_receiver
 ):
     # A solver needing a callback builds its own take() calldata from the
-    # resolved amounts, as the ResolvedOrder documentation prescribes. Paying
-    # want_payment.recipient (the proceeds receiver) directly or routing the
-    # payment through the auction are equally valid: the auction forwards
-    # settlement proceeds it receives.
+    # resolved amounts, as the ResolvedOrder documentation prescribes. The
+    # payment is always pulled from the solver's allowance after the callback.
     stage(sell_token)
     resolved = resolver.resolve(make_payload())
     payment = resolved.want_payment.amount
 
-    taker.configure(payment_mode, False)
-    want._mint_for_testing(taker, payment)
+    taker.configure(PAY_NOTHING, False)
+    want._mint_for_testing(solver, payment)
+    with boa.env.prank(solver):
+        want.approve(auction, payment)
     call_data = _take_calldata(
         sell_token.address, resolved.sell_payout.amount, taker.address, b"aggregator route"
     )
@@ -263,6 +262,32 @@ def test_solver_routes_fill_through_callback_aggregator(
     assert sell_token.balanceOf(taker) == resolved.sell_payout.amount
     assert want.balanceOf(proceeds_receiver) == payment
     assert want.balanceOf(auction) == 0
+
+
+@pytest.mark.parametrize("payment_mode", [PAY_COLLECTOR, PAY_BURNER])
+def test_callback_direct_transfers_do_not_settle_solver_bill(
+    auction, resolver, stage, make_payload, sell_token, want, taker, solver,
+    proceeds_receiver, payment_mode
+):
+    # Direct transfers to the proceeds receiver or the auction inside the
+    # callback must not count as payment: crediting balance deltas would let a
+    # callback route unrelated third-party inflows into its own bill.
+    staged = stage(sell_token)
+    resolved = resolver.resolve(make_payload())
+    payment = resolved.want_payment.amount
+
+    taker.configure(payment_mode, False)
+    want._mint_for_testing(taker, payment)
+    call_data = _take_calldata(
+        sell_token.address, resolved.sell_payout.amount, taker.address, b"aggregator route"
+    )
+    with pytest.raises(Revert):
+        boa.env.raw_call(auction.address, sender=solver, data=call_data)
+
+    assert sell_token.balanceOf(taker) == 0
+    assert want.balanceOf(taker) == payment
+    assert want.balanceOf(proceeds_receiver) == 0
+    assert auction.available(sell_token) == staged
 
 
 def test_underpaying_solver_reverts_atomically(
@@ -381,9 +406,12 @@ def test_want_token_intent_reverts(resolver, make_payload, want):
         resolver.resolve(make_payload(sell_token_address=want.address))
 
 
-def test_cancelled_lot_reverts(auction, resolver, stage, make_payload, sell_token):
+def test_drained_lot_reverts(auction, resolver, stage, make_payload, sell_token):
     stage(sell_token)
-    auction.cancel(sell_token, auction.current_epoch())
+    with boa.env.prank(auction.address):
+        sell_token.transfer(
+            boa.env.generate_address(), sell_token.balanceOf(auction)
+        )
     with boa.reverts(custom_err("NothingAvailable()")):
         resolver.resolve(make_payload())
 

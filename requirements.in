@@ -8,8 +8,5 @@ snekmate @ git+https://github.com/pcaversaccio/snekmate@7008a6af169d5c10b939a463
 # Run `python scripts/bootstrap_test_compilers.py` after installing requirements.
 vvm==0.3.2
 
-# PyPI 0.1.1 requires titanoboa<0.2.0. This pinned upstream revision restores
-# Solidity support on the required Titanoboa master commit.
-boa-solidity @ git+https://github.com/z80dev/boa-solidity@3e00649f643ce69108f266942c90bffc717b18b7
 hypothesis==6.102.4
 python-dotenv==1.0.1

@@ -104,9 +104,6 @@ struct ResolvedOrder:
 struct Lot:
     epoch: uint256
     initial_amount: uint256
-    native_remaining: uint256
-    start_total: uint256
-    floor_total: uint256
 
 
 interface DutchAuction:

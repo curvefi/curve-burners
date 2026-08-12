@@ -9,8 +9,8 @@
 @custom:kill Testing-only contract, never deployed to production.
 """
 
-from contracts.auction import adapter_types
-from contracts.cow import execution as cow_execution
+from contracts.burners.auction import adapter_types
+from contracts.burners.cow import execution as cow_execution
 
 initializes: cow_execution
 exports: cow_execution.__interface__

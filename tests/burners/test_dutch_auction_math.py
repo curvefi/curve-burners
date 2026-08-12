@@ -28,7 +28,7 @@ NON_DIVISIBLE_DURATION_DECAY_FACTOR_RAY = 992_036_788_574_402_203_131_884_429
 MATH_HARNESS = """
 # pragma version 0.5.0a4
 
-import contracts.auction.dutch_auction_math as auction_math
+import contracts.burners.auction.dutch_auction_math as auction_math
 
 
 @external
@@ -116,12 +116,13 @@ def test_compiler_pin():
 )
 @settings(max_examples=100, deadline=None)
 def test_mul_div_up_matches_unbounded_integer_model(auction_math, a, b, denominator):
-    expected = ceil_div(a * b, denominator)
-    if expected > MAX_UINT256:
-        with boa.reverts(custom_err("MulDivOverflow()")):
+    # Checked arithmetic: any product beyond uint256 reverts with the
+    # compiler's overflow panic rather than a custom error.
+    if a * b > MAX_UINT256:
+        with boa.reverts():
             auction_math.mul_div_up(a, b, denominator)
     else:
-        assert auction_math.mul_div_up(a, b, denominator) == expected
+        assert auction_math.mul_div_up(a, b, denominator) == ceil_div(a * b, denominator)
 
 
 @pytest.mark.parametrize(
@@ -129,12 +130,14 @@ def test_mul_div_up_matches_unbounded_integer_model(auction_math, a, b, denomina
     [
         (0, MAX_UINT256, 1),
         (1, 1, 2),
-        (MAX_UINT256, MAX_UINT256, MAX_UINT256),
-        (2**200, 2**100, 2**80),
-        (2**255 + 1, 2**128 + 3, 2**192 + 5),
+        (MAX_UINT256, 1, MAX_UINT256),
+        (MAX_UINT256, 1, 1),
+        (2**128 - 1, 2**128 + 1, 2**80),
+        (2**200, 2**56 - 1, 2**192 + 5),
     ],
 )
 def test_mul_div_up_boundaries(auction_math, a, b, denominator):
+    assert a * b <= MAX_UINT256
     assert auction_math.mul_div_up(a, b, denominator) == ceil_div(a * b, denominator)
 
 
@@ -143,53 +146,18 @@ def test_mul_div_up_reverts_on_zero_denominator(auction_math):
         auction_math.mul_div_up(1, 1, 0)
 
 
-def test_mul_div_up_reverts_when_result_overflows(auction_math):
-    with boa.reverts(custom_err("MulDivOverflow()")):
-        auction_math.mul_div_up(MAX_UINT256, MAX_UINT256, 1)
-
-
-def test_mul_div_up_reverts_when_only_ceil_overflows(auction_math):
-    a = MAX_UINT256 - 1
-    b = 2**255 + 1
-    denominator = 2**255
-
-    product = a * b
-    assert product // denominator == MAX_UINT256
-    assert product % denominator != 0
-    with boa.reverts(custom_err("MulDivOverflow()")):
-        auction_math.mul_div_up(a, b, denominator)
-
-
 @pytest.mark.parametrize(
-    "branch,a,b,denominator",
+    "a,b",
     [
-        (
-            "remainder_above_low_word",
-            MAX_UINT256 - 1,
-            MAX_UINT256 - 3,
-            MAX_UINT256 - 2,
-        ),
-        ("power_of_two_denominator", 2**200, 2**100 + 1, 2**80),
-        ("odd_denominator", MAX_UINT256, MAX_UINT256, MAX_UINT256),
-        ("product_mod_below_low_word", MAX_UINT256, MAX_UINT256, MAX_UINT256),
+        (MAX_UINT256, MAX_UINT256),
+        (MAX_UINT256, 2),
+        (2**129, 2**128),
     ],
 )
-def test_mul_div_up_full_precision_branches(auction_math, branch, a, b, denominator):
-    product = a * b
-    product_low = product & MAX_UINT256
-    product_mod_max = product % MAX_UINT256
-
-    if branch == "remainder_above_low_word":
-        assert product % denominator > product_low
-    elif branch == "power_of_two_denominator":
-        assert denominator & (denominator - 1) == 0
-    elif branch == "odd_denominator":
-        assert denominator & 1 == 1
-    elif branch == "product_mod_below_low_word":
-        assert product_mod_max < product_low
-
-    assert product >> 256 != 0
-    assert auction_math.mul_div_up(a, b, denominator) == ceil_div(product, denominator)
+def test_mul_div_up_reverts_when_product_overflows(auction_math, a, b):
+    assert a * b > MAX_UINT256
+    with boa.reverts():
+        auction_math.mul_div_up(a, b, 1)
 
 
 @given(
@@ -259,7 +227,8 @@ def test_ray_pow_is_non_increasing_in_exponent(
 
 
 @given(
-    start_total=st.integers(min_value=0, max_value=MAX_UINT256),
+    # start_total * RAY must fit uint256 under the checked-product math.
+    start_total=st.integers(min_value=0, max_value=MAX_UINT256 // RAY),
     floor_total=st.integers(min_value=0, max_value=MAX_UINT256),
     decay_factor_ray=st.integers(
         min_value=MIN_SUPPORTED_DECAY_FACTOR_RAY,
@@ -296,7 +265,8 @@ def test_total_price_matches_step_model(
 
 
 @given(
-    start_total=st.integers(min_value=0, max_value=MAX_UINT256),
+    # start_total * RAY must fit uint256 under the checked-product math.
+    start_total=st.integers(min_value=0, max_value=MAX_UINT256 // RAY),
     decay_factor_ray=st.integers(
         min_value=MIN_SUPPORTED_DECAY_FACTOR_RAY,
         max_value=RAY,
@@ -431,19 +401,21 @@ def test_total_price_rejects_invalid_parameters(auction_math):
 )
 @settings(max_examples=80, deadline=None)
 def test_quote_helpers_round_up(auction_math, total, amount, initial_amount):
-    payment = ceil_div(total * amount, initial_amount)
-    if payment > MAX_UINT256:
-        with boa.reverts(custom_err("MulDivOverflow()")):
+    if total * amount > MAX_UINT256:
+        with boa.reverts():
             auction_math.proportional_payment(total, amount, initial_amount)
     else:
-        assert auction_math.proportional_payment(total, amount, initial_amount) == payment
+        assert auction_math.proportional_payment(total, amount, initial_amount) == ceil_div(
+            total * amount, initial_amount
+        )
 
-    unit_quote = ceil_div(total * WAD, initial_amount)
-    if unit_quote > MAX_UINT256:
-        with boa.reverts(custom_err("MulDivOverflow()")):
+    if total * WAD > MAX_UINT256:
+        with boa.reverts():
             auction_math.unit_quote_wad(total, initial_amount)
     else:
-        assert auction_math.unit_quote_wad(total, initial_amount) == unit_quote
+        assert auction_math.unit_quote_wad(total, initial_amount) == ceil_div(
+            total * WAD, initial_amount
+        )
 
 
 def test_quote_helpers_zero_denominator(auction_math):

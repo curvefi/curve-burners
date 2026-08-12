@@ -7,7 +7,7 @@
      digest from the payload and returns the normalized order for core economic
      checks. It never holds funds, never receives allowance, and is reached only
      through staticcall. The struct is the single-source
-     contracts/auction/adapter_types.vy NormalizedOrder.
+     contracts/burners/auction/adapter_types.vy NormalizedOrder.
      ABI: validate(address,bytes32,bytes) returns a single static tuple
      (bytes32,bytes32,uint256,address,address,address,address,address,
      uint256,uint256,uint256,bool); the dispatcher calls it via raw_call with
@@ -15,7 +15,7 @@
      Bytes[4096] matches adapter_types.MAX_ADAPTER_PAYLOAD.
 """
 
-from contracts.auction import adapter_types
+from contracts.burners.auction import adapter_types
 
 
 @external

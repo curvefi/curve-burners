@@ -36,7 +36,7 @@
 
 from ..auction import adapter_types
 from . import gpv2
-from ..interfaces import IOrderValidator
+from ...interfaces import IOrderValidator
 
 implements: IOrderValidator
 

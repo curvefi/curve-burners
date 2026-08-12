@@ -51,8 +51,8 @@ ORDER_FIELD_TYPES = [
 HARNESS_SOURCE = """
 # pragma version 0.5.0a4
 
-import contracts.cow.gpv2 as gpv2
-import contracts.auction.adapter_types as adapter_types
+import contracts.burners.cow.gpv2 as gpv2
+import contracts.burners.auction.adapter_types as adapter_types
 
 
 @external

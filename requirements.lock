@@ -4,16 +4,13 @@
 #
 # Legacy compatibility:
 # - VVM 0.3.2 compiles repository contracts pinned to Vyper 0.3.10.
-# - boa-solidity 0.1.1 is incompatible with Titanoboa 0.2.8; the pinned
-#   boa-solidity 0.1.2 revision supports Titanoboa >=0.2.5.
 # - Run `python scripts/bootstrap_test_compilers.py` to install and verify
-#   Vyper 0.3.10+commit.91361694 and solc 0.8.12 before running all tests.
+#   Vyper 0.3.10+commit.91361694 before running all tests.
 
 annotated-types==0.7.0
 attrs==26.1.0
 babel==2.18.0
 bitarray==3.9.0
-boa-solidity @ git+https://github.com/z80dev/boa-solidity@3e00649f643ce69108f266942c90bffc717b18b7
 cached-property==2.0.1
 cbor2==5.9.0
 certifi==2026.6.17
@@ -59,7 +56,6 @@ platformdirs==4.10.0
 pluggy==1.6.0
 py-ecc==8.0.0
 py-evm==0.12.1b1
-py-solc-x==2.0.5
 pycryptodome==3.23.0
 pydantic==2.13.4
 pydantic_core==2.46.4

@@ -3,7 +3,7 @@
 The old monolithic cow_watchtower module (order building, verification, and
 ERC-1271 forwarding inside the burner) was split: the shim only registers
 conditional orders with ComposableCoW, while order generation/verification
-lives in the standalone, stateless contracts/cow/WatchtowerHandler.vy that
+lives in the standalone, stateless contracts/burners/cow/WatchtowerHandler.vy that
 reads the auction's public views.
 """
 
@@ -56,7 +56,7 @@ ORDER_FIELD_TYPES = [
 SHIM_HARNESS_SOURCE = """
 # pragma version 0.5.0a4
 
-import contracts.cow.watchtower as cow_watchtower
+import contracts.burners.cow.watchtower as cow_watchtower
 
 initializes: cow_watchtower
 exports: cow_watchtower.__interface__
@@ -95,9 +95,6 @@ AUCTION_MOCK_SOURCE = """
 struct Lot:
     epoch: uint256
     initial_amount: uint256
-    native_remaining: uint256
-    start_total: uint256
-    floor_total: uint256
 
 
 cow_enabled: public(bool)
@@ -108,6 +105,8 @@ cow_order_validity: public(uint256)
 app_data: public(bytes32)
 want: public(address)
 proceeds_receiver: public(address)
+start_total: public(uint256)
+floor_total: public(uint256)
 decay_factor_ray: public(uint256)
 step_duration: public(uint256)
 lots: public(HashMap[address, Lot])
@@ -174,19 +173,14 @@ def set_lot(
     _token: address,
     _epoch: uint256,
     _initial_amount: uint256,
-    _native_remaining: uint256,
     _start_total: uint256,
     _floor_total: uint256,
     _start: uint256,
     _end: uint256,
 ):
-    self.lots[_token] = Lot(
-        epoch=_epoch,
-        initial_amount=_initial_amount,
-        native_remaining=_native_remaining,
-        start_total=_start_total,
-        floor_total=_floor_total,
-    )
+    self.lots[_token] = Lot(epoch=_epoch, initial_amount=_initial_amount)
+    self.start_total = _start_total
+    self.floor_total = _floor_total
     self.epoch_start[_epoch] = _start
     self.epoch_end[_epoch] = _end
 
@@ -245,7 +239,7 @@ def event_name(log) -> str:
     return event_type.name if event_type is not None else type(log).__name__
 
 
-# Exact python mirror of contracts/auction/dutch_auction_math.vy so
+# Exact python mirror of contracts/burners/auction/dutch_auction_math.vy so
 # handler quotes can be checked for bit-for-bit parity.
 def mul_div_up(a: int, b: int, denominator: int) -> int:
     assert denominator != 0
@@ -351,7 +345,7 @@ def auction(want, proceeds_receiver):
 
 @pytest.fixture
 def handler():
-    return boa.load("contracts/cow/WatchtowerHandler.vy", name="CowWatchtowerHandler")
+    return boa.load("contracts/burners/cow/WatchtowerHandler.vy", name="CowWatchtowerHandler")
 
 
 def register_token(auction, token, generation=1):
@@ -379,7 +373,7 @@ def set_live_lot(
     start = timestamp - 10
     end = timestamp + duration
     next_poll = end + 100
-    auction.set_lot(token, epoch, initial, available, start_total, floor_total, start, end)
+    auction.set_lot(token, epoch, initial, start_total, floor_total, start, end)
     auction.set_available(token, available)
     auction.set_next_poll(next_poll)
     return timestamp, start, end, next_poll
@@ -593,7 +587,7 @@ def test_tradeable_order_fields_and_bucket_stability(
 
     # validTo is clamped by the lot end inside the final bucket.
     capped_end = boa.env.evm.vm.state.timestamp + 20
-    auction.set_lot(token, 1, INITIAL, AVAILABLE, START_TOTAL, FLOOR_TOTAL, start, capped_end)
+    auction.set_lot(token, 1, INITIAL, START_TOTAL, FLOOR_TOTAL, start, capped_end)
     end_capped_order = get_order(handler, auction, sender, encoded_static_input)
     assert end_capped_order[5] == capped_end
 
@@ -705,14 +699,14 @@ def test_tradeable_order_polling_disabled_and_offchain_errors(
     timestamp, start, end, next_poll = set_live_lot(auction, token)
 
     # No lot at all.
-    auction.set_lot(token, 0, 0, 0, 0, 0, 0, 0)
+    auction.set_lot(token, 0, 0, 0, 0, 0, 0)
     with pytest.raises(BoaError) as error:
         get_order(handler, auction, sender, encoded_static_input)
     assert revert_data(error.value) == poll_try_at(next_poll, "NotAllowed")
 
     # Lot not started yet.
     auction.set_lot(
-        token, 1, INITIAL, AVAILABLE, START_TOTAL, FLOOR_TOTAL, timestamp + 100, end
+        token, 1, INITIAL, START_TOTAL, FLOOR_TOTAL, timestamp + 100, end
     )
     with pytest.raises(BoaError) as error:
         get_order(handler, auction, sender, encoded_static_input)
@@ -720,14 +714,14 @@ def test_tradeable_order_polling_disabled_and_offchain_errors(
 
     # Lot already over.
     auction.set_lot(
-        token, 1, INITIAL, AVAILABLE, START_TOTAL, FLOOR_TOTAL, start, timestamp
+        token, 1, INITIAL, START_TOTAL, FLOOR_TOTAL, start, timestamp
     )
     with pytest.raises(BoaError) as error:
         get_order(handler, auction, sender, encoded_static_input)
     assert revert_data(error.value) == poll_try_at(next_poll, "NotAllowed")
 
     # Live lot with nothing available.
-    auction.set_lot(token, 1, INITIAL, AVAILABLE, START_TOTAL, FLOOR_TOTAL, start, end)
+    auction.set_lot(token, 1, INITIAL, START_TOTAL, FLOOR_TOTAL, start, end)
     auction.set_available(token, 0)
     with pytest.raises(BoaError) as error:
         get_order(handler, auction, sender, encoded_static_input)
@@ -825,19 +819,19 @@ def test_verify_rejects_hash_domain_and_state_mismatches(handler, auction, token
 
     # Inactive lot states report NotAllowed (a signature validity answer, not
     # a polling hint like getTradeableOrder gives).
-    auction.set_lot(token, 0, 0, 0, 0, 0, 0, 0)
+    auction.set_lot(token, 0, 0, 0, 0, 0, 0)
     with pytest.raises(BoaError) as error:
         verify_order(handler, auction, sender, encoded_static_input, order)
     assert revert_data(error.value) == order_not_valid("NotAllowed")
 
     auction.set_lot(
-        token, 1, INITIAL, AVAILABLE, START_TOTAL, FLOOR_TOTAL, timestamp + 100, end
+        token, 1, INITIAL, START_TOTAL, FLOOR_TOTAL, timestamp + 100, end
     )
     with pytest.raises(BoaError) as error:
         verify_order(handler, auction, sender, encoded_static_input, order)
     assert revert_data(error.value) == order_not_valid("NotAllowed")
 
-    auction.set_lot(token, 1, INITIAL, AVAILABLE, START_TOTAL, FLOOR_TOTAL, start, end)
+    auction.set_lot(token, 1, INITIAL, START_TOTAL, FLOOR_TOTAL, start, end)
     auction.set_available(token, 0)
     with pytest.raises(BoaError) as error:
         verify_order(handler, auction, sender, encoded_static_input, order)
@@ -885,7 +879,6 @@ def test_handler_is_stateless_across_auctions(
         token,
         1,
         INITIAL,
-        AVAILABLE // 2,
         START_TOTAL,
         FLOOR_TOTAL,
         boa.env.evm.vm.state.timestamp - 10,

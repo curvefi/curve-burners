@@ -2,27 +2,19 @@
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 # Compiler: vyper@03e096e74b53993e652ed83dddecbee6f889fcc5
-#
-# The 512-bit mulDiv sequence is adapted from contracts/libraries/FullMath.sol
-# at Uniswap v3-core commit e3589b192d0be27e100cd0daaf6c97204fdb1899:
-# https://github.com/Uniswap/v3-core/commit/e3589b192d0be27e100cd0daaf6c97204fdb1899
-# Copyright (c) 2021 Remco Bloemen; distributed under the MIT License.
-# FullMath in turn credits Remco Bloemen's MIT-licensed mulDiv derivation:
-# https://xn--2-umb.com/21/muldiv
 """
 @title Dutch auction math
 @author Curve Finance
 @license MIT
-@notice Full-precision, upward-rounded helpers for step-geometric auction pricing.
-@dev No Snekmate or Yearn implementation code was used.
+@notice Upward-rounded helpers for step-geometric auction pricing.
+@dev Products are computed in checked uint256 arithmetic: quotes revert if
+     a * b overflows. Auction totals, amounts, and RAY factors stay far below
+     that domain by deployment policy. No Snekmate or Yearn implementation
+     code was used.
 """
 
 
 error DivisionByZero:
-    pass
-
-
-error MulDivOverflow:
     pass
 
 
@@ -40,7 +32,6 @@ error GrowthFactor:
 
 RAY: constant(uint256) = 10**27
 WAD: constant(uint256) = 10**18
-UINT256_MAX: constant(uint256) = max_value(uint256)
 
 # Deployment parameters must keep the decay factor and active step count in
 # this domain. The integrating contract enforces these bounds when it validates
@@ -62,67 +53,14 @@ RAY_POW_ERROR_PER_STEP: constant(uint256) = 8
 @pure
 def mul_div_up(a: uint256, b: uint256, denominator: uint256) -> uint256:
     """
-    @notice Calculate ceil(a * b / denominator) without overflowing the product.
-    @dev Adapted from the credited Uniswap FullMath implementation. The low
-         product word and MULMOD modulo 2**256 - 1 uniquely recover the
-         high word. After subtracting the remainder from the 512-bit product,
-         division by an odd denominator is multiplication by its inverse modulo
-         2**256. Eight Newton steps derive all 256 inverse bits from the fact that
-         every odd integer is its own inverse modulo 2.
+    @notice Calculate ceil(a * b / denominator).
+    @dev The subtract-then-increment form rounds up without the overflow the
+         usual `+ denominator - 1` adjustment could add on top of a * b.
     """
     assert denominator != 0, DivisionByZero()
-
     if a == 0 or b == 0:
         return 0
-
-    product_low: uint256 = unsafe_mul(a, b)
-    product_mod_max: uint256 = uint256_mulmod(a, b, UINT256_MAX)
-    product_high: uint256 = unsafe_sub(
-        unsafe_sub(product_mod_max, product_low),
-        convert(product_mod_max < product_low, uint256),
-    )
-    remainder: uint256 = uint256_mulmod(a, b, denominator)
-
-    if product_high == 0:
-        quotient: uint256 = product_low // denominator
-        if remainder != 0:
-            assert quotient != UINT256_MAX, MulDivOverflow()
-            quotient += 1
-        return quotient
-
-    # The high word must be smaller than the denominator for the floor quotient
-    # to fit in uint256. The final increment separately checks ceil overflow.
-    assert denominator > product_high, MulDivOverflow()
-
-    # Make the 512-bit numerator exactly divisible by denominator.
-    if remainder > product_low:
-        product_high = unsafe_sub(product_high, 1)
-    product_low = unsafe_sub(product_low, remainder)
-
-    # Divide powers of two conventionally, then move the high-word bits into
-    # the low word. `two_complement_scale` represents 2**256 / power_of_two;
-    # zero is the correct wrapped representation when power_of_two is one.
-    power_of_two: uint256 = denominator & unsafe_sub(0, denominator)
-    odd_denominator: uint256 = denominator // power_of_two
-    product_low = product_low // power_of_two
-    two_complement_scale: uint256 = unsafe_add(
-        unsafe_div(unsafe_sub(0, power_of_two), power_of_two),
-        1,
-    )
-    product_low = product_low | unsafe_mul(product_high, two_complement_scale)
-
-    inverse: uint256 = 1
-    for _i: uint256 in range(8):
-        inverse = unsafe_mul(
-            inverse,
-            unsafe_sub(2, unsafe_mul(odd_denominator, inverse)),
-        )
-
-    quotient: uint256 = unsafe_mul(product_low, inverse)
-    if remainder != 0:
-        assert quotient != UINT256_MAX, MulDivOverflow()
-        quotient += 1
-    return quotient
+    return (a * b - 1) // denominator + 1
 
 
 @internal

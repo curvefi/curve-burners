@@ -65,7 +65,7 @@ def deploy_burner(fee_collector):
         # return boa.load_partial("contracts/burners/CowSwapBurner.vy").at("")
     if BURNER == "DutchAuction":
         # Run scripts/dutch_auction_preflight.py against the final chain config first.
-        registry = boa.load("contracts/AdapterRegistry.vy", ADMIN, EMERGENCY_ADMIN)
+        registry = boa.load("contracts/AdapterRegistry.vy", fee_collector)  # roles follow FeeCollector owner/emergency_owner
         # registry = boa.load_partial("contracts/AdapterRegistry.vy").at("")
         print(f"AdapterRegistry: {registry.address}")
 
@@ -83,8 +83,8 @@ def deploy_burner(fee_collector):
 
         cow_enabled = True  # ALTER: False on chains without CoW
         if cow_enabled:
-            handler = boa.load("contracts/cow/WatchtowerHandler.vy")
-            # handler = boa.load_partial("contracts/cow/WatchtowerHandler.vy").at("")
+            handler = boa.load("contracts/burners/cow/WatchtowerHandler.vy")
+            # handler = boa.load_partial("contracts/burners/cow/WatchtowerHandler.vy").at("")
             print(f"CowWatchtowerHandler: {handler.address}")
             burner.configure_cow(COW_SETTLEMENT, COMPOSABLE_COW, handler.address)
             burner.enable_cow()

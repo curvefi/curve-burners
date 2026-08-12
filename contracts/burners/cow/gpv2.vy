@@ -64,9 +64,7 @@ STATIC_INPUT_LEN: constant(uint256) = 52  # packed bytes20 token || bytes32 gene
 MAX_HANDLER_INPUT_LEN: constant(uint256) = 256
 MAX_OFFCHAIN_INPUT_LEN: constant(uint256) = 256
 MAX_PROOF_LEN: constant(uint256) = 32
-MAX_SIGNATURE_LEN: constant(uint256) = 2048
 ENCODED_ORDER_LEN: constant(uint256) = 12 * 32
-MAX_ENCODED_PAYLOAD_LEN: constant(uint256) = 2048
 
 # GPv2 constants from cowprotocol/contracts@a10f40788af29467e87de3dbf2196662b0a6b500 GPv2Order.
 GPV2_ORDER_TYPE_HASH: constant(bytes32) = 0xd5a25ba2e97094ad7d83dc28a6572da797d6b3e7fc6663bd93efb789fc17e489

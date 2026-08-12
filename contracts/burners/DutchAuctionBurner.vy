@@ -23,10 +23,10 @@
              (scripts/emergency_cow_disable.py builds the bundle).
 @custom:security The configured start total assumes every staged lot is worth no
                  more than that amount. Inventory accounting is balance-based:
-                 available = min(initial_amount, native_remaining, balanceOf),
-                 so tokens donated after the weekly snapshot can be resold along
-                 the same curve — always at or above the curve price and always
-                 in favor of FeeCollector; available never exceeds the snapshot.
+                 available = min(initial_amount, balanceOf), so tokens donated
+                 after the weekly snapshot can be resold along the same curve —
+                 always at or above the curve price and always in favor of
+                 FeeCollector; available never exceeds the snapshot.
                  Router approvals are infinite but only toward canonical routers
                  (CoW vault relayer, Permit2) while an enabled rail references
                  them. Tokens with transfer fees, rebases, callbacks, or
@@ -35,13 +35,14 @@
 
 
 from ..interfaces import IDutchAuction
-from ..auction import dutch_auction_math as auction_math
-from ..auction import adapter_types
-from ..auction import dutch_auction
-from ..auction import adapters
-from ..cow import gpv2
-from ..cow import execution as cow_execution
-from ..cow import watchtower as cow_watchtower
+from .auction import dutch_auction_math as auction_math
+from .auction import adapter_types
+from .auction import dutch_auction
+from .auction import adapters
+from ..utils import recovery
+from .cow import gpv2
+from .cow import execution as cow_execution
+from .cow import watchtower as cow_watchtower
 
 implements: IDutchAuction
 initializes: dutch_auction
@@ -65,7 +66,6 @@ exports: (
     dutch_auction.step_duration,
     dutch_auction.proceeds_receiver,
     dutch_auction.lots,
-    dutch_auction.cancelled_epoch,
     dutch_auction.reconfigured_epoch,
 )
 exports: adapters.__interface__
@@ -121,7 +121,6 @@ error NotSignatureVerifierMuxer:
 
 
 interface ERC20:
-    def transfer(_receiver: address, _amount: uint256) -> bool: nonpayable
     def balanceOf(_owner: address) -> uint256: view
 
 
@@ -133,11 +132,6 @@ interface FeeCollector:
     def epoch_time_frame(_epoch: Epoch, _timestamp: uint256 = ...) -> (uint256, uint256): view
     def can_exchange(_coins: DynArray[ERC20, MAX_COINS]) -> bool: view
     def transfer(_transfers: DynArray[Transfer, MAX_COINS]): nonpayable
-
-
-event Recovered:
-    token: indexed(ERC20)
-    amount: uint256
 
 
 flag Epoch:
@@ -156,8 +150,6 @@ struct Transfer:
 MAX_COINS: constant(uint256) = 64
 WAD: constant(uint256) = 10**18
 WEEK: constant(uint256) = 7 * 24 * 60 * 60
-MAX_PRICE_STEPS: constant(uint256) = 100_000
-ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 
 ERC165_INTERFACE_ID: constant(bytes4) = 0x01ffc9a7
 BURNER_INTERFACE_ID: constant(bytes4) = 0xa3b5e311
@@ -236,7 +228,9 @@ def _validate_curve_fits_frame(
     _exchange_end: uint256,
 ):
     active_elapsed: uint256 = _exchange_end - _exchange_start - 1
-    assert active_elapsed // _step_duration <= MAX_PRICE_STEPS, TooManyPriceSteps()
+    assert (
+        active_elapsed // _step_duration <= auction_math.MAX_SUPPORTED_PRICE_STEPS
+    ), TooManyPriceSteps()
     assert auction_math.total_price(
         _start_total,
         _floor_total,
@@ -287,13 +281,6 @@ def _exchange_frame(_timestamp: uint256) -> (uint256, uint256):
     return staticcall self.fee_collector.epoch_time_frame(Epoch.EXCHANGE, _timestamp)
 
 
-@internal
-@pure
-def _mul_div_down_wad(_amount: uint256, _wad_fraction: uint256) -> uint256:
-    # Splitting the amount preserves floor rounding without overflowing the product.
-    return (_amount // WAD) * _wad_fraction + (_amount % WAD) * _wad_fraction // WAD
-
-
 # Weekly staging
 
 
@@ -303,6 +290,9 @@ def burn(_coins: DynArray[ERC20, MAX_COINS], _receiver: address):
     @notice Pay the COLLECT incentive, take custody, and snapshot upcoming lots.
     @dev Staging also tops canonical router approvals up to infinity inside the
          core, so a freshly staged lot is immediately pullable by enabled rails.
+         Restaging a leftover lot needs no fresh fees: a permissionless
+         FeeCollector.collect during any later COLLECT frame re-snapshots the
+         burner's full balance for the upcoming week from the top of the curve.
     @param _coins Sorted tokens supplied by FeeCollector.
     @param _receiver Receiver of the FeeCollector COLLECT incentive.
     """
@@ -319,15 +309,11 @@ def burn(_coins: DynArray[ERC20, MAX_COINS], _receiver: address):
     custody_transfers: DynArray[Transfer, MAX_COINS] = []
 
     for coin: ERC20 in _coins:
-        # Fail before any transfer for target or cancelled-this-week tokens.
-        dutch_auction._check_stageable(dutch_auction.ERC20(coin.address), epoch)
+        # Fail before any transfer when the target token is among the coins.
+        dutch_auction._check_stageable(dutch_auction.ERC20(coin.address))
         collector_balance: uint256 = staticcall coin.balanceOf(self.fee_collector.address)
         fee_payouts.append(
-            Transfer(
-                coin=coin,
-                to=_receiver,
-                amount=self._mul_div_down_wad(collector_balance, fee),
-            )
+            Transfer(coin=coin, to=_receiver, amount=collector_balance * fee // WAD)
         )
         custody_transfers.append(Transfer(coin=coin, to=self, amount=max_value(uint256)))
 
@@ -600,29 +586,20 @@ def push_target() -> uint256:
 
 @external
 def recover(_coins: DynArray[ERC20, MAX_COINS]):
-    """@notice Return ERC-20 or native balances only to FeeCollector."""
+    """
+    @notice Return ERC-20 or native balances only to FeeCollector.
+    @dev Emptying the balance kills the lot through the balance term of
+         available. During the same week's COLLECT frame a permissionless
+         collect can pull the token back and restage it, so an emergency
+         evacuation batches recover with FeeCollector.set_killed.
+    """
     assert msg.sender in [
         staticcall self.fee_collector.owner(),
         staticcall self.fee_collector.emergency_owner(),
     ], adapters.OnlyOwner()
 
-    recovery_epoch: uint256 = self._auction_epoch(block.timestamp)
     for coin: ERC20 in _coins:
-        amount: uint256 = 0
-        if coin.address == ETH_ADDRESS:
-            amount = self.balance
-            if amount != 0:
-                raw_call(self.fee_collector.address, b"", value=amount)
-        else:
-            amount = staticcall coin.balanceOf(self)
-            # Persist cancellation for the FeeCollector auction week, including
-            # its permissionless COLLECT frame. A later week's COLLECT clears it.
-            dutch_auction._cancel_lot(dutch_auction.ERC20(coin.address), recovery_epoch)
-            if amount != 0:
-                assert extcall coin.transfer(
-                    self.fee_collector.address, amount, default_return_value=True
-                )
-        log Recovered(token=coin, amount=amount)
+        recovery._recover_coin(recovery.ERC20(coin.address), self.fee_collector.address)
 
 
 @external

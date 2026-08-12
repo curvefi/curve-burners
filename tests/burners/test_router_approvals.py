@@ -33,7 +33,7 @@ LOT_INITIAL_AMOUNT = 1
 REGISTRY_MOCK_SOURCE = """
 # pragma version 0.5.0a4
 
-from contracts.auction import adapter_types
+from contracts.burners.auction import adapter_types
 
 config: adapter_types.AdapterConfig
 
@@ -153,7 +153,10 @@ def registry(owner, emergency_owner, validator_mock):
     verifier = boa.env.generate_address("verifier")
     executor = boa.env.generate_address("executor")
     with boa.env.prank(owner):
-        registry = boa.load("contracts/AdapterRegistry.vy", owner, emergency_owner)
+        role_source = boa.load(
+            "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner
+        )
+        registry = boa.load("contracts/AdapterRegistry.vy", role_source.address)
         for adapter_id, mode in (
             (ID_COW, MODE_COW_VAULT_RELAYER),
             (ID_SIG, MODE_PERMIT2_SIGNATURE_TRANSFER),

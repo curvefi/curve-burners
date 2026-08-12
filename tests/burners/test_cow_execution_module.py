@@ -1,6 +1,6 @@
 """Standalone tests for the stateful cow_execution module.
 
-Exercises contracts/cow/execution.vy in isolation through
+Exercises contracts/burners/cow/execution.vy in isolation through
 CowExecutionHarness: the configure/enable/disable lifecycle with settlement
 discovery via SettlementMock, and ERC-1271 validation of bare Yearn-style
 and ComposableCoW-wrapped GPv2 orders against the controllable hook state

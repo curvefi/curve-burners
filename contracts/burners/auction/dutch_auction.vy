@@ -14,10 +14,10 @@
      _auction_epoch hook maps timestamps onto monotone epoch numbers (0 is
      reserved for "never staged") and _epoch_bounds maps an epoch onto its
      active window. Inventory accounting is balance-based:
-     available = min(initial_amount, native_remaining, balanceOf). There is no
-     finite per-rail budget, so tokens donated after the snapshot can be
-     sold along the same curve — always at or above the curve price and always
-     in favor of the proceeds receiver; available never exceeds initial_amount.
+     available = min(initial_amount, balanceOf). There is no finite per-rail
+     budget, so tokens donated after the snapshot can be sold along the same
+     curve — always at or above the curve price and always in favor of the
+     proceeds receiver; initial_amount pins the unit price and caps available.
      Router approvals and the ERC-1271 adapter dispatcher live in the sibling
      adapters module; staging reaches it through _sync_stage_approvals and the
      dispatcher validates order economics through _check_signed_order.
@@ -48,10 +48,6 @@ error BadDecay:
     pass
 
 
-error LotCancelled:
-    pass
-
-
 error AmountExceedsAvailable:
     pass
 
@@ -65,10 +61,6 @@ error ZeroReceiver:
 
 
 error NothingAvailable:
-    pass
-
-
-error Underpaid:
     pass
 
 
@@ -136,18 +128,14 @@ event EconomicsResynced:
 struct Lot:
     epoch: uint256
     initial_amount: uint256
-    native_remaining: uint256
-    start_total: uint256
-    floor_total: uint256
 
 
 MAX_CALLBACK_DATA: constant(uint256) = 8192
-WAD: constant(uint256) = 10**18
-RAY: constant(uint256) = 10**27
 
-# Auction economics. Mutable only through _resync_economics: every lot pins
-# its own start/floor snapshot at staging, and a want change fences out all
-# lots of the resync epoch (their snapshots are denominated in the old want).
+# Auction economics. Mutable only through _resync_economics: lots store no
+# curve snapshot, so a retune reprices live lots immediately; a want change
+# additionally fences out all lots staged up to the resync epoch (their
+# amounts were priced against curves denominated in the old want).
 proceeds_receiver: public(immutable(address))
 want: public(ERC20)
 start_total: public(uint256)
@@ -160,7 +148,6 @@ reconfigured_epoch: public(uint256)
 
 # Per-epoch lot accounting
 lots: public(HashMap[ERC20, Lot])
-cancelled_epoch: public(HashMap[ERC20, uint256])
 
 
 @deploy
@@ -194,7 +181,8 @@ def _set_economics(
     assert _want.address != empty(address), BadWant()
     assert _start_total > 0, ZeroStartTotal()
     assert 0 < _floor_total and _floor_total <= _start_total, BadFloor()
-    assert RAY // 2 <= _decay_factor_ray and _decay_factor_ray < RAY, BadDecay()
+    assert auction_math.MIN_SUPPORTED_DECAY_FACTOR_RAY <= _decay_factor_ray, BadDecay()
+    assert _decay_factor_ray < auction_math.RAY, BadDecay()
     assert _step_duration > 0, auction_math.ZeroStep()
 
     self.want = _want
@@ -215,12 +203,12 @@ def _resync_economics(
 ):
     """
     @notice Re-pin the auction economics; authorization stays with the caller.
-    @dev A want change fences out every lot of the current epoch: their curve
-         snapshots are denominated in the old want, so filling them against
+    @dev A want change fences out every lot of the current epoch: their
+         economics are denominated in the old want, so filling them against
          the new one would misprice the inventory. Fills resume with the next
-         epoch's staging. A same-want retune needs no fence — live lots keep
-         their own valid snapshots and only future stagings pick up the new
-         curve. The old want becomes a regular stageable token.
+         epoch's staging. A same-want retune needs no fence and takes effect
+         immediately — the curve is read live, so live lots reprice at once.
+         The old want becomes a regular stageable token.
     """
     if _want != self.want:
         self.reconfigured_epoch = _current_epoch
@@ -250,10 +238,8 @@ def current_epoch() -> uint256:
 
 @internal
 @view
-def _check_stageable(_token: ERC20, _epoch: uint256):
+def _check_stageable(_token: ERC20):
     assert _token != self.want, adapter_types.TargetToken()
-    cancelled: uint256 = self.cancelled_epoch[_token]
-    assert cancelled == 0 or cancelled != _epoch, LotCancelled()
 
 
 @internal
@@ -268,16 +254,9 @@ def _stage_lot(_token: ERC20, _epoch: uint256) -> uint256:
          pullable by enabled rails.
     @return The snapshot initial amount.
     """
-    self._check_stageable(_token, _epoch)
+    self._check_stageable(_token)
     amount: uint256 = staticcall _token.balanceOf(self)
-    self.lots[_token] = Lot(
-        epoch=_epoch,
-        initial_amount=amount,
-        native_remaining=amount,
-        start_total=self.start_total,
-        floor_total=self.floor_total,
-    )
-    self.cancelled_epoch[_token] = 0
+    self.lots[_token] = Lot(epoch=_epoch, initial_amount=amount)
     self._sync_stage_approvals(_token.address)
     start: uint256 = 0
     end: uint256 = 0
@@ -307,8 +286,6 @@ def _is_active(_from: ERC20, _lot: Lot, _timestamp: uint256) -> bool:
     # Lots staged up to a want resync carry snapshots in the old denomination.
     if _lot.epoch <= self.reconfigured_epoch:
         return False
-    if self.cancelled_epoch[_from] == _lot.epoch:
-        return False
     start: uint256 = 0
     end: uint256 = 0
     start, end = self._epoch_bounds(_lot.epoch)
@@ -321,7 +298,7 @@ def _is_active(_from: ERC20, _lot: Lot, _timestamp: uint256) -> bool:
 @view
 def _available_unchecked(_from: ERC20, _lot: Lot) -> uint256:
     balance: uint256 = staticcall _from.balanceOf(self)
-    return min(_lot.initial_amount, min(_lot.native_remaining, balance))
+    return min(_lot.initial_amount, balance)
 
 
 @internal
@@ -340,8 +317,8 @@ def _lot_total_price(_lot: Lot, _timestamp: uint256) -> uint256:
     end: uint256 = 0
     start, end = self._epoch_bounds(_lot.epoch)
     return auction_math.total_price(
-        _lot.start_total,
-        _lot.floor_total,
+        self.start_total,
+        self.floor_total,
         self.decay_factor_ray,
         _timestamp - start,
         self.step_duration,
@@ -439,11 +416,6 @@ def _take_core(
 
     lot: Lot = self.lots[_from]
     payment: uint256 = self._quote_unchecked(_from, amount_taken, block.timestamp)
-    collector_before: uint256 = staticcall self.want.balanceOf(self.proceeds_receiver)
-    burner_before: uint256 = staticcall self.want.balanceOf(self)
-
-    # Effects precede both the token transfer and the callback.
-    self.lots[_from].native_remaining = lot.native_remaining - amount_taken
 
     assert extcall _from.transfer(_receiver, amount_taken, default_return_value=True)
     if len(_data) != 0:
@@ -455,29 +427,19 @@ def _take_core(
             _data,
         )
 
-    burner_after: uint256 = staticcall self.want.balanceOf(self)
-    if burner_after > burner_before:
-        assert extcall self.want.transfer(
-            self.proceeds_receiver,
-            burner_after - burner_before,
-            default_return_value=True,
-        )
+    # The full quote is pulled from the caller's allowance after the callback.
+    # Crediting balance deltas at the proceeds receiver instead would let a
+    # callback route unrelated third-party inflows (any permissionless push
+    # toward the receiver) into its own bill.
+    assert extcall self.want.transferFrom(
+        msg.sender,
+        self.proceeds_receiver,
+        payment,
+        default_return_value=True,
+    )
 
-    collector_after_callback: uint256 = staticcall self.want.balanceOf(self.proceeds_receiver)
-    paid: uint256 = collector_after_callback - collector_before
-    if paid < payment:
-        assert extcall self.want.transferFrom(
-            msg.sender,
-            self.proceeds_receiver,
-            payment - paid,
-            default_return_value=True,
-        )
-
-    assert staticcall self.want.balanceOf(
-        self.proceeds_receiver
-    ) - collector_before >= payment, Underpaid()
     remaining: uint256 = min(
-        self.lots[_from].native_remaining,
+        lot.initial_amount,
         staticcall _from.balanceOf(self),
     )
     log Taken(
@@ -501,6 +463,9 @@ def take(
 ) -> uint256:
     """
     @notice Take up to `maxAmount` of an auctioned token.
+    @dev The full quoted payment is pulled from the caller's want allowance
+         after the optional callback; the callback lets the taker source the
+         funds from the received tokens first.
     @param _from Token offered by the auction.
     @param maxAmount Maximum amount of `_from` to take.
     @param takerReceiver Receiver of the auctioned token.
@@ -597,19 +562,6 @@ def _check_signed_order(
         )
     )
     return _order.context_hash == context_hash
-
-
-# Emergency lot cancellation
-
-
-@internal
-def _cancel_lot(_token: ERC20, _epoch: uint256):
-    """
-    @notice Cancel the token's lot for the given epoch, including its staging.
-    @dev A later epoch's staging clears the cancellation.
-    """
-    self.cancelled_epoch[_token] = _epoch
-    self.lots[_token].native_remaining = 0
 
 
 # Compile-time integration hooks implemented by the importing contract.

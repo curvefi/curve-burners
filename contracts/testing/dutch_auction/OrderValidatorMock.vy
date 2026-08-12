@@ -17,7 +17,7 @@
 @custom:security Deliberately unsafe and caller-trusting by design.
 """
 
-from contracts.auction import adapter_types
+from contracts.burners.auction import adapter_types
 
 
 # abi_encode(NormalizedOrder) is a static 12-word tuple; headroom on top lets

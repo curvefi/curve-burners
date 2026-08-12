@@ -249,7 +249,7 @@ def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
         keeper = boa.env.generate_address("keeper")
         simulated_solver = boa.env.generate_address("simulated_solver")
 
-        handler = boa.load("contracts/cow/WatchtowerHandler.vy")
+        handler = boa.load("contracts/burners/cow/WatchtowerHandler.vy")
         erc20 = boa.load_partial("contracts/testing/ERC20Mock.vy")
         target = erc20.deploy("Fork Target", "TARGET", 18)
         sell_token = erc20.deploy("Fork Sell Token", "SELL", 18)
