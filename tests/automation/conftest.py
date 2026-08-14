@@ -109,11 +109,22 @@ def job_board(admin, fee_collector, target, jobs):
     with boa.env.prank(admin):
         board = boa.load("contracts/automation/JobBoard.vy", fee_collector, jobs)
 
-    # Budget: mimic FeeCollector's weekly buffer approve generously for unit tests
+    # fee_collector and target are session-scoped, so fixture setup must restore
+    # their state explicitly when this module finishes.
+    initial_balance = target.balanceOf(fee_collector)
     target._mint_for_testing(fee_collector, 10 ** 20)
     with boa.env.prank(fee_collector.address):
         target.approve(board, 2 ** 255)
-    return board
+
+    yield board
+
+    with boa.env.prank(fee_collector.address):
+        target.approve(board, 0)
+        balance = target.balanceOf(fee_collector)
+        if balance > initial_balance:
+            target.transfer(board, balance - initial_balance)
+    if balance < initial_balance:
+        target._mint_for_testing(fee_collector, initial_balance - balance)
 
 
 @pytest.fixture(scope="module")
