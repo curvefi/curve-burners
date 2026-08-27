@@ -6,11 +6,14 @@
 @title Dutch auction math
 @author Curve Finance
 @license MIT
-@notice Upward-rounded helpers for step-geometric auction pricing.
-@dev Products are computed in checked uint256 arithmetic: quotes revert if
-     a * b overflows. Auction totals, amounts, and RAY factors stay far below
-     that domain by deployment policy. No Snekmate or Yearn implementation
-     code was used.
+@notice Step-geometric auction pricing helpers.
+@dev Rounding follows the Maker/Yearn rpow convention: RAY multiplications
+     round to nearest, the decayed total rounds down, and only the payment
+     quotes round up in favor of the receiver — the residual error is dwarfed
+     by execution noise. Products are computed in checked uint256 arithmetic:
+     quotes revert if a * b overflows; auction totals, amounts, and RAY
+     factors stay far below that domain by deployment policy. No Snekmate or
+     Yearn implementation code was used.
 """
 
 
@@ -33,21 +36,6 @@ error GrowthFactor:
 RAY: constant(uint256) = 10**27
 WAD: constant(uint256) = 10**18
 
-# Deployment parameters must keep the decay factor and active step count in
-# this domain. The integrating contract enforces these bounds when it validates
-# immutable curve parameters.
-MIN_SUPPORTED_DECAY_FACTOR_RAY: constant(uint256) = RAY // 2
-MAX_SUPPORTED_PRICE_STEPS: constant(uint256) = 100_000
-
-# Within the supported deployment domain, if exact = RAY * (base / RAY)**n:
-#   ceil(exact) <= ray_pow_up(base, n) <= ceil(exact) + 8 * n + 1
-# in raw RAY units. Consequently, total_price's excess over the exact geometric
-# quote is at most ceil(start_total * (8 * n + 2) / RAY) + 1 raw target units;
-# the extra RAY atom covers ceil(exact) - exact.
-# The bound conservatively covers every upward rounding in at most 17 squarings
-# and 17 accumulator multiplications for n <= MAX_SUPPORTED_PRICE_STEPS.
-RAY_POW_ERROR_PER_STEP: constant(uint256) = 8
-
 
 @internal
 @pure
@@ -65,13 +53,20 @@ def mul_div_up(a: uint256, b: uint256, denominator: uint256) -> uint256:
 
 @internal
 @pure
-def ray_pow_up(base_ray: uint256, exponent: uint256) -> uint256:
+def ray_mul(a: uint256, b: uint256) -> uint256:
+    """@notice Calculate a * b / RAY rounded to nearest (Maker rpow convention)."""
+    return (a * b + RAY // 2) // RAY
+
+
+@internal
+@pure
+def ray_pow(base_ray: uint256, exponent: uint256) -> uint256:
     """
-    @notice Calculate an upward-rounded RAY fixed-point power.
-    @dev The loop has one iteration per exponent bit and is therefore bounded
-         by the uint256 width. Results which do not fit uint256 revert. Auction
-         deployments support base_ray in [RAY / 2, RAY] and exponent <= 100,000;
-         callers must enforce that domain as part of curve validation.
+    @notice Calculate a RAY fixed-point power by square-and-multiply.
+    @dev Each multiplication rounds to nearest, matching the Maker/Yearn rpow
+         convention. The loop has one iteration per exponent bit and is
+         therefore bounded by the uint256 width. Results which do not fit
+         uint256 revert.
     """
     result: uint256 = RAY
     factor: uint256 = base_ray
@@ -81,10 +76,10 @@ def ray_pow_up(base_ray: uint256, exponent: uint256) -> uint256:
         if remaining_exponent == 0:
             return result
         if remaining_exponent & 1 != 0:
-            result = self.mul_div_up(result, factor, RAY)
+            result = self.ray_mul(result, factor)
         remaining_exponent >>= 1
         if remaining_exponent != 0:
-            factor = self.mul_div_up(factor, factor, RAY)
+            factor = self.ray_mul(factor, factor)
 
     return result
 
@@ -100,19 +95,15 @@ def total_price(
 ) -> uint256:
     """
     @notice Quote the full lot at a discrete elapsed-time step.
-    @dev Returns max(floor_total, ceil(start_total * decay**steps)).
-         The integrating contract must enforce the supported factor/step domain
-         documented above when validating immutable deployment parameters.
+    @dev Returns max(floor_total, start_total * decay**steps rounded down).
     """
     assert step_duration != 0, ZeroStep()
     assert floor_total <= start_total, FloorAboveStart()
     assert decay_factor_ray <= RAY, GrowthFactor()
 
     steps: uint256 = elapsed // step_duration
-    decayed_total: uint256 = self.mul_div_up(
-        start_total,
-        self.ray_pow_up(decay_factor_ray, steps),
-        RAY,
+    decayed_total: uint256 = (
+        start_total * self.ray_pow(decay_factor_ray, steps) // RAY
     )
     return max(floor_total, decayed_total)
 

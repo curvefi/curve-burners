@@ -2,22 +2,19 @@
 @title IAdapterRegistry
 @author Curve Finance
 @license MIT
-@notice Read interface of the validator adapter catalog used by the dispatcher.
-@dev The struct is the single-source contracts/burners/auction/adapter_types.vy
-     AdapterConfig. adapter_id is the registry lookup key and is deliberately
-     not duplicated inside AdapterConfig (deviation from the prompt's Solidity
-     sketch): the dispatcher already resolves the config by the envelope's
-     adapter_id, so an embedded copy could only disagree with its own key.
-     authorization_mode is the closed adapter_types MODE_* enum: the auction
-     maps it to canonical routers itself, so the registry can never introduce
-     an arbitrary approval target. An unknown adapter_id returns the zeroed
-     config (validator == empty(address)).
+@notice Read interface of the settlement adapter catalog used by the router.
+@dev The struct is the single-source
+     contracts/burners/auction/adapters/adapter_types.vy AdapterConfig. The
+     verifier address is the registry lookup key, the adapter's identity, and
+     the routing prefix of adapter signatures; the executor is the protocol
+     contract auctions approve while an enabled adapter references it. An
+     unknown verifier returns the zeroed config (executor == empty(address)).
 """
 
-from contracts.burners.auction import adapter_types
+from contracts.burners.auction.adapters import adapter_types
 
 
 @external
 @view
-def get_adapter(_adapter_id: bytes4) -> adapter_types.AdapterConfig:
+def get_adapter(_verifier: address) -> adapter_types.AdapterConfig:
     ...

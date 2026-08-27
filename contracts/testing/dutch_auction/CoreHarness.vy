@@ -11,25 +11,57 @@
 @custom:kill Testing-only contract, never deployed to production.
 """
 
-from contracts.burners.auction import dutch_auction
-from contracts.burners.auction import adapters
-from contracts.burners.auction import adapter_types
+from ethereum.ercs import IERC20
 
+from contracts.burners.auction import dutch_auction
+from contracts.burners.auction.adapters import adapters
+from contracts.utils import roles
+
+initializes: roles
 initializes: dutch_auction
-initializes: adapters
-exports: dutch_auction.__interface__
-exports: adapters.__interface__
+initializes: adapters[roles := roles]
+exports: (
+    roles.role_source,
+    roles.owner,
+    roles.emergency_owner,
+)
+exports: (
+    dutch_auction.current_epoch,
+    dutch_auction.want,
+    dutch_auction.available,
+    dutch_auction.price,
+    dutch_auction.getAmountNeeded,
+    dutch_auction.quote,
+    dutch_auction.check_order,
+    dutch_auction.take,
+    dutch_auction.take_with_limits,
+    dutch_auction.start_total,
+    dutch_auction.floor_total,
+    dutch_auction.decay_factor_ray,
+    dutch_auction.step_duration,
+    dutch_auction.proceeds_receiver,
+    dutch_auction.lots,
+    dutch_auction.reconfigured_epoch,
+)
+exports: (
+    adapters.registry,
+    adapters.enabled_adapters,
+    adapters.fallback_adapter,
+    adapters.executor_refcount,
+    adapters.executors,
+    adapters.enable_adapter,
+    adapters.disable_adapter,
+    adapters.set_fallback_adapter,
+    adapters.sync_executor_approvals,
+    adapters.isValidSignature,
+)
 
 
 WEEK: constant(uint256) = 7 * 24 * 60 * 60
 
-owner: public(address)
-emergency_owner: public(address)
-cow_router: public(address)
 frame_start: public(uint256)
 frame_end: public(uint256)
 not_sellable: public(HashMap[address, bool])
-embedded_response: public(bytes4)
 
 
 @deploy
@@ -37,45 +69,28 @@ def __init__(
     _want: address,
     _proceeds_receiver: address,
     _registry: address,
-    _permit2: address,
+    _role_source: address,
     _start_total: uint256,
     _floor_total: uint256,
     _decay_factor_ray: uint256,
     _step_duration: uint256,
 ):
+    roles.__init__(roles.RoleSource(_role_source))
     dutch_auction.__init__(
-        dutch_auction.ERC20(_want),
+        IERC20(_want),
         _proceeds_receiver,
         _start_total,
         _floor_total,
         _decay_factor_ray,
         _step_duration,
     )
-    adapters.__init__(_registry, _permit2)
-    self.owner = msg.sender
-    self.emergency_owner = msg.sender
-    self.embedded_response = 0xffffffff
+    adapters.__init__(_registry)
     frame_start: uint256 = block.timestamp // WEEK * WEEK
     self.frame_start = frame_start
     self.frame_end = frame_start + WEEK
 
 
 # Hook configuration
-
-
-@external
-def set_owner(_owner: address):
-    self.owner = _owner
-
-
-@external
-def set_emergency_owner(_emergency_owner: address):
-    self.emergency_owner = _emergency_owner
-
-
-@external
-def set_cow_router(_cow_router: address):
-    self.cow_router = _cow_router
 
 
 @external
@@ -89,18 +104,13 @@ def set_sellable(_token: address, _sellable: bool):
     self.not_sellable[_token] = not _sellable
 
 
-@external
-def set_embedded_response(_response: bytes4):
-    self.embedded_response = _response
-
-
 # Internal-function wrappers
 
 
 @external
 def stage(_token: address) -> uint256:
     return dutch_auction._stage_lot(
-        dutch_auction.ERC20(_token), self.frame_start // WEEK
+        IERC20(_token), self.frame_start // WEEK
     )
 
 
@@ -135,7 +145,7 @@ def _sellable(_token: address) -> bool:
 
 @override(dutch_auction)
 def _sync_stage_approvals(_token: address):
-    adapters._ensure_router_approvals(adapters.ERC20(_token))
+    adapters._ensure_executor_approvals(IERC20(_token))
 
 
 # Adapter layer hook overrides
@@ -143,41 +153,5 @@ def _sync_stage_approvals(_token: address):
 
 @override(adapters)
 @view
-def _owner() -> address:
-    return self.owner
-
-
-@override(adapters)
-@view
-def _emergency_owner() -> address:
-    return self.emergency_owner
-
-
-@override(adapters)
-@view
-def _cow_router() -> address:
-    return self.cow_router
-
-
-@override(adapters)
-@view
 def _auction_want() -> address:
-    return dutch_auction.want.address
-
-
-@override(adapters)
-@view
-def _validate_embedded_signature(
-    _hash: bytes32, _signature: Bytes[adapter_types.MAX_ENVELOPE_LEN]
-) -> bytes4:
-    return self.embedded_response
-
-
-@override(adapters)
-@view
-def _check_order_against_lot(
-    _order: adapter_types.NormalizedOrder,
-    _adapter_id: bytes4,
-    _adapter_version: uint16,
-) -> bool:
-    return dutch_auction._check_signed_order(_order, _adapter_id, _adapter_version)
+    return dutch_auction.want_token.address

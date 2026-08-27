@@ -29,7 +29,6 @@ ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 COW_SETTLEMENT = "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"  # ALTER: GPv2Settlement
 COMPOSABLE_COW = "0xfdaFc9d1902f4e0b84f65F49f244b32b31013b74"  # ALTER: ComposableCow
 COW_VAULT_RELAYER = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"  # ALTER: VaultRelayer (CowSwapBurner only)
-PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"  # ALTER: canonical Permit2, ZERO_ADDRESS to disable
 
 
 def deploy():
@@ -65,8 +64,8 @@ def deploy_burner(fee_collector):
         # return boa.load_partial("contracts/burners/CowSwapBurner.vy").at("")
     if BURNER == "DutchAuction":
         # Run scripts/dutch_auction_preflight.py against the final chain config first.
-        registry = boa.load("contracts/AdapterRegistry.vy", fee_collector)  # roles follow FeeCollector owner/emergency_owner
-        # registry = boa.load_partial("contracts/AdapterRegistry.vy").at("")
+        registry = boa.load("contracts/burners/auction/adapters/AdapterRegistry.vy", fee_collector)  # roles follow FeeCollector owner/emergency_owner
+        # registry = boa.load_partial("contracts/burners/auction/adapters/AdapterRegistry.vy").at("")
         print(f"AdapterRegistry: {registry.address}")
 
         burner = boa.load("contracts/burners/DutchAuctionBurner.vy",
@@ -75,19 +74,26 @@ def deploy_burner(fee_collector):
                           MIN_EXCHANGE_AMOUNT,  # ALTER: floor_total
                           996_566_004_328_933_169_904_721_721,  # ALTER: 30s decay over 2879 active steps
                           30,  # ALTER: step_duration
-                          120,  # ALTER: cow_order_validity
-                          bytes.fromhex("058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"),
                           registry.address,
-                          PERMIT2,  # ALTER: ZERO_ADDRESS on chains without canonical Permit2
                           )
 
         cow_enabled = True  # ALTER: False on chains without CoW
         if cow_enabled:
+            cow_adapter = boa.load("contracts/burners/cow/CowAdapter.vy",
+                                   COW_SETTLEMENT,
+                                   bytes.fromhex("058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"),
+                                   120,  # ALTER: cow_order_validity
+                                   )
+            # cow_adapter = boa.load_partial("contracts/burners/cow/CowAdapter.vy").at("")
+            print(f"CowAdapter: {cow_adapter.address}")
             handler = boa.load("contracts/burners/cow/WatchtowerHandler.vy")
             # handler = boa.load_partial("contracts/burners/cow/WatchtowerHandler.vy").at("")
             print(f"CowWatchtowerHandler: {handler.address}")
-            burner.configure_cow(COW_SETTLEMENT, COMPOSABLE_COW, handler.address)
-            burner.enable_cow()
+            registry.set_adapter(cow_adapter.address, cow_adapter.vault_relayer())
+            registry.activate_adapter(cow_adapter.address)
+            burner.enable_adapter(cow_adapter.address)
+            burner.set_fallback_adapter(cow_adapter.address)
+            burner.configure_watchtower(COMPOSABLE_COW, handler.address)
         return burner
         # return boa.load_partial("contracts/burners/DutchAuctionBurner.vy").at("")
     raise ValueError("Burner not specified")

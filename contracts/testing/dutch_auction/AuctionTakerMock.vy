@@ -8,10 +8,7 @@
 @custom:security This mock deliberately permits arbitrary test configuration.
 """
 
-
-interface ERC20:
-    def approve(spender: address, amount: uint256) -> bool: nonpayable
-    def transfer(receiver: address, amount: uint256) -> bool: nonpayable
+from ethereum.ercs import IERC20
 
 
 interface DutchAuctionBurner:
@@ -28,7 +25,6 @@ interface DutchAuctionBurner:
         min_amount: uint256,
         max_payment: uint256,
         receiver: address,
-        expected_week: uint256,
         deadline: uint256,
         data: Bytes[8192],
     ) -> (uint256, uint256): nonpayable
@@ -45,7 +41,7 @@ MAX_APPROVAL: constant(uint256) = max_value(uint256)
 
 burner: public(immutable(DutchAuctionBurner))
 fee_collector: public(immutable(address))
-target: public(immutable(ERC20))
+target: public(immutable(IERC20))
 
 payment_mode: public(uint256)
 reenter: public(bool)
@@ -58,7 +54,7 @@ callback_data: public(Bytes[8192])
 
 
 @deploy
-def __init__(_burner: DutchAuctionBurner, _fee_collector: address, _target: ERC20):
+def __init__(_burner: DutchAuctionBurner, _fee_collector: address, _target: IERC20):
     burner = _burner
     fee_collector = _fee_collector
     target = _target
@@ -90,7 +86,6 @@ def execute_take_with_limits(
     min_amount: uint256,
     max_payment: uint256,
     receiver: address,
-    expected_week: uint256,
     deadline: uint256,
     data: Bytes[8192],
 ) -> (uint256, uint256):
@@ -102,7 +97,6 @@ def execute_take_with_limits(
         min_amount,
         max_payment,
         receiver,
-        expected_week,
         deadline,
         data,
     )

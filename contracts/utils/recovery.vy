@@ -10,14 +10,11 @@
         importer.
 """
 
-
-interface ERC20:
-    def transfer(_receiver: address, _amount: uint256) -> bool: nonpayable
-    def balanceOf(_owner: address) -> uint256: view
+from ethereum.ercs import IERC20
 
 
 event Recovered:
-    token: indexed(ERC20)
+    token: indexed(IERC20)
     amount: uint256
 
 
@@ -25,7 +22,7 @@ ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
 
 
 @internal
-def _recover_coin(_coin: ERC20, _destination: address) -> uint256:
+def _recover_coin(_coin: IERC20, _destination: address) -> uint256:
     """
     @notice Send the whole balance of `_coin` to `_destination`.
     @dev ETH_ADDRESS recovers the native-coin balance.

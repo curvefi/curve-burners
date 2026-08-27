@@ -70,12 +70,17 @@ def auction(want, proceeds_receiver):
     # travels stay inside the harness auction frame.
     into_next_epoch = WEEK - _timestamp() % WEEK + 3600
     boa.env.time_travel(seconds=into_next_epoch)
+    role_source = boa.load(
+        "contracts/testing/dutch_auction/RoleSourceMock.vy",
+        boa.env.generate_address("owner"),
+        boa.env.generate_address("emergency_owner"),
+    )
     return boa.load(
         "contracts/testing/dutch_auction/CoreHarness.vy",
         want.address,
         proceeds_receiver,
         ZERO_ADDRESS,
-        ZERO_ADDRESS,
+        role_source.address,
         START_TOTAL,
         FLOOR_TOTAL,
         DECAY_FACTOR_RAY,

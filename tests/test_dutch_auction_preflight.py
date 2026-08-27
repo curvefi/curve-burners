@@ -19,11 +19,11 @@ BURNER = "0x0000000000000000000000000000000000000006"
 OWNER = "0x0000000000000000000000000000000000000007"
 EMERGENCY_OWNER = "0x0000000000000000000000000000000000000008"
 REGISTRY = "0x0000000000000000000000000000000000000009"
-PERMIT2 = "0x000000000000000000000000000000000000000A"
-VALIDATOR = "0x000000000000000000000000000000000000000b"
+VERIFIER = "0x000000000000000000000000000000000000000b"
+EXECUTOR = "0x000000000000000000000000000000000000000E"
+COW_ADAPTER = "0x000000000000000000000000000000000000000F"
 SELL_TOKEN = "0x000000000000000000000000000000000000000C"
 HANDLER = "0x000000000000000000000000000000000000000D"
-ADAPTER_ID = "0x11223344"
 APP_DATA = "0x" + "11" * 32
 DOMAIN_SEPARATOR = bytes.fromhex("22" * 32)
 FAKE_CODE = b"\x60\x00"
@@ -94,6 +94,7 @@ class FakeRpc:
         if selector == preflight._selector("fee_collector()"):
             return encode(["address"], [FEE_COLLECTOR])
         if selector == preflight._selector("app_data()"):
+            assert address == COW_ADAPTER
             return encode(["bytes32"], [bytes.fromhex(APP_DATA[2:])])
         if selector == preflight._selector("start_total()"):
             return encode(["uint256"], [1])
@@ -103,55 +104,37 @@ class FakeRpc:
             return encode(["uint256"], [preflight.RAY - 1])
         if selector in {
             preflight._selector("step_duration()"),
-            preflight._selector("cow_order_validity()"),
             preflight._selector("cow_generation()"),
         }:
+            return encode(["uint256"], [1])
+        if selector == preflight._selector("order_validity()"):
+            assert address == COW_ADAPTER
             return encode(["uint256"], [1])
         if selector == preflight._selector("cow_enabled()"):
             return encode(["bool"], [True])
         if selector == preflight._selector("composable_cow()"):
             return encode(["address"], [COMPOSABLE_COW])
         if selector == preflight._selector("vault_relayer()"):
+            assert address == COW_ADAPTER
             return encode(["address"], [VAULT_RELAYER])
         if selector == preflight._selector("settlement()"):
+            assert address == COW_ADAPTER
             return encode(["address"], [SETTLEMENT])
         if selector == preflight._selector("cow_handler()"):
             return encode(["address"], [HANDLER])
-        if selector == preflight._selector("cow_domain_separator()"):
+        if selector == preflight._selector("fallback_adapter()"):
+            return encode(["address"], [COW_ADAPTER])
+        if selector == preflight._selector("domain_separator()"):
+            assert address == COW_ADAPTER
             return encode(["bytes32"], [self.settlement_domain_separator])
         if selector == preflight._selector("registry()"):
             return encode(["address"], [REGISTRY])
-        if selector == preflight._selector("permit2()"):
-            return encode(["address"], [PERMIT2])
-        if selector == preflight._selector("router_refcount(address)"):
+        if selector == preflight._selector("executor_refcount(address)"):
             return encode(["uint256"], [1])
-        if selector == preflight._selector("enabled_adapters(bytes4)"):
+        if selector == preflight._selector("enabled_adapters(address)"):
             return encode(["bool"], [True])
-        if selector == preflight._selector("adapter_router(bytes4)"):
-            return encode(["address"], [VAULT_RELAYER])
-        if selector == preflight._selector("get_adapter(bytes4)"):
-            return encode(
-                [
-                    "address",
-                    "bytes32",
-                    "address",
-                    "address",
-                    "uint8",
-                    "bool",
-                    "bool",
-                    "uint16",
-                ],
-                [
-                    VALIDATOR,
-                    FAKE_CODE_HASH,
-                    SETTLEMENT,
-                    VAULT_RELAYER,
-                    1,
-                    True,
-                    True,
-                    1,
-                ],
-            )
+        if selector == preflight._selector("get_adapter(address)"):
+            return encode(["address", "bool"], [EXECUTOR, True])
         raise AssertionError(f"unexpected eth_call to {address}: 0x{data.hex()}")
 
 
@@ -176,12 +159,12 @@ def _full_config() -> dict[str, Any]:
         "emergencyOwner": EMERGENCY_OWNER,
         "burner": BURNER,
         "registry": REGISTRY,
-        "permit2": PERMIT2,
+        "cowAdapter": COW_ADAPTER,
         "adapters": [
             {
-                "id": ADAPTER_ID,
-                "validator": VALIDATOR,
-                "validatorCodeHash": "0x" + FAKE_CODE_HASH.hex(),
+                "verifier": VERIFIER,
+                "executor": EXECUTOR,
+                "verifierCodeHash": "0x" + FAKE_CODE_HASH.hex(),
             }
         ],
     }
@@ -193,27 +176,35 @@ def test_full_preflight_preserves_existing_checks_and_adds_cancun_probe():
     report = preflight.run_preflight(rpc, _full_config())
 
     assert not report.errors
-    assert len(report.checks) == 64
     assert report.checks["evm.cancunOpcodes"] is True
     assert rpc.probe_code == preflight.CANCUN_PROBE_INIT_CODE
     assert report.checks["burner.interface.erc1271"] is True
     assert report.checks["burner.interface.conditionalOrder"] is False
     assert report.checks["handler.interface.conditionalOrder"] is True
-    assert report.checks["burner.settlement"] == SETTLEMENT
+    assert report.checks["burner.fallbackAdapter"] == COW_ADAPTER
+    assert report.checks["cowAdapter.settlement"] == SETTLEMENT
+    assert report.checks["cowAdapter.vaultRelayer"] == preflight.to_checksum_address(
+        VAULT_RELAYER
+    )
     assert report.checks["burner.cowHandler"] == preflight.to_checksum_address(HANDLER)
     assert report.checks["burner.registry"] == REGISTRY
-    assert report.checks["burner.permit2"] == PERMIT2
     assert report.checks["burner.vaultRelayerRefcount.positive"] is True
-    adapter_label = f"adapter.{ADAPTER_ID}"
+    adapter_label = f"adapter.{preflight.to_checksum_address(VERIFIER)}"
     assert report.checks[f"{adapter_label}.enabled"] is True
     assert report.checks[f"{adapter_label}.active"] is True
-    assert report.checks[f"{adapter_label}.validator"] == preflight.to_checksum_address(
-        VALIDATOR
+    assert report.checks[f"{adapter_label}.executor"] == preflight.to_checksum_address(
+        EXECUTOR
     )
-    assert report.checks[f"{adapter_label}.validatorCodeHash"] == (
+    assert report.checks[f"{adapter_label}.pinnedCodeHash"] == (
         "0x" + FAKE_CODE_HASH.hex()
     )
-    assert report.checks[f"{adapter_label}.routerRefcount.positive"] is True
+    assert report.checks[f"{adapter_label}.executorRefcount.positive"] is True
+
+
+def test_full_preflight_check_count_is_pinned():
+    report = preflight.run_preflight(FakeRpc(), _full_config())
+    assert not report.errors
+    assert len(report.checks) == 61
 
 
 def test_cow_domain_separator_mismatch_is_an_error():
@@ -250,27 +241,34 @@ def test_native_only_cancun_probe_failure_is_an_error_without_cow_reads():
     assert preflight.ZERO_ADDRESS not in rpc.read_addresses
 
 
-def test_lifecycle_calldata_covers_cow_adapters_and_router_sync():
+def test_lifecycle_calldata_covers_cow_adapters_and_executor_sync():
     calls = preflight.lifecycle_calldata(
         _full_config(), BURNER, VAULT_RELAYER, [SELL_TOKEN]
     )
 
     assert [call["function"] for call in calls["configuration"]] == [
-        "configure_cow(address,address,address)",
-        "enable_cow()",
-        "enable_adapter(bytes4)",
+        "enable_adapter(address)",
+        "set_fallback_adapter(address)",
+        "configure_watchtower(address,address)",
+        "enable_adapter(address)",
     ]
     assert calls["configuration"][0]["data"] == preflight.encode_call(
-        "configure_cow(address,address,address)",
-        ["address", "address", "address"],
-        [SETTLEMENT, COMPOSABLE_COW, HANDLER],
+        "enable_adapter(address)", ["address"], [COW_ADAPTER]
+    )
+    assert calls["configuration"][1]["data"] == preflight.encode_call(
+        "set_fallback_adapter(address)", ["address"], [COW_ADAPTER]
+    )
+    assert calls["configuration"][2]["data"] == preflight.encode_call(
+        "configure_watchtower(address,address)",
+        ["address", "address"],
+        [COMPOSABLE_COW, HANDLER],
     )
     assert [call["function"] for call in calls["emergency"]] == [
-        "disable_cow()",
-        "disable_adapter(bytes4)",
+        "disable_adapter(address)",
+        "disable_adapter(address)",
     ]
     assert [call["function"] for call in calls["permissionless"]] == [
-        "sync_router_approvals(address,address[])",
+        "sync_executor_approvals(address,address[])",
     ]
     assert all(
         call["to"] == BURNER
@@ -278,15 +276,14 @@ def test_lifecycle_calldata_covers_cow_adapters_and_router_sync():
         for call in group
     )
 
-    adapter_id = bytes.fromhex(ADAPTER_ID[2:])
-    assert calls["configuration"][2]["data"] == preflight.encode_call(
-        "enable_adapter(bytes4)", ["bytes4"], [adapter_id]
+    assert calls["configuration"][3]["data"] == preflight.encode_call(
+        "enable_adapter(address)", ["address"], [preflight.to_checksum_address(VERIFIER)]
     )
     assert calls["emergency"][1]["data"] == preflight.encode_call(
-        "disable_adapter(bytes4)", ["bytes4"], [adapter_id]
+        "disable_adapter(address)", ["address"], [preflight.to_checksum_address(VERIFIER)]
     )
     assert calls["permissionless"][0]["data"] == preflight.encode_call(
-        "sync_router_approvals(address,address[])",
+        "sync_executor_approvals(address,address[])",
         ["address", "address[]"],
         [preflight.to_checksum_address(VAULT_RELAYER), [
             preflight.to_checksum_address(SELL_TOKEN)
@@ -294,8 +291,8 @@ def test_lifecycle_calldata_covers_cow_adapters_and_router_sync():
     )
 
 
-def test_lifecycle_calldata_requires_router_and_tokens_together():
-    with pytest.raises(ValueError, match="--router and at least one --token"):
+def test_lifecycle_calldata_requires_executor_and_tokens_together():
+    with pytest.raises(ValueError, match="--executor and at least one --token"):
         preflight.lifecycle_calldata(_full_config(), BURNER, VAULT_RELAYER, [])
-    with pytest.raises(ValueError, match="--router and at least one --token"):
+    with pytest.raises(ValueError, match="--executor and at least one --token"):
         preflight.lifecycle_calldata(_full_config(), BURNER, None, [SELL_TOKEN])

@@ -257,6 +257,15 @@ def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
         fee_collector = boa.load(
             "contracts/FeeCollector.vy", target, weth, owner, emergency_owner
         )
+        registry = boa.load(
+            "contracts/burners/auction/adapters/AdapterRegistry.vy", fee_collector.address
+        )
+        cow_adapter = boa.load(
+            "contracts/burners/cow/CowAdapter.vy",
+            GPV2_SETTLEMENT,
+            APP_DATA,
+            COW_ORDER_VALIDITY,
+        )
         burner = boa.load(
             "contracts/burners/DutchAuctionBurner.vy",
             fee_collector,
@@ -264,22 +273,23 @@ def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
             FLOOR_TOTAL,
             DECAY_FACTOR_RAY,
             STEP_DURATION,
-            COW_ORDER_VALIDITY,
-            APP_DATA,
-            ZERO_ADDRESS,
-            ZERO_ADDRESS,
+            registry,
         )
         with boa.env.prank(owner):
             fee_collector.set_burner(burner)
             fee_collector.set_killed([(ZERO_ADDRESS, 0)])
-            burner.configure_cow(GPV2_SETTLEMENT, COMPOSABLE_COW, handler)
-            burner.enable_cow()
+            registry.set_adapter(cow_adapter, cow_adapter.vault_relayer())
+            registry.activate_adapter(cow_adapter)
+            burner.enable_adapter(cow_adapter)
+            burner.set_fallback_adapter(cow_adapter)
+            burner.configure_watchtower(COMPOSABLE_COW, handler)
 
         # The relayer and domain separator are read from the real settlement.
-        assert burner.vault_relayer() == GPV2_VAULT_RELAYER
-        assert bytes(burner.cow_domain_separator()) == bytes(
+        assert cow_adapter.vault_relayer() == GPV2_VAULT_RELAYER
+        assert bytes(cow_adapter.domain_separator()) == bytes(
             settlement.domainSeparator()
         )
+        assert burner.cow_enabled()
         assert burner.supportsInterface(BURNER_INTERFACE)
         # The generator interface lives on the standalone handler now.
         assert not burner.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
@@ -357,10 +367,15 @@ def test_gnosis_real_composable_cow_signature_and_vault_relayer_custody():
         )
         assert burner.available(sell_token) == lot[LOT_INITIAL_AMOUNT] - partial_amount
 
-        # Anyone can top the shared-router allowance back up while CoW holds a ref.
+        # The allowance-guarded sync only re-grants from zero: the decremented
+        # allowance (ERC20Mock has no infinite-allowance special case) is
+        # deliberately left untouched — it is still effectively unlimited.
         with boa.env.prank(keeper):
-            burner.sync_router_approvals(GPV2_VAULT_RELAYER, [sell_token.address])
-        assert sell_token.allowance(burner, GPV2_VAULT_RELAYER) == MAX_UINT256
+            burner.sync_executor_approvals(GPV2_VAULT_RELAYER, [sell_token.address])
+        assert (
+            sell_token.allowance(burner, GPV2_VAULT_RELAYER)
+            == MAX_UINT256 - partial_amount
+        )
 
         payment = burner.getAmountNeeded(sell_token, partial_amount)
         target._mint_for_testing(simulated_solver, payment)

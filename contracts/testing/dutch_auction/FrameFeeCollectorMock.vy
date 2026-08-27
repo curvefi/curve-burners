@@ -11,12 +11,16 @@
 
 target: public(immutable(address))
 exchange_duration: public(immutable(uint256))
+owner: public(immutable(address))
+emergency_owner: public(immutable(address))
 
 
 @deploy
 def __init__(_target: address, _exchange_duration: uint256):
     target = _target
     exchange_duration = _exchange_duration
+    owner = msg.sender
+    emergency_owner = msg.sender
 
 
 @external

@@ -2,23 +2,24 @@
 
 This utility never sends a transaction. It validates one chain configuration
 against JSON-RPC and emits the mutable lifecycle calls in their required
-order: ``configure_cow`` followed by ``enable_cow``, then ``enable_adapter``
-per configured adapter. Emergency calldata covers ``disable_cow`` and
-``disable_adapter``; allowance maintenance is the permissionless
-``sync_router_approvals`` (the target allowance is derived on-chain from the
-router refcount, so the calldata is safe for anyone to send).
+order: ``enable_adapter`` + ``set_fallback_adapter`` for the CowAdapter,
+``configure_watchtower``, then ``enable_adapter`` per additional adapter.
+Emergency calldata covers ``disable_adapter``; allowance maintenance is the
+permissionless ``sync_executor_approvals`` (the target allowance is derived
+on-chain from the executor refcount, so the calldata is safe for anyone to
+send).
 
 The JSON object follows the implementation-requirements manifest fields:
 ``chainId``, ``feeCollector``, ``target``, ``targetDecimals``, ``cowEnabled``,
-``composableCow``, ``settlement``, ``vaultRelayer``, and ``appData``. Curve
-calibration checks run when ``defaultX``, ``floor``, ``decayFactorRay``, and
-``stepDuration`` are all present. ``owner``, ``emergencyOwner``, ``burner``,
-``cowOrderValidity``, and ``expectedCodeHashes`` enable stricter post-deploy
-checks without requiring a repository-wide chain manifest. ``registry``,
-``permit2``, and ``adapters`` (``[{"id", "validator", "validatorCodeHash"?}]``)
-pin the adapter surface: each entry is checked against the registry config,
-the burner's enabled set, the live validator code hash, and the router
-refcount backing its authorization mode.
+``composableCow``, ``settlement``, ``vaultRelayer``, ``cowAdapter``, and
+``appData``. Curve calibration checks run when ``defaultX``, ``floor``,
+``decayFactorRay``, and ``stepDuration`` are all present. ``owner``,
+``emergencyOwner``, ``burner``, ``cowOrderValidity``, and
+``expectedCodeHashes`` enable stricter post-deploy checks without requiring a
+repository-wide chain manifest. ``registry`` and ``adapters``
+(``[{"verifier", "executor", "verifierCodeHash"?}]``) pin the adapter
+surface: each entry is checked against the registry config, the burner's
+enabled set, the live verifier code hash, and its executor refcount.
 """
 
 from __future__ import annotations
@@ -213,24 +214,24 @@ def _supports_interface(rpc: RpcClient, address: str, interface_id: bytes) -> bo
     )[0]
 
 
-def _mul_div_up(a: int, b: int, denominator: int) -> int:
-    return (a * b + denominator - 1) // denominator
+def _ray_mul(a: int, b: int) -> int:
+    return (a * b + RAY // 2) // RAY
 
 
-def _ray_pow_up(base_ray: int, exponent: int) -> int:
+def _ray_pow(base_ray: int, exponent: int) -> int:
     result = RAY
     factor = base_ray
     while exponent:
         if exponent & 1:
-            result = _mul_div_up(result, factor, RAY)
+            result = _ray_mul(result, factor)
         exponent >>= 1
         if exponent:
-            factor = _mul_div_up(factor, factor, RAY)
+            factor = _ray_mul(factor, factor)
     return result
 
 
 def _total_price_at_step(start_total: int, floor_total: int, factor: int, steps: int) -> int:
-    decayed = _mul_div_up(start_total, _ray_pow_up(factor, steps), RAY)
+    decayed = start_total * _ray_pow(factor, steps) // RAY
     return max(floor_total, decayed)
 
 
@@ -293,14 +294,14 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if "defaultX" in normalized and normalized["floor"] > normalized["defaultX"]:
             raise ValueError("floor must not exceed defaultX")
     if "decayFactorRay" in normalized and not (
-        RAY // 2 <= normalized["decayFactorRay"] < RAY
+        0 < normalized["decayFactorRay"] < RAY
     ):
-        raise ValueError("decayFactorRay must be at least RAY/2 and below RAY")
+        raise ValueError("decayFactorRay must be positive and below RAY")
     for name in ("stepDuration", "cowOrderValidity"):
         if name in normalized and normalized[name] == 0:
             raise ValueError(f"{name} must be positive")
 
-    for name in ("owner", "emergencyOwner", "burner", "registry", "permit2"):
+    for name in ("owner", "emergencyOwner", "burner", "registry"):
         if config.get(name):
             normalized[name] = _address(config[name], name)
 
@@ -312,23 +313,25 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(adapter, dict):
             raise ValueError(f"adapters[{index}] must be an object")
         entry = {
-            "id": "0x" + _bytes4(adapter.get("id"), f"adapters[{index}].id").hex(),
-            "validator": _address(
-                adapter.get("validator"), f"adapters[{index}].validator"
+            "verifier": _address(
+                adapter.get("verifier"), f"adapters[{index}].verifier"
+            ),
+            "executor": _address(
+                adapter.get("executor"), f"adapters[{index}].executor"
             ),
         }
-        if adapter.get("validatorCodeHash"):
-            entry["validatorCodeHash"] = "0x" + _bytes32(
-                adapter["validatorCodeHash"], f"adapters[{index}].validatorCodeHash"
+        if adapter.get("verifierCodeHash"):
+            entry["verifierCodeHash"] = "0x" + _bytes32(
+                adapter["verifierCodeHash"], f"adapters[{index}].verifierCodeHash"
             ).hex()
         normalized_adapters.append(entry)
-    if len({entry["id"] for entry in normalized_adapters}) != len(normalized_adapters):
-        raise ValueError("adapters must have unique ids")
+    if len({entry["verifier"] for entry in normalized_adapters}) != len(normalized_adapters):
+        raise ValueError("adapters must have unique verifiers")
     if normalized_adapters and not normalized.get("registry"):
         raise ValueError("adapters require registry")
     normalized["adapters"] = normalized_adapters
 
-    cow_names = ("composableCow", "settlement", "vaultRelayer", "handler")
+    cow_names = ("composableCow", "settlement", "vaultRelayer", "handler", "cowAdapter")
     if normalized["cowEnabled"]:
         for name in cow_names:
             normalized[name] = _address(config[name], name)
@@ -356,16 +359,15 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
                 "settlement": config["settlement"],
                 "vaultRelayer": config["vaultRelayer"],
                 "handler": config["handler"],
+                "cowAdapter": config["cowAdapter"],
             }
         )
     if config.get("burner"):
         required_contracts["burner"] = config["burner"]
     if config.get("registry"):
         required_contracts["registry"] = config["registry"]
-    if config.get("permit2"):
-        required_contracts["permit2"] = config["permit2"]
     for index, adapter in enumerate(config["adapters"]):
-        required_contracts[f"adapters[{index}].validator"] = adapter["validator"]
+        required_contracts[f"adapters[{index}].verifier"] = adapter["verifier"]
 
     for name, address in required_contracts.items():
         try:
@@ -446,11 +448,6 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
             active_elapsed = exchange_end - exchange_start - 1
             active_steps = active_elapsed // config["stepDuration"]
             report.checks["curve.activeSteps"] = active_steps
-            report.require(
-                "curve.activeStepBound",
-                active_steps <= 100_000,
-                f"{active_steps} active steps exceeds 100000",
-            )
             end_price = _total_price_at_step(
                 config["defaultX"],
                 config["floor"],
@@ -516,17 +513,11 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
                 _read_address(rpc, burner, "target()"),
                 target,
             )
-            report.require_equal(
-                "burner.appData",
-                _read_bytes32(rpc, burner, "app_data()"),
-                config["appData"],
-            )
             getter_config = {
                 "defaultX": "start_total()",
                 "floor": "floor_total()",
                 "decayFactorRay": "decay_factor_ray()",
                 "stepDuration": "step_duration()",
-                "cowOrderValidity": "cow_order_validity()",
             }
             for config_name, getter in getter_config.items():
                 if config_name in config:
@@ -557,24 +548,41 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
                 config["composableCow"],
             )
             report.require_equal(
-                "burner.vaultRelayer",
-                _read_address(rpc, burner, "vault_relayer()"),
-                config["vaultRelayer"],
-            )
-            report.require_equal(
-                "burner.settlement",
-                _read_address(rpc, burner, "settlement()"),
-                config["settlement"],
-            )
-            report.require_equal(
                 "burner.cowHandler",
                 _read_address(rpc, burner, "cow_handler()"),
                 config["handler"],
             )
             if config["cowEnabled"]:
+                cow_adapter = config["cowAdapter"]
                 report.require_equal(
-                    "burner.cowDomainSeparator",
-                    _read_bytes32(rpc, burner, "cow_domain_separator()"),
+                    "burner.fallbackAdapter",
+                    _read_address(rpc, burner, "fallback_adapter()"),
+                    cow_adapter,
+                )
+                report.require_equal(
+                    "cowAdapter.settlement",
+                    _read_address(rpc, cow_adapter, "settlement()"),
+                    config["settlement"],
+                )
+                report.require_equal(
+                    "cowAdapter.vaultRelayer",
+                    _read_address(rpc, cow_adapter, "vault_relayer()"),
+                    config["vaultRelayer"],
+                )
+                report.require_equal(
+                    "cowAdapter.appData",
+                    _read_bytes32(rpc, cow_adapter, "app_data()"),
+                    config["appData"],
+                )
+                if "cowOrderValidity" in config:
+                    report.require_equal(
+                        "cowAdapter.orderValidity",
+                        _read_uint(rpc, cow_adapter, "order_validity()"),
+                        config["cowOrderValidity"],
+                    )
+                report.require_equal(
+                    "cowAdapter.domainSeparator",
+                    _read_bytes32(rpc, cow_adapter, "domain_separator()"),
                     _read_bytes32(rpc, config["settlement"], "domainSeparator()"),
                 )
                 report.require(
@@ -593,16 +601,11 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
                 _read_address(rpc, burner, "registry()"),
                 config.get("registry", ZERO_ADDRESS),
             )
-            report.require_equal(
-                "burner.permit2",
-                _read_address(rpc, burner, "permit2()"),
-                config.get("permit2", ZERO_ADDRESS),
-            )
             if cow_enabled:
                 relayer_refcount = _read(
                     rpc,
                     burner,
-                    "router_refcount(address)",
+                    "executor_refcount(address)",
                     ["uint256"],
                     ["address"],
                     [config["vaultRelayer"]],
@@ -611,7 +614,7 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
                 report.require(
                     "burner.vaultRelayerRefcount.positive",
                     relayer_refcount >= 1,
-                    "CoW enabled but the vault relayer holds no router refcount",
+                    "CoW enabled but the vault relayer holds no executor refcount",
                 )
         except (PreflightError, requests.RequestException) as exc:
             report.errors.append(f"DutchAuctionBurner interface: {exc}")
@@ -620,82 +623,56 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
         report.warnings.append("adapters configured without burner; adapter checks skipped")
     if burner:
         for adapter in config["adapters"]:
-            label = f"adapter.{adapter['id']}"
+            label = f"adapter.{adapter['verifier']}"
             try:
-                adapter_id = bytes.fromhex(adapter["id"][2:])
                 report.require(
                     f"{label}.enabled",
                     _read(
                         rpc,
                         burner,
-                        "enabled_adapters(bytes4)",
+                        "enabled_adapters(address)",
                         ["bool"],
-                        ["bytes4"],
-                        [adapter_id],
+                        ["address"],
+                        [adapter["verifier"]],
                     )[0],
                     "adapter not enabled on the burner",
                 )
                 adapter_config = _read(
                     rpc,
                     config["registry"],
-                    "get_adapter(bytes4)",
-                    [
-                        "address",
-                        "bytes32",
-                        "address",
-                        "address",
-                        "uint8",
-                        "bool",
-                        "bool",
-                        "uint16",
-                    ],
-                    ["bytes4"],
-                    [adapter_id],
+                    "get_adapter(address)",
+                    ["address", "bool"],
+                    ["address"],
+                    [adapter["verifier"]],
                 )
-                validator = to_checksum_address(adapter_config[0])
-                report.require_equal(f"{label}.validator", validator, adapter["validator"])
+                executor = to_checksum_address(adapter_config[0])
+                report.require_equal(f"{label}.executor", executor, adapter["executor"])
                 report.require(
                     f"{label}.active",
-                    adapter_config[6],
+                    adapter_config[1],
                     "adapter not active in the registry",
                 )
-                registered_codehash = "0x" + adapter_config[1].hex()
-                live_codehash = "0x" + keccak(rpc.code(validator)).hex()
-                report.require_equal(
-                    f"{label}.validatorCodeHash", live_codehash, registered_codehash
-                )
-                if adapter.get("validatorCodeHash"):
+                live_codehash = "0x" + keccak(rpc.code(adapter["verifier"])).hex()
+                if adapter.get("verifierCodeHash"):
                     report.require_equal(
                         f"{label}.pinnedCodeHash",
                         live_codehash,
-                        adapter["validatorCodeHash"],
+                        adapter["verifierCodeHash"],
                     )
-                router = to_checksum_address(
-                    _read(
-                        rpc,
-                        burner,
-                        "adapter_router(bytes4)",
-                        ["address"],
-                        ["bytes4"],
-                        [adapter_id],
-                    )[0]
+                refcount = _read(
+                    rpc,
+                    burner,
+                    "executor_refcount(address)",
+                    ["uint256"],
+                    ["address"],
+                    [executor],
+                )[0]
+                report.checks[f"{label}.executorRefcount"] = refcount
+                report.require(
+                    f"{label}.executorRefcount.positive",
+                    refcount >= 1,
+                    "enabled adapter's executor holds no refcount",
                 )
-                report.checks[f"{label}.router"] = router
-                if router != ZERO_ADDRESS:
-                    refcount = _read(
-                        rpc,
-                        burner,
-                        "router_refcount(address)",
-                        ["uint256"],
-                        ["address"],
-                        [router],
-                    )[0]
-                    report.checks[f"{label}.routerRefcount"] = refcount
-                    report.require(
-                        f"{label}.routerRefcount.positive",
-                        refcount >= 1,
-                        "enabled adapter's router holds no refcount",
-                    )
             except (PreflightError, requests.RequestException) as exc:
                 report.errors.append(f"{label}: {exc}")
 
@@ -705,73 +682,74 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
 def lifecycle_calldata(
     config: dict[str, Any],
     burner: str,
-    router: str | None,
+    executor: str | None,
     tokens: list[str],
 ) -> dict[str, Any]:
     config = validate_config(config)
     burner = _address(burner, "burner")
     calls: dict[str, list[dict[str, str]]] = {
         "configuration": [],
-        "emergency": [
-            {
-                "to": burner,
-                "function": "disable_cow()",
-                "data": encode_call("disable_cow()", [], []),
-            }
-        ],
+        "emergency": [],
         "permissionless": [],
     }
 
+    def _enable(verifier: str) -> dict[str, str]:
+        return {
+            "to": burner,
+            "function": "enable_adapter(address)",
+            "data": encode_call("enable_adapter(address)", ["address"], [verifier]),
+        }
+
+    def _disable(verifier: str) -> dict[str, str]:
+        return {
+            "to": burner,
+            "function": "disable_adapter(address)",
+            "data": encode_call("disable_adapter(address)", ["address"], [verifier]),
+        }
+
     if config["cowEnabled"]:
+        cow_adapter = config["cowAdapter"]
         calls["configuration"] = [
+            _enable(cow_adapter),
             {
                 "to": burner,
-                "function": "configure_cow(address,address,address)",
+                "function": "set_fallback_adapter(address)",
                 "data": encode_call(
-                    "configure_cow(address,address,address)",
-                    ["address", "address", "address"],
-                    [config["settlement"], config["composableCow"], config["handler"]],
+                    "set_fallback_adapter(address)", ["address"], [cow_adapter]
                 ),
             },
             {
                 "to": burner,
-                "function": "enable_cow()",
-                "data": encode_call("enable_cow()", [], []),
+                "function": "configure_watchtower(address,address)",
+                "data": encode_call(
+                    "configure_watchtower(address,address)",
+                    ["address", "address"],
+                    [config["composableCow"], config["handler"]],
+                ),
             },
         ]
+        calls["emergency"].append(_disable(cow_adapter))
 
     for adapter in config["adapters"]:
-        adapter_id = bytes.fromhex(adapter["id"][2:])
-        calls["configuration"].append(
-            {
-                "to": burner,
-                "function": "enable_adapter(bytes4)",
-                "data": encode_call("enable_adapter(bytes4)", ["bytes4"], [adapter_id]),
-            }
-        )
-        calls["emergency"].append(
-            {
-                "to": burner,
-                "function": "disable_adapter(bytes4)",
-                "data": encode_call("disable_adapter(bytes4)", ["bytes4"], [adapter_id]),
-            }
-        )
+        calls["configuration"].append(_enable(adapter["verifier"]))
+        calls["emergency"].append(_disable(adapter["verifier"]))
 
-    if router or tokens:
-        if not router or not tokens:
-            raise ValueError("--router and at least one --token are required together")
-        router_address = _address(router, "router")
+    if executor or tokens:
+        if not executor or not tokens:
+            raise ValueError("--executor and at least one --token are required together")
+        executor_address = _address(executor, "executor")
         normalized_tokens = [_address(token, "token") for token in tokens]
-        # The target allowance (0 or max) is derived from the on-chain router
-        # refcount, so this call carries no privilege and needs no gating.
+        # The target allowance (0 or max) is derived from the on-chain
+        # executor refcount, so this call carries no privilege and needs no
+        # gating.
         calls["permissionless"].append(
             {
                 "to": burner,
-                "function": "sync_router_approvals(address,address[])",
+                "function": "sync_executor_approvals(address,address[])",
                 "data": encode_call(
-                    "sync_router_approvals(address,address[])",
+                    "sync_executor_approvals(address,address[])",
                     ["address", "address[]"],
-                    [router_address, normalized_tokens],
+                    [executor_address, normalized_tokens],
                 ),
             }
         )
@@ -797,7 +775,7 @@ def _parser() -> argparse.ArgumentParser:
 
     calldata = subparsers.add_parser("calldata", help="emit lifecycle and emergency calldata")
     calldata.add_argument("--burner", required=True)
-    calldata.add_argument("--router", help="router for permissionless sync_router_approvals")
+    calldata.add_argument("--executor", help="executor for permissionless sync_executor_approvals")
     calldata.add_argument("--token", action="append", default=[])
     return parser
 
@@ -813,7 +791,7 @@ def main() -> int:
                 lifecycle_calldata(
                     config,
                     args.burner,
-                    args.router,
+                    args.executor,
                     args.token,
                 ),
                 indent=2,

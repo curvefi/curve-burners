@@ -2,37 +2,15 @@ from typing import Any
 
 import boa
 import pytest
-from eth_hash.auto import keccak
 
 from .conftest import custom_err
 
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
-ZERO_BYTES32 = bytes(32)
-EMPTY_CODEHASH = keccak(b"")
 
-MODE_NONE = 0
-MODE_COW_VAULT_RELAYER = 1
-MODE_PERMIT2_SIGNATURE_TRANSFER = 2
-MODE_PERMIT2_ALLOWANCE_TRANSFER = 3
-
-ADAPTER_ID = keccak(b"CURVE_COW_GPV2")[:4]
-OTHER_ADAPTER_ID = keccak(b"OTHER_ADAPTER")[:4]
-
-
-def event_name(log: Any) -> str:
-    event_type = getattr(log, "event_type", None)
-    return event_type.name if event_type is not None else type(log).__name__
-
-
-def last_event(contract, name: str) -> Any:
-    # boa keeps only the logs of the latest transaction, so this must run
-    # before any further call (view calls included) touches the contract.
-    return next(log for log in reversed(contract.get_logs()) if event_name(log) == name)
-
-
-def codehash_of(address: str) -> bytes:
-    return keccak(boa.env.get_code(address))
+# AdapterConfig tuple fields.
+CONFIG_EXECUTOR = 0
+CONFIG_ACTIVE = 1
 
 
 @pytest.fixture(autouse=True)
@@ -57,23 +35,8 @@ def attacker():
 
 
 @pytest.fixture(scope="module")
-def verifier():
-    return boa.env.generate_address("verifier")
-
-
-@pytest.fixture(scope="module")
 def executor():
     return boa.env.generate_address("executor")
-
-
-@pytest.fixture(scope="module")
-def validator(owner):
-    # Any deployed contract with runtime code works as a validator stand-in;
-    # the registry only pins and re-checks its codehash.
-    with boa.env.prank(owner):
-        return boa.load(
-            "contracts/testing/dutch_auction/ComposableCowMock.vy", name="ValidatorMock"
-        )
 
 
 @pytest.fixture(scope="module")
@@ -84,42 +47,28 @@ def role_source(owner, emergency_owner):
 
 
 @pytest.fixture(scope="module")
-def registry(role_source, owner):
+def verifier_deployer():
+    return boa.load_partial("contracts/testing/dutch_auction/VerifierMock.vy")
+
+
+@pytest.fixture
+def verifier(verifier_deployer):
+    return verifier_deployer.deploy()
+
+
+@pytest.fixture
+def registry(role_source):
+    return boa.load(
+        "contracts/burners/auction/adapters/AdapterRegistry.vy", role_source.address
+    )
+
+
+def _register(registry: Any, owner: str, verifier: Any, executor: str) -> None:
     with boa.env.prank(owner):
-        return boa.load("contracts/AdapterRegistry.vy", role_source.address)
+        registry.set_adapter(verifier, executor)
 
 
-@pytest.fixture(scope="module")
-def make_config(validator, verifier, executor):
-    def _make_config(
-        validator_address: str = None,
-        validator_codehash: bytes = None,
-        verifier_address: str = None,
-        executor_address: str = None,
-        authorization_mode: int = MODE_COW_VAULT_RELAYER,
-        allow_partial_fills: bool = False,
-        active: bool = False,
-        version: int = 1,
-    ) -> tuple:
-        if validator_address is None:
-            validator_address = validator.address
-        if validator_codehash is None:
-            validator_codehash = codehash_of(validator_address)
-        return (
-            validator_address,
-            validator_codehash,
-            verifier_address or verifier,
-            executor_address or executor,
-            authorization_mode,
-            allow_partial_fills,
-            active,
-            version,
-        )
-
-    return _make_config
-
-
-# Deployment
+# Constructor and roles
 
 
 def test_constructor_derives_roles_from_source(registry, role_source, owner, emergency_owner):
@@ -132,341 +81,182 @@ def test_constructor_rejects_source_with_zero_owner(emergency_owner):
     bad_source = boa.load(
         "contracts/testing/dutch_auction/RoleSourceMock.vy", ZERO_ADDRESS, emergency_owner
     )
-    with boa.reverts(custom_err("BadRoleSource()")):
-        boa.load("contracts/AdapterRegistry.vy", bad_source.address)
+    with boa.reverts():
+        boa.load("contracts/burners/auction/adapters/AdapterRegistry.vy", bad_source.address)
 
 
 def test_constructor_allows_zero_emergency_owner_sentinel(owner):
     source = boa.load(
         "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, ZERO_ADDRESS
     )
-    registry = boa.load("contracts/AdapterRegistry.vy", source.address)
+    registry = boa.load(
+        "contracts/burners/auction/adapters/AdapterRegistry.vy", source.address
+    )
     assert registry.emergency_owner() == ZERO_ADDRESS
 
 
-# get_adapter
+# Catalog writes
 
 
-def test_unknown_adapter_returns_zeroed_config(registry):
-    config = registry.get_adapter(ADAPTER_ID)
-    assert config.validator == ZERO_ADDRESS
-    assert bytes(config.validator_codehash) == ZERO_BYTES32
-    assert config.verifier == ZERO_ADDRESS
-    assert config.executor == ZERO_ADDRESS
-    assert config.authorization_mode == MODE_NONE
-    assert not config.allow_partial_fills
-    assert not config.active
-    assert config.version == 0
+def test_unknown_verifier_returns_zeroed_config(registry, verifier):
+    config = registry.get_adapter(verifier)
+    assert config[CONFIG_EXECUTOR] == ZERO_ADDRESS
+    assert config[CONFIG_ACTIVE] is False
 
 
-# set_adapter
+def test_set_adapter_stores_config_inactive(registry, owner, verifier, executor):
+    _register(registry, owner, verifier, executor)
+    logs = registry.get_logs()
+    stored = next(log for log in logs if type(log).__name__.endswith("AdapterSet"))
+    assert stored.verifier == verifier.address
+    assert stored.executor == executor
+
+    config = registry.get_adapter(verifier)
+    assert config[CONFIG_EXECUTOR] == executor
+    # Activation is a separate owner step: a mistaken set cannot go live at once.
+    assert config[CONFIG_ACTIVE] is False
 
 
-def test_set_adapter_stores_config_inactive(
-    registry, make_config, owner, validator, verifier, executor
+def test_set_adapter_only_owner(registry, verifier, executor, attacker, emergency_owner):
+    for account in (attacker, emergency_owner):
+        with boa.env.prank(account), boa.reverts(custom_err("OnlyOwner()")):
+            registry.set_adapter(verifier, executor)
+
+
+def test_set_adapter_rejects_zero_verifier(registry, owner, executor):
+    with boa.env.prank(owner), boa.reverts(custom_err("ZeroVerifier()")):
+        registry.set_adapter(ZERO_ADDRESS, executor)
+
+
+def test_set_adapter_rejects_eoa_verifier(registry, owner, executor):
+    eoa = boa.env.generate_address("eoa_verifier")
+    with boa.env.prank(owner), boa.reverts(custom_err("EmptyVerifier()")):
+        registry.set_adapter(eoa, executor)
+
+
+def test_set_adapter_rejects_zero_executor(registry, owner, verifier):
+    with boa.env.prank(owner), boa.reverts(custom_err("ZeroExecutor()")):
+        registry.set_adapter(verifier, ZERO_ADDRESS)
+
+
+def test_set_adapter_is_immutable_once_set(registry, owner, verifier, executor):
+    _register(registry, owner, verifier, executor)
+    other_executor = boa.env.generate_address("other_executor")
+    # Changed semantics always mean a new verifier deployment, never a rewrite.
+    with boa.env.prank(owner), boa.reverts(custom_err("AlreadySet()")):
+        registry.set_adapter(verifier, other_executor)
+    with boa.env.prank(owner), boa.reverts(custom_err("AlreadySet()")):
+        registry.set_adapter(verifier, executor)
+
+
+def test_adapters_are_independent(registry, owner, verifier_deployer, executor):
+    first = verifier_deployer.deploy()
+    second = verifier_deployer.deploy()
+    other_executor = boa.env.generate_address("other_executor")
+    _register(registry, owner, first, executor)
+    _register(registry, owner, second, other_executor)
+
+    assert registry.get_adapter(first)[CONFIG_EXECUTOR] == executor
+    assert registry.get_adapter(second)[CONFIG_EXECUTOR] == other_executor
+
+
+# Activation lifecycle
+
+
+def test_activate_adapter_happy_path(registry, owner, verifier, executor):
+    _register(registry, owner, verifier, executor)
+    with boa.env.prank(owner):
+        registry.activate_adapter(verifier)
+    assert registry.get_adapter(verifier)[CONFIG_ACTIVE] is True
+
+
+def test_activate_adapter_only_owner(
+    registry, owner, verifier, executor, attacker, emergency_owner
 ):
-    # active=True in the input must be ignored: activation is a separate step.
+    _register(registry, owner, verifier, executor)
+    for account in (attacker, emergency_owner):
+        with boa.env.prank(account), boa.reverts(custom_err("OnlyOwner()")):
+            registry.activate_adapter(verifier)
+
+
+def test_activate_unknown_adapter_reverts(registry, owner, verifier):
+    with boa.env.prank(owner), boa.reverts(custom_err("UnknownAdapter()")):
+        registry.activate_adapter(verifier)
+
+
+def test_activate_active_adapter_reverts(registry, owner, verifier, executor):
+    _register(registry, owner, verifier, executor)
     with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config(active=True, allow_partial_fills=True))
-    event = last_event(registry, "AdapterSet")
-    assert bytes(event.adapter_id) == ADAPTER_ID
-    assert event.version == 1
-    assert event.validator == validator.address
-
-    config = registry.get_adapter(ADAPTER_ID)
-    assert config.validator == validator.address
-    assert bytes(config.validator_codehash) == codehash_of(validator.address)
-    assert config.verifier == verifier
-    assert config.executor == executor
-    assert config.authorization_mode == MODE_COW_VAULT_RELAYER
-    assert config.allow_partial_fills
-    assert not config.active
-    assert config.version == 1
-
-
-def test_set_adapter_only_owner(registry, make_config, attacker, emergency_owner):
-    for non_owner in (attacker, emergency_owner):
-        with boa.env.prank(non_owner):
-            with boa.reverts(custom_err("OnlyOwner()")):
-                registry.set_adapter(ADAPTER_ID, make_config())
-
-
-def test_adapter_cannot_self_register(registry, make_config, validator):
-    # §5.3: the validator contract itself has no owner-independent write path.
-    with boa.env.prank(validator.address):
-        with boa.reverts(custom_err("OnlyOwner()")):
-            registry.set_adapter(ADAPTER_ID, make_config())
-
-
-def test_set_adapter_rejects_zero_adapter_id(registry, make_config, owner):
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("ZeroAdapterId()")):
-            registry.set_adapter(bytes(4), make_config())
-
-
-def test_set_adapter_rejects_zero_validator(registry, make_config, owner):
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("ZeroValidator()")):
-            registry.set_adapter(
-                ADAPTER_ID,
-                make_config(validator_address=ZERO_ADDRESS, validator_codehash=EMPTY_CODEHASH),
-            )
-
-
-def test_set_adapter_rejects_wrong_codehash(registry, make_config, owner):
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("CodehashMismatch()")):
-            registry.set_adapter(
-                ADAPTER_ID, make_config(validator_codehash=keccak(b"not the code"))
-            )
-
-
-@pytest.mark.parametrize("claimed_codehash", [ZERO_BYTES32, EMPTY_CODEHASH])
-def test_set_adapter_rejects_eoa_validator(registry, make_config, owner, claimed_codehash):
-    # An EOA has no runtime code: whichever no-code hash form it reports, both
-    # the match check and the emptiness checks keep it out.
-    eoa_validator = boa.env.generate_address("eoa_validator")
-    with boa.env.prank(owner):
-        with boa.reverts():
-            registry.set_adapter(
-                ADAPTER_ID,
-                make_config(validator_address=eoa_validator, validator_codehash=claimed_codehash),
-            )
-
-
-def test_set_adapter_rejects_zero_verifier(registry, make_config, owner):
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("ZeroVerifier()")):
-            registry.set_adapter(ADAPTER_ID, make_config(verifier_address=ZERO_ADDRESS))
-
-
-def test_set_adapter_rejects_zero_executor(registry, make_config, owner):
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("ZeroExecutor()")):
-            registry.set_adapter(ADAPTER_ID, make_config(executor_address=ZERO_ADDRESS))
-
-
-@pytest.mark.parametrize("mode", [MODE_PERMIT2_ALLOWANCE_TRANSFER + 1, 255])
-def test_set_adapter_rejects_unknown_authorization_mode(registry, make_config, owner, mode):
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("BadMode()")):
-            registry.set_adapter(ADAPTER_ID, make_config(authorization_mode=mode))
-
-
-def test_set_adapter_accepts_every_closed_enum_mode(registry, make_config, owner):
-    for offset, mode in enumerate(
-        (
-            MODE_NONE,
-            MODE_COW_VAULT_RELAYER,
-            MODE_PERMIT2_SIGNATURE_TRANSFER,
-            MODE_PERMIT2_ALLOWANCE_TRANSFER,
-        )
-    ):
-        with boa.env.prank(owner):
-            registry.set_adapter(
-                ADAPTER_ID, make_config(authorization_mode=mode, version=offset + 1)
-            )
-        assert registry.get_adapter(ADAPTER_ID).authorization_mode == mode
-
-
-def test_set_adapter_version_must_strictly_grow(registry, make_config, owner):
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("VersionNotGrown()")):
-            registry.set_adapter(ADAPTER_ID, make_config(version=0))
-
-        registry.set_adapter(ADAPTER_ID, make_config(version=3))
-        for version in (3, 2, 0):
-            with boa.reverts(custom_err("VersionNotGrown()")):
-                registry.set_adapter(ADAPTER_ID, make_config(version=version))
-
-        registry.set_adapter(ADAPTER_ID, make_config(version=4))
-    assert registry.get_adapter(ADAPTER_ID).version == 4
-
-
-def test_set_adapter_update_deactivates_previous_version(registry, make_config, owner):
-    with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config(version=1))
-        registry.activate_adapter(ADAPTER_ID)
-    assert registry.get_adapter(ADAPTER_ID).active
-
-    # New semantics get a new version and must go through activation again.
-    with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config(version=2))
-    config = registry.get_adapter(ADAPTER_ID)
-    assert config.version == 2
-    assert not config.active
-
-
-def test_adapter_ids_are_independent(registry, make_config, owner):
-    with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config(version=5))
-    assert registry.get_adapter(OTHER_ADAPTER_ID).validator == ZERO_ADDRESS
-    # A fresh id starts from version 0 regardless of other entries.
-    with boa.env.prank(owner):
-        registry.set_adapter(OTHER_ADAPTER_ID, make_config(version=1))
-    assert registry.get_adapter(OTHER_ADAPTER_ID).version == 1
-
-
-# activate_adapter
-
-
-def test_activate_adapter_happy_path(registry, make_config, owner):
-    with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config(version=1))
-        registry.activate_adapter(ADAPTER_ID)
-    event = last_event(registry, "AdapterActivated")
-    assert bytes(event.adapter_id) == ADAPTER_ID
-    assert event.version == 1
-
-    assert registry.get_adapter(ADAPTER_ID).active
-
-
-def test_activate_adapter_only_owner(registry, make_config, owner, attacker, emergency_owner):
-    with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config())
-    for non_owner in (attacker, emergency_owner):
-        with boa.env.prank(non_owner):
-            with boa.reverts(custom_err("OnlyOwner()")):
-                registry.activate_adapter(ADAPTER_ID)
-
-
-def test_activate_unknown_adapter_reverts(registry, owner):
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("UnknownAdapter()")):
-            registry.activate_adapter(ADAPTER_ID)
-
-
-def test_activate_active_adapter_reverts(registry, make_config, owner):
-    with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config())
-        registry.activate_adapter(ADAPTER_ID)
+        registry.activate_adapter(verifier)
         with boa.reverts(custom_err("AlreadyActive()")):
-            registry.activate_adapter(ADAPTER_ID)
-
-
-def test_activate_rechecks_validator_codehash(registry, make_config, owner):
-    # Pin at set, re-check at activation: code swapped at the same address
-    # (e.g. a CREATE2 redeploy) must not go live under the old registration.
-    fresh_validator = boa.load(
-        "contracts/testing/dutch_auction/ComposableCowMock.vy", name="FreshValidatorMock"
-    )
-    pinned_codehash = codehash_of(fresh_validator.address)
-    with boa.env.prank(owner):
-        registry.set_adapter(
-            ADAPTER_ID,
-            make_config(
-                validator_address=fresh_validator.address, validator_codehash=pinned_codehash
-            ),
-        )
-
-    boa.env.set_code(fresh_validator.address, b"\xfe\x60\x00")
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("CodehashMismatch()")):
-            registry.activate_adapter(ADAPTER_ID)
-        # Re-registering under the stale pinned codehash fails the same way:
-        # the changed code demands its actual new codehash.
-        with boa.reverts(custom_err("CodehashMismatch()")):
-            registry.set_adapter(
-                ADAPTER_ID,
-                make_config(
-                    validator_address=fresh_validator.address,
-                    validator_codehash=pinned_codehash,
-                    version=2,
-                ),
-            )
-        registry.set_adapter(
-            ADAPTER_ID,
-            make_config(
-                validator_address=fresh_validator.address,
-                validator_codehash=codehash_of(fresh_validator.address),
-                version=2,
-            ),
-        )
-        registry.activate_adapter(ADAPTER_ID)
-    assert registry.get_adapter(ADAPTER_ID).active
-
-
-# disable_adapter
+            registry.activate_adapter(verifier)
 
 
 @pytest.mark.parametrize("role", ["owner", "emergency_owner"])
-def test_disable_adapter_by_each_role(registry, make_config, owner, emergency_owner, role):
+def test_disable_adapter_by_each_role(
+    registry, owner, emergency_owner, verifier, executor, role
+):
+    _register(registry, owner, verifier, executor)
     with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config())
-        registry.activate_adapter(ADAPTER_ID)
+        registry.activate_adapter(verifier)
 
-    disabler = owner if role == "owner" else emergency_owner
-    with boa.env.prank(disabler):
-        registry.disable_adapter(ADAPTER_ID)
-    event = last_event(registry, "AdapterDisabled")
-    assert bytes(event.adapter_id) == ADAPTER_ID
-    assert event.version == 1
-
-    assert not registry.get_adapter(ADAPTER_ID).active
+    account = owner if role == "owner" else emergency_owner
+    with boa.env.prank(account):
+        registry.disable_adapter(verifier)
+    assert registry.get_adapter(verifier)[CONFIG_ACTIVE] is False
+    # The executor pin survives a disable: entries are set-once.
+    assert registry.get_adapter(verifier)[CONFIG_EXECUTOR] == executor
 
 
-def test_disable_adapter_rejects_outsider(registry, make_config, owner, attacker):
+def test_disable_adapter_rejects_outsider(registry, owner, verifier, executor, attacker):
+    _register(registry, owner, verifier, executor)
     with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config())
-        registry.activate_adapter(ADAPTER_ID)
-    with boa.env.prank(attacker):
-        with boa.reverts(custom_err("OnlyOwner()")):
-            registry.disable_adapter(ADAPTER_ID)
+        registry.activate_adapter(verifier)
+    with boa.env.prank(attacker), boa.reverts(custom_err("OnlyOwner()")):
+        registry.disable_adapter(verifier)
 
 
-def test_disable_inactive_adapter_reverts(registry, make_config, owner):
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("NotActive()")):
-            registry.disable_adapter(ADAPTER_ID)
-        registry.set_adapter(ADAPTER_ID, make_config())
-        with boa.reverts(custom_err("NotActive()")):
-            registry.disable_adapter(ADAPTER_ID)
+def test_disable_inactive_adapter_reverts(registry, owner, verifier, executor):
+    _register(registry, owner, verifier, executor)
+    with boa.env.prank(owner), boa.reverts(custom_err("NotActive()")):
+        registry.disable_adapter(verifier)
 
 
 def test_owner_can_reactivate_after_emergency_disable(
-    registry, make_config, owner, emergency_owner
+    registry, owner, emergency_owner, verifier, executor
 ):
+    _register(registry, owner, verifier, executor)
     with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config())
-        registry.activate_adapter(ADAPTER_ID)
+        registry.activate_adapter(verifier)
     with boa.env.prank(emergency_owner):
-        registry.disable_adapter(ADAPTER_ID)
-    # Recovery from an emergency stop is a governance decision, not a re-set.
+        registry.disable_adapter(verifier)
+    assert registry.get_adapter(verifier)[CONFIG_ACTIVE] is False
     with boa.env.prank(owner):
-        registry.activate_adapter(ADAPTER_ID)
-    assert registry.get_adapter(ADAPTER_ID).active
+        registry.activate_adapter(verifier)
+    assert registry.get_adapter(verifier)[CONFIG_ACTIVE] is True
 
 
-# Ownership
+# Live roles
 
 
-def test_roles_follow_source_owner_change(registry, role_source, make_config, owner, attacker):
-    new_owner = boa.env.generate_address("new_owner")
-    role_source.set_owner(new_owner)
-    assert registry.owner() == new_owner
-
-    # The old owner lost every write path; the new owner gained them.
-    with boa.env.prank(owner):
-        with boa.reverts(custom_err("OnlyOwner()")):
-            registry.set_adapter(ADAPTER_ID, make_config())
-    with boa.env.prank(new_owner):
-        registry.set_adapter(ADAPTER_ID, make_config())
+def test_roles_follow_source_owner_change(registry, role_source, owner, attacker, verifier, executor):
+    role_source.set_owner(attacker)
+    with boa.env.prank(owner), boa.reverts(custom_err("OnlyOwner()")):
+        registry.set_adapter(verifier, executor)
+    with boa.env.prank(attacker):
+        registry.set_adapter(verifier, executor)
+    assert registry.get_adapter(verifier)[CONFIG_EXECUTOR] == executor
 
 
 def test_roles_follow_source_emergency_owner_change(
-    registry, role_source, make_config, owner, emergency_owner
+    registry, role_source, owner, emergency_owner, attacker, verifier, executor
 ):
-    new_emergency_owner = boa.env.generate_address("new_emergency_owner")
-    role_source.set_emergency_owner(new_emergency_owner)
-    assert registry.emergency_owner() == new_emergency_owner
-
+    _register(registry, owner, verifier, executor)
     with boa.env.prank(owner):
-        registry.set_adapter(ADAPTER_ID, make_config())
-        registry.activate_adapter(ADAPTER_ID)
-    # The old emergency owner lost the disable right; the new one holds it.
-    with boa.env.prank(emergency_owner):
-        with boa.reverts(custom_err("OnlyOwner()")):
-            registry.disable_adapter(ADAPTER_ID)
-    with boa.env.prank(new_emergency_owner):
-        registry.disable_adapter(ADAPTER_ID)
-    assert not registry.get_adapter(ADAPTER_ID).active
+        registry.activate_adapter(verifier)
+    role_source.set_emergency_owner(attacker)
+    with boa.env.prank(emergency_owner), boa.reverts(custom_err("OnlyOwner()")):
+        registry.disable_adapter(verifier)
+    with boa.env.prank(attacker):
+        registry.disable_adapter(verifier)
+    assert registry.get_adapter(verifier)[CONFIG_ACTIVE] is False

@@ -32,6 +32,12 @@ error CowDisabled:
     pass
 
 
+# Raised by _reject_muxer_probe; a dedicated selector so the revert is
+# self-describing in traces.
+error NotSignatureVerifierMuxer:
+    pass
+
+
 struct GPv2Order:
     sellToken: address
     buyToken: address
@@ -75,18 +81,16 @@ CONDITIONAL_ORDER_GENERATOR_INTERFACE: public(constant(bytes4)) = 0xb8296fc4
 SIGNATURE_VERIFIER_MUXER_INTERFACE: public(constant(bytes4)) = 0x62af8dc2
 
 
-# Watchtower error helpers so the ComposableCoW revert ABI is encoded in
-# exactly one place.
 @internal
 @pure
-def _order_not_valid(_reason: String[32]):
-    raise OrderNotValid(reason=_reason)
-
-
-@internal
-@pure
-def _poll_try_at(_timestamp: uint256, _reason: String[32]):
-    raise PollTryAtEpoch(timestamp=_timestamp, reason=_reason)
+def _reject_muxer_probe(_interface_id: bytes4):
+    """
+    @notice Revert on ComposableCoW's SignatureVerifierMuxer ERC-165 probe.
+    @dev For every supportsInterface of a conditional-order owner: only a
+         reverting probe drops ComposableCoW into its plain-ERC-1271 branch —
+         a successful False answer is InvalidFallbackHandler().
+    """
+    assert _interface_id != SIGNATURE_VERIFIER_MUXER_INTERFACE, NotSignatureVerifierMuxer()
 
 
 @internal

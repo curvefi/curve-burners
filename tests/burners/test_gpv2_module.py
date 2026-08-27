@@ -1,10 +1,9 @@
-"""Standalone tests for the stateless gpv2 and adapter_types modules.
+"""Standalone tests for the stateless gpv2 module.
 
 Covers GPv2 order construction/hashing against an independent EIP-712
 reference, flag and balance-mode checks, quote/validity bucketing, the
-conditional-order static-input codec, the watchtower revert ABI, and the
-versioned ERC-1271 adapter envelope codec. The stateful cow_execution
-module is tested separately in test_cow_execution_module.py.
+conditional-order static-input codec, and the watchtower revert ABI. The
+deployable CowAdapter built on top is tested in test_cow_adapter.py.
 """
 
 from copy import deepcopy
@@ -28,11 +27,6 @@ ZERO_BYTES32 = bytes(32)
 MAX_UINT256 = 2**256 - 1
 STATIC_INPUT_LEN = 52
 
-ENVELOPE_MAGIC = keccak(b"CURVE_DUTCH_AUCTION_ENVELOPE_V1")[:4]
-ENVELOPE_VERSION = 1
-ENVELOPE_HEADER_LEN = 11
-MAX_ADAPTER_PAYLOAD = 4096
-
 ORDER_FIELD_TYPES = [
     "address",
     "address",
@@ -52,7 +46,6 @@ HARNESS_SOURCE = """
 # pragma version 0.5.0a4
 
 import contracts.burners.cow.gpv2 as gpv2
-import contracts.burners.auction.adapter_types as adapter_types
 
 
 @external
@@ -120,13 +113,13 @@ def decode_static_input(
 @external
 @pure
 def order_not_valid(_reason: String[32]):
-    gpv2._order_not_valid(_reason)
+    raise gpv2.OrderNotValid(reason=_reason)
 
 
 @external
 @pure
 def poll_try_at(_timestamp: uint256, _reason: String[32]):
-    gpv2._poll_try_at(_timestamp, _reason)
+    raise gpv2.PollTryAtEpoch(timestamp=_timestamp, reason=_reason)
 
 
 @external
@@ -136,41 +129,6 @@ def encode_legacy_signature(
 ) -> Bytes[4096]:
     return abi_encode(_order, _payload)
 
-
-@external
-@pure
-def envelope_magic() -> bytes4:
-    return adapter_types.ENVELOPE_MAGIC
-
-
-@external
-@pure
-def envelope_version() -> uint8:
-    return adapter_types.ENVELOPE_VERSION
-
-
-@external
-@pure
-def has_envelope_magic(_signature: Bytes[adapter_types.MAX_ENVELOPE_LEN]) -> bool:
-    return adapter_types._has_envelope_magic(_signature)
-
-
-@external
-@pure
-def encode_envelope(
-    _adapter_id: bytes4,
-    _adapter_version: uint16,
-    _payload: Bytes[adapter_types.MAX_ADAPTER_PAYLOAD],
-) -> Bytes[adapter_types.MAX_ENVELOPE_LEN]:
-    return adapter_types._encode_envelope(_adapter_id, _adapter_version, _payload)
-
-
-@external
-@pure
-def decode_envelope(
-    _signature: Bytes[adapter_types.MAX_ENVELOPE_LEN],
-) -> (bool, uint8, bytes4, uint16, Bytes[adapter_types.MAX_ADAPTER_PAYLOAD]):
-    return adapter_types._decode_envelope(_signature)
 """
 
 
@@ -182,16 +140,6 @@ def order_digest_reference(order, domain_separator: bytes = DOMAIN_SEPARATOR) ->
     """Independent EIP-712 digest model built from eth_abi/keccak primitives."""
     struct_hash = keccak(encode(["bytes32", *ORDER_FIELD_TYPES], [ORDER_TYPE_HASH, *order]))
     return keccak(b"\x19\x01" + domain_separator + struct_hash)
-
-
-def encode_envelope_reference(adapter_id: bytes, adapter_version: int, payload: bytes) -> bytes:
-    return (
-        ENVELOPE_MAGIC
-        + ENVELOPE_VERSION.to_bytes(1, "big")
-        + adapter_id
-        + adapter_version.to_bytes(2, "big")
-        + payload
-    )
 
 
 def address_from_int(value: int) -> str:
@@ -513,109 +461,14 @@ def test_poll_try_at_revert_data(harness):
     )
 
 
-# ERC-1271 signature envelope (adapter_types)
+# Signature shape invariants for the router
 
 
-def test_envelope_constants_match_derivation(harness):
-    assert bytes(harness.envelope_magic()) == ENVELOPE_MAGIC
-    assert ENVELOPE_MAGIC != bytes(4)
-    assert harness.envelope_version() == ENVELOPE_VERSION
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        b"",
-        b"\x42",
-        b"\x00" * 33,
-        keccak(b"payload") * 4,
-        b"\xab" * MAX_ADAPTER_PAYLOAD,
-    ],
-)
-def test_envelope_roundtrip(harness, payload):
-    adapter_id = keccak(b"CURVE_COW_GPV2")[:4]
-    adapter_version = 3
-
-    envelope = bytes(harness.encode_envelope(adapter_id, adapter_version, payload))
-    assert envelope == encode_envelope_reference(adapter_id, adapter_version, payload)
-    assert len(envelope) == ENVELOPE_HEADER_LEN + len(payload)
-    assert harness.has_envelope_magic(envelope)
-
-    ok, version, decoded_id, decoded_version, decoded_payload = harness.decode_envelope(envelope)
-    assert ok
-    assert version == ENVELOPE_VERSION
-    assert bytes(decoded_id) == adapter_id
-    assert decoded_version == adapter_version
-    assert bytes(decoded_payload) == payload
-
-
-def test_envelope_header_only_decodes_to_empty_payload(harness):
-    envelope = encode_envelope_reference(b"\x01\x02\x03\x04", 1, b"")
-    assert len(envelope) == ENVELOPE_HEADER_LEN
-    ok, version, adapter_id, adapter_version, payload = harness.decode_envelope(envelope)
-    assert ok
-    assert version == ENVELOPE_VERSION
-    assert bytes(adapter_id) == b"\x01\x02\x03\x04"
-    assert adapter_version == 1
-    assert bytes(payload) == b""
-
-
-def test_envelope_unknown_version_is_surfaced_not_judged(harness):
-    # The codec only parses layout; rejecting an unknown version is the
-    # dispatcher's decision so future envelopes stay decodable.
-    raw = ENVELOPE_MAGIC + b"\x02" + b"\x01\x02\x03\x04" + (7).to_bytes(2, "big") + b"\x11"
-    ok, version, adapter_id, adapter_version, payload = harness.decode_envelope(raw)
-    assert ok
-    assert version == 2
-    assert bytes(adapter_id) == b"\x01\x02\x03\x04"
-    assert adapter_version == 7
-    assert bytes(payload) == b"\x11"
-
-
-@pytest.mark.parametrize(
-    "truncated_length",
-    range(4, ENVELOPE_HEADER_LEN),
-)
-def test_truncated_magic_prefix_claims_envelope_but_fails_decode(harness, truncated_length):
-    # A magic prefix routes to the adapter path even when malformed: the
-    # dispatcher must answer 0xffffffff instead of falling back to the
-    # embedded ComposableCoW path.
-    envelope = encode_envelope_reference(b"\x01\x02\x03\x04", 1, b"\x42")[:truncated_length]
-    assert harness.has_envelope_magic(envelope)
-    ok, version, adapter_id, adapter_version, payload = harness.decode_envelope(envelope)
-    assert not ok
-    assert version == 0
-    assert bytes(adapter_id) == bytes(4)
-    assert adapter_version == 0
-    assert bytes(payload) == b""
-
-
-@pytest.mark.parametrize(
-    "signature",
-    [
-        b"",
-        b"\x5a",
-        ENVELOPE_MAGIC[:3],
-        bytes(ENVELOPE_HEADER_LEN),
-        b"\xff" * ENVELOPE_HEADER_LEN,
-        bytes(reversed(ENVELOPE_MAGIC)) + bytes(7),
-        keccak(b"unrelated signature bytes"),
-    ],
-)
-def test_missing_magic_is_rejected(harness, signature):
-    assert not harness.has_envelope_magic(signature)
-    ok, version, adapter_id, adapter_version, payload = harness.decode_envelope(signature)
-    assert not ok
-    assert version == 0
-    assert bytes(adapter_id) == bytes(4)
-    assert adapter_version == 0
-    assert bytes(payload) == b""
-
-
-def test_legacy_composable_signature_never_carries_magic(harness, canonical_order):
-    # The legacy path signature is abi_encode(GPv2Order, PayloadStruct): its
-    # first four bytes are the sellToken head zero padding, so the non-zero
-    # envelope magic cannot collide and routing stays unambiguous.
+def test_legacy_composable_signature_never_aliases_a_verifier_prefix(harness, canonical_order):
+    # Both historical CoW encodings start with the ABI zero padding of the
+    # sellToken address head: their first 12 bytes are zero, so the 20-byte
+    # routing prefix can never equal a deployed verifier address and the
+    # shape router stays unambiguous.
     payload = (
         [keccak(b"proof")],
         (boa.env.generate_address("handler"), ZERO_BYTES32, b"\xee" * STATIC_INPUT_LEN),
@@ -626,6 +479,4 @@ def test_legacy_composable_signature_never_carries_magic(harness, canonical_orde
 
     for order in (canonical_order, worst_case_order):
         legacy = bytes(harness.encode_legacy_signature(order, payload))
-        assert legacy[:4] == bytes(4)
-        assert legacy[:4] != ENVELOPE_MAGIC
-        assert not harness.has_envelope_magic(legacy)
+        assert legacy[:12] == bytes(12)

@@ -37,12 +37,10 @@ struct Lot:
 
 interface DutchAuction:
     def cow_enabled() -> bool: view
+    def fallback_adapter() -> address: view
     def cow_generation() -> uint256: view
     def registered_generation(_token: address) -> uint256: view
-    def cow_domain_separator() -> bytes32: view
-    def cow_order_validity() -> uint256: view
     def cow_next_poll(_token: address) -> uint256: view
-    def app_data() -> bytes32: view
     def want() -> address: view
     def proceeds_receiver() -> address: view
     def start_total() -> uint256: view
@@ -52,6 +50,14 @@ interface DutchAuction:
     def lots(_token: address) -> Lot: view
     def epoch_bounds(_epoch: uint256) -> (uint256, uint256): view
     def available(_token: address) -> uint256: view
+
+
+# The CoW protocol constants live with the auction's fallback CowAdapter; the
+# auction itself only registers conditional orders.
+interface CowAdapter:
+    def domain_separator() -> bytes32: view
+    def app_data() -> bytes32: view
+    def order_validity() -> uint256: view
 
 
 ERC165_INTERFACE_ID: constant(bytes4) = 0x01ffc9a7
@@ -70,11 +76,11 @@ def _decode_registered_static_input(
     generation: uint256 = 0
     ok, token, generation = gpv2._decode_static_input(_static_input)
     if not ok:
-        gpv2._order_not_valid("BadStaticInput")
+        raise gpv2.OrderNotValid(reason="BadStaticInput")
     if generation != staticcall _auction.cow_generation():
-        gpv2._order_not_valid("StaleGeneration")
+        raise gpv2.OrderNotValid(reason="StaleGeneration")
     if staticcall _auction.registered_generation(token) != generation:
-        gpv2._order_not_valid("OrderNotRegistered")
+        raise gpv2.OrderNotValid(reason="OrderNotRegistered")
     return token
 
 
@@ -113,7 +119,7 @@ def getTradeableOrder(
     if not staticcall auction.cow_enabled():
         raise gpv2.CowDisabled()
     if len(_offchain_input) != 0:
-        gpv2._order_not_valid("BadHandlerInput")
+        raise gpv2.OrderNotValid(reason="BadHandlerInput")
 
     token: address = self._decode_registered_static_input(auction, _static_input)
     lot: Lot = staticcall auction.lots(token)
@@ -121,16 +127,17 @@ def getTradeableOrder(
     lot_end: uint256 = 0
     lot_start, lot_end = staticcall auction.epoch_bounds(lot.epoch)
     if lot.epoch == 0 or block.timestamp < lot_start or block.timestamp >= lot_end:
-        gpv2._poll_try_at(
-            staticcall auction.cow_next_poll(token), "NotAllowed"
+        raise gpv2.PollTryAtEpoch(
+            timestamp=staticcall auction.cow_next_poll(token), reason="NotAllowed"
         )
     available: uint256 = staticcall auction.available(token)
     if available == 0:
-        gpv2._poll_try_at(
-            staticcall auction.cow_next_poll(token), "ZeroBalance"
+        raise gpv2.PollTryAtEpoch(
+            timestamp=staticcall auction.cow_next_poll(token), reason="ZeroBalance"
         )
 
-    validity: uint256 = staticcall auction.cow_order_validity()
+    adapter: CowAdapter = CowAdapter(staticcall auction.fallback_adapter())
+    validity: uint256 = staticcall adapter.order_validity()
     quote_time: uint256 = gpv2._bucket_quote_time(
         block.timestamp, lot_start, validity
     )
@@ -145,7 +152,7 @@ def getTradeableOrder(
         available,
         buy_amount,
         valid_to,
-        staticcall auction.app_data(),
+        staticcall adapter.app_data(),
     )
 
 
@@ -166,7 +173,7 @@ def verify(
     if not staticcall auction.cow_enabled():
         raise gpv2.CowDisabled()
     if len(_offchain_input) != 0:
-        gpv2._order_not_valid("BadHandlerInput")
+        raise gpv2.OrderNotValid(reason="BadHandlerInput")
 
     token: address = self._decode_registered_static_input(auction, _static_input)
     lot: Lot = staticcall auction.lots(token)
@@ -174,43 +181,44 @@ def verify(
     lot_end: uint256 = 0
     lot_start, lot_end = staticcall auction.epoch_bounds(lot.epoch)
     if lot.epoch == 0 or block.timestamp < lot_start or block.timestamp >= lot_end:
-        gpv2._order_not_valid("NotAllowed")
+        raise gpv2.OrderNotValid(reason="NotAllowed")
     # available() folds epoch staleness, kill masks, and drained balances
     # into one liveness signal the handler cannot recompute itself.
     if staticcall auction.available(token) == 0:
-        gpv2._order_not_valid("NotAllowed")
+        raise gpv2.OrderNotValid(reason="NotAllowed")
 
+    adapter: CowAdapter = CowAdapter(staticcall auction.fallback_adapter())
     if (
-        _domain_separator != staticcall auction.cow_domain_separator()
+        _domain_separator != staticcall adapter.domain_separator()
         or gpv2._order_digest(_order, _domain_separator) != _hash
     ):
-        gpv2._order_not_valid("InvalidHash")
+        raise gpv2.OrderNotValid(reason="InvalidHash")
 
-    validity: uint256 = staticcall auction.cow_order_validity()
+    validity: uint256 = staticcall adapter.order_validity()
     quote_time: uint256 = gpv2._bucket_quote_time(
         block.timestamp, lot_start, validity
     )
     valid_to: uint32 = gpv2._bucket_valid_to(block.timestamp, lot_end, validity)
 
     if _order.sellToken != token or _order.buyToken != staticcall auction.want():
-        gpv2._order_not_valid("BadToken")
+        raise gpv2.OrderNotValid(reason="BadToken")
     if (
         _order.receiver != staticcall auction.proceeds_receiver()
-        or _order.appData != staticcall auction.app_data()
+        or _order.appData != staticcall adapter.app_data()
     ):
-        gpv2._order_not_valid("BadReceiverOrAppData")
+        raise gpv2.OrderNotValid(reason="BadReceiverOrAppData")
     if not gpv2._check_order_flags(_order):
-        gpv2._order_not_valid("BadOrderFlags")
+        raise gpv2.OrderNotValid(reason="BadOrderFlags")
     if not gpv2._check_balance_modes(_order):
-        gpv2._order_not_valid("BadBalanceMode")
+        raise gpv2.OrderNotValid(reason="BadBalanceMode")
     if _order.sellAmount == 0 or _order.sellAmount > lot.initial_amount:
-        gpv2._order_not_valid("BadSellAmount")
+        raise gpv2.OrderNotValid(reason="BadSellAmount")
     if _order.validTo != valid_to or convert(_order.validTo, uint256) <= block.timestamp:
-        gpv2._order_not_valid("BadValidTo")
+        raise gpv2.OrderNotValid(reason="BadValidTo")
     if _order.buyAmount < self._bucket_quote(
         auction, lot, lot_start, _order.sellAmount, quote_time
     ):
-        gpv2._order_not_valid("BadBuyAmount")
+        raise gpv2.OrderNotValid(reason="BadBuyAmount")
 
 
 @external

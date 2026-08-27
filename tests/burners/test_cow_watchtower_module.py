@@ -59,7 +59,12 @@ SHIM_HARNESS_SOURCE = """
 import contracts.burners.cow.watchtower as cow_watchtower
 
 initializes: cow_watchtower
-exports: cow_watchtower.__interface__
+exports: (
+    cow_watchtower.composable_cow,
+    cow_watchtower.cow_handler,
+    cow_watchtower.cow_generation,
+    cow_watchtower.registered_generation,
+)
 
 
 rail_enabled: public(bool)
@@ -140,6 +145,26 @@ def __init__(
 @view
 def cow_next_poll(_token: address) -> uint256:
     return self.next_poll
+
+
+# The handler resolves CoW protocol constants through the fallback adapter;
+# this mock plays both roles and aliases the adapter views onto itself.
+@external
+@view
+def fallback_adapter() -> address:
+    return self
+
+
+@external
+@view
+def domain_separator() -> bytes32:
+    return self.cow_domain_separator
+
+
+@external
+@view
+def order_validity() -> uint256:
+    return self.cow_order_validity
 
 
 @external
@@ -248,21 +273,25 @@ def mul_div_up(a: int, b: int, denominator: int) -> int:
     return -(-a * b // denominator)
 
 
-def ray_pow_up(base_ray: int, exponent: int) -> int:
+def ray_mul(a: int, b: int) -> int:
+    return (a * b + RAY // 2) // RAY
+
+
+def ray_pow(base_ray: int, exponent: int) -> int:
     result = RAY
     factor = base_ray
     while exponent:
         if exponent & 1:
-            result = mul_div_up(result, factor, RAY)
+            result = ray_mul(result, factor)
         exponent >>= 1
         if exponent:
-            factor = mul_div_up(factor, factor, RAY)
+            factor = ray_mul(factor, factor)
     return result
 
 
 def total_price(start_total, floor_total, decay_factor_ray, elapsed, step_duration):
     steps = elapsed // step_duration
-    decayed = mul_div_up(start_total, ray_pow_up(decay_factor_ray, steps), RAY)
+    decayed = start_total * ray_pow(decay_factor_ray, steps) // RAY
     return max(floor_total, decayed)
 
 
