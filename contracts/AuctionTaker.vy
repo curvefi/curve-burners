@@ -1,4 +1,6 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
+# The auction callback carries unbounded data (Bytes[INF]) — Venom required.
+# pragma experimental-codegen
 # pragma nonreentrancy on
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
@@ -58,12 +60,14 @@ interface DutchAuction:
         _from: address,
         maxAmount: uint256,
         takerReceiver: address,
-        data: Bytes[MAX_CALLBACK_DATA],
+        data: Bytes[INF],
     ) -> uint256: nonpayable
     def want() -> address: view
 
 
 # One route step, executed via raw_call with this contract as the sender.
+# Unbounded bytes cannot live inside a struct, so each step carries its own
+# bound; it comfortably fits aggregator swap calldata.
 struct Call:
     target: address
     data: Bytes[MAX_CALL_DATA]
@@ -78,13 +82,11 @@ event RouteTaken:
     profit: uint256
 
 
-# Must match the auction core's callback data bound.
-MAX_CALLBACK_DATA: constant(uint256) = 8192
-# abi_encode(DynArray[Call, MAX_CALLS]) worst case is
-# 32 (offset) + 32 (length) + MAX_CALLS * (32 + 96 + MAX_CALL_DATA) bytes,
-# which must fit MAX_CALLBACK_DATA.
-MAX_CALLS: constant(uint256) = 4
-MAX_CALL_DATA: constant(uint256) = 1888
+# The auction forwards callback data unbounded; these bounds only cap the
+# route decoded on this side (the memory frame is allocated for the worst
+# case, so they trade route headroom against a fixed gas floor).
+MAX_CALLS: constant(uint256) = 8
+MAX_CALL_DATA: constant(uint256) = 8192
 
 # The auction allowed to call back during the currently executing take, and
 # the payment it quoted in the callback (reported in RouteTaken).
@@ -151,7 +153,7 @@ def auctionTakeCallback(
     _sender: address,
     _amount_taken: uint256,
     _amount_needed: uint256,
-    _data: Bytes[MAX_CALLBACK_DATA],
+    _data: Bytes[INF],
 ):
     """
     @notice Auction callback: run the route, then fund the payment pull.

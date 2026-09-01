@@ -1,4 +1,4 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 # pragma nonreentrancy on
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
@@ -31,8 +31,8 @@
 from ethereum.ercs import IERC20
 
 from . import adapter_types
-from contracts.utils import roles
-from contracts.utils import token
+from .. import dutch_auction
+from contracts.utils import constants as c, roles, token
 
 uses: roles
 
@@ -93,8 +93,6 @@ event FallbackAdapterSet:
     verifier: indexed(address)
 
 
-MAX_COINS: constant(uint256) = 64
-
 ERC1271_MAGIC_VALUE: constant(bytes4) = 0x1626ba7e
 INVALID_SIGNATURE: constant(bytes4) = 0xffffffff
 # Executors referenced by enabled adapters; a handful of settlement protocols
@@ -131,22 +129,24 @@ def _ensure_executor_approvals(_token: IERC20):
 
 
 @external
-def sync_executor_approvals(_executor: address, _tokens: DynArray[IERC20, MAX_COINS]):
+def sync_executor_approvals(_executor: address, _tokens: DynArray[IERC20, c.MAX_COINS]):
     """
     @notice Permissionlessly drive token allowances to the executor's target
             state.
     @dev The target is derived, never caller-chosen: infinity while the
          executor is referenced by an enabled adapter, zero once fully
          released. Serves as retired-executor cleanup and as the repair path
-         for dropped allowances.
+         for dropped allowances. Only granting refuses the payment token;
+         clearing is always allowed so a token promoted to want by a resync
+         can shed its stale settlement allowances.
     @param _executor Executor whose allowances are synchronized.
     @param _tokens Tokens to synchronize.
     """
     assert _executor != empty(address), BadExecutor()
     grant: bool = self.executor_refcount[_executor] > 0
     for coin: IERC20 in _tokens:
-        assert coin.address != self._auction_want(), adapter_types.TargetToken()
         if grant:
+            assert coin.address != self._auction_want(), dutch_auction.TargetToken()
             token.max_approve(coin, _executor)
         else:
             token.clear_approve(coin, _executor)

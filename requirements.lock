@@ -82,6 +82,6 @@ typing_extensions==4.16.0
 typing-inspection==0.4.2
 urllib3==2.7.0
 vvm==0.3.2
-vyper @ git+https://github.com/vyperlang/vyper@03e096e74b53993e652ed83dddecbee6f889fcc5
+vyper==0.5.0b1
 watchdog==6.0.0
 wheel==0.47.0

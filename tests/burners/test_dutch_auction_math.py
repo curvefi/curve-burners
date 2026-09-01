@@ -16,7 +16,7 @@ MAX_UINT256 = 2**256 - 1
 # The contract no longer bounds either — gas is logarithmic in the exponent.
 TYPICAL_MIN_DECAY_FACTOR_RAY = RAY // 2
 MAX_TESTED_PRICE_STEPS = 604_800
-PINNED_VYPER_COMMIT = "03e096e74b53993e652ed83dddecbee6f889fcc5"
+PINNED_VYPER_COMMIT = "577d2534"
 
 DAY = 24 * 60 * 60
 REFERENCE_START_TOTAL = 100_000 * WAD
@@ -27,7 +27,7 @@ DIVISIBLE_DURATION_DECAY_FACTOR_RAY = 992_031_276_831_159_793_484_252_056
 NON_DIVISIBLE_DURATION_DECAY_FACTOR_RAY = 992_036_788_574_402_203_131_884_429
 
 MATH_HARNESS = """
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 
 import contracts.burners.auction.dutch_auction_math as auction_math
 
@@ -110,7 +110,7 @@ def auction_math():
 
 
 def test_compiler_pin():
-    assert vyper.__version__ == "0.5.0a4"
+    assert vyper.__version__ == "0.5.0b1"
     assert PINNED_VYPER_COMMIT.startswith(vyper.__commit__.strip())
 
 

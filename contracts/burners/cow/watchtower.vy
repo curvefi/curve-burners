@@ -1,4 +1,4 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
@@ -9,8 +9,8 @@
         point at an external IConditionalOrderGenerator handler so the CoW
         watchtower discovers and publishes auction orders automatically.
 @dev Discovery only, never authority: settlement validation runs through the
-     direct execution rail's economic checks, so neither the registration nor
-     the handler can weaken what settles. The importing contract stays the
+     auction's signature router and its CoW adapter's economic checks, so
+     neither the registration nor the handler can weaken what settles. The importing contract stays the
      conditional-order owner because custody and vault-relayer approvals live
      there; order generation and verification logic live in the standalone
      handler contract (contracts/burners/cow/WatchtowerHandler.vy).

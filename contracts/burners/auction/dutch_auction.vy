@@ -1,4 +1,4 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 # pragma nonreentrancy on
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
@@ -18,19 +18,27 @@
      budget, so tokens donated after the snapshot can be sold along the same
      curve — always at or above the curve price and always in favor of the
      proceeds receiver; initial_amount pins the unit price and caps available.
-     Router approvals and the ERC-1271 adapter dispatcher live in the sibling
-     adapters module; staging reaches it through _sync_stage_approvals and the
-     dispatcher validates order economics through _check_signed_order.
+     Router approvals and the ERC-1271 signature router live in the sibling
+     adapters module; staging reaches it through _sync_stage_approvals, and
+     settlement verifiers price their orders through the external check_order
+     view.
 """
 
 
 from ethereum.ercs import IERC20
 
 from . import dutch_auction_math as auction_math
-from .adapters import adapter_types
 
 
 error BadWant:
+    pass
+
+
+# The payment token never becomes inventory: raised when staging the want
+# token here and by the adapters layer's allowance sync. Declared in the core
+# (error names are globally unique per compilation unit) so the settlement
+# plumbing depends on the core, never the other way around.
+error TargetToken:
     pass
 
 
@@ -82,13 +90,16 @@ error DecayMissesFloor:
     pass
 
 
+# Callback data is unbounded (Bytes[INF]) and forwarded verbatim — the taker
+# picks its own bound; unbounded sequence types require the importing contract
+# to compile with `# pragma experimental-codegen`.
 interface AuctionTaker:
     def auctionTakeCallback(
         _from: address,
         _sender: address,
         _amount_taken: uint256,
         _amount_needed: uint256,
-        _data: Bytes[MAX_CALLBACK_DATA],
+        _data: Bytes[INF],
     ): nonpayable
 
 
@@ -125,8 +136,6 @@ struct Lot:
     epoch: uint256
     initial_amount: uint256
 
-
-MAX_CALLBACK_DATA: constant(uint256) = 8192
 
 # Auction economics. Mutable only through _resync_economics: lots store no
 # curve snapshot, so a retune reprices live lots immediately; a want change
@@ -283,7 +292,7 @@ def want() -> address:
 @internal
 @view
 def _check_stageable(_token: IERC20):
-    assert _token != self.want_token, adapter_types.TargetToken()
+    assert _token != self.want_token, TargetToken()
 
 
 @internal
@@ -460,7 +469,7 @@ def _take_core(
     _from: IERC20,
     _max_amount: uint256,
     _receiver: address,
-    _data: Bytes[MAX_CALLBACK_DATA],
+    _data: Bytes[INF],
 ) -> (uint256, uint256):
     assert _receiver != empty(address), ZeroReceiver()
     available_amount: uint256 = self._available(_from, block.timestamp)
@@ -512,7 +521,7 @@ def take(
     _from: address,
     maxAmount: uint256,
     takerReceiver: address,
-    data: Bytes[MAX_CALLBACK_DATA],
+    data: Bytes[INF],
 ) -> uint256:
     """
     @notice Take up to `maxAmount` of an auctioned token.
@@ -539,7 +548,7 @@ def take_with_limits(
     _max_payment: uint256,
     _receiver: address,
     _deadline: uint256,
-    _data: Bytes[MAX_CALLBACK_DATA],
+    _data: Bytes[INF],
 ) -> (uint256, uint256):
     """
     @notice Take with explicit inclusion-time amount, payment, and deadline limits.
@@ -560,6 +569,10 @@ def take_with_limits(
 # Signed-order economics
 
 
+# The returned reason strings are a FROZEN cross-contract ABI: CowAdapter
+# reverts them verbatim as OrderNotValid(reason) and the off-chain watchtower
+# classifies orders by them. Renaming one is a silent breaking change no
+# compiler will catch — never edit an existing reason, only add new ones.
 @external
 @view
 def check_order(

@@ -1,4 +1,4 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 # pragma optimize codesize
 # Venom backend is required to fit EIP-170: the legacy pipeline emits ~27.4kB
 # of runtime code for the combined core + watchtower + burner surface.
@@ -22,6 +22,13 @@
              alive. Disabling an adapter does not clear its executor's
              allowances: the emergency multisig batches the disable with
              sync_executor_approvals in one transaction.
+@custom:migration FeeCollector.set_burner only redirects future staging;
+                  nothing detaches here. Calm path: let live lots trade out
+                  their window (proceeds still reach FeeCollector), then
+                  disable the adapters, zero executor allowances via
+                  sync_executor_approvals, and return leftovers with
+                  recover() + push_target(). Emergency path: batch recover
+                  with FeeCollector.set_killed to stop fills at once.
 @custom:security The configured start total assumes every staged lot is worth no
                  more than that amount. Inventory accounting is balance-based:
                  available = min(initial_amount, balanceOf), so tokens donated
@@ -39,14 +46,11 @@
 
 from ethereum.ercs import IERC20
 
-from ..interfaces import IDutchAuction
-from ..interfaces import IFeeCollector
+from ..interfaces import IDutchAuction, IFeeCollector
+from ..utils import constants as c, recovery, roles
 from .auction import dutch_auction
 from .auction.adapters import adapters
-from ..utils import recovery
-from ..utils import roles
-from .cow import gpv2
-from .cow import watchtower as cow_watchtower
+from .cow import gpv2, watchtower as cow_watchtower
 
 implements: IDutchAuction
 initializes: roles
@@ -121,6 +125,10 @@ error TargetChanged:
     pass
 
 
+error NotSleepEpoch:
+    pass
+
+
 ERC165_INTERFACE_ID: constant(bytes4) = 0x01ffc9a7
 BURNER_INTERFACE_ID: constant(bytes4) = 0xa3b5e311
 ERC1271_INTERFACE_ID: constant(bytes4) = 0x1626ba7e
@@ -129,12 +137,12 @@ VERSION: public(constant(String[20])) = "DutchAuction"
 # FeeCollector integration fixed at deployment. The payment token lives in the
 # core as `want`, mirrors fee_collector.target() and follows it only through
 # the owner's resync_target; target()/want() getters stay for existing tooling.
-fee_collector: public(immutable(IFeeCollector.FeeCollector))
+fee_collector: public(immutable(IFeeCollector))
 
 
 @deploy
 def __init__(
-    _fee_collector: IFeeCollector.FeeCollector,
+    _fee_collector: IFeeCollector,
     _start_total: uint256,
     _floor_total: uint256,
     _decay_factor_ray: uint256,
@@ -192,8 +200,9 @@ def target() -> address:
     return dutch_auction.want_token.address
 
 
-# Reentrant like want(): pure FeeCollector-calendar arithmetic over constants,
-# reads no burner storage, and take() callbacks compute deadlines from it.
+# Reentrant like want(): resolves through the immutable FeeCollector's
+# calendar views, reads no burner storage, and take() callbacks compute
+# deadlines from it.
 @external
 @view
 @reentrant
@@ -225,7 +234,7 @@ def _exchange_frame(_timestamp: uint256) -> (uint256, uint256):
 
 
 @external
-def burn(_coins: DynArray[IERC20, IFeeCollector.MAX_COINS], _receiver: address):
+def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
     """
     @notice Pay the COLLECT incentive, take custody, and snapshot upcoming lots.
     @dev Staging also tops enabled executors' approvals up to infinity inside
@@ -243,13 +252,13 @@ def burn(_coins: DynArray[IERC20, IFeeCollector.MAX_COINS], _receiver: address):
     exchange_start: uint256 = 0
     exchange_end: uint256 = 0
     exchange_start, exchange_end = self._exchange_frame(block.timestamp)
-    epoch: uint256 = exchange_start // IFeeCollector.WEEK
+    epoch: uint256 = exchange_start
 
     fee: uint256 = staticcall self.fee_collector.fee(
         IFeeCollector.Epoch.COLLECT, block.timestamp
     )
-    fee_payouts: DynArray[IFeeCollector.Transfer, IFeeCollector.MAX_COINS] = []
-    custody_transfers: DynArray[IFeeCollector.Transfer, IFeeCollector.MAX_COINS] = []
+    fee_payouts: DynArray[IFeeCollector.Transfer, c.MAX_COINS] = []
+    custody_transfers: DynArray[IFeeCollector.Transfer, c.MAX_COINS] = []
 
     for coin: IERC20 in _coins:
         # Fail before any transfer when the target token is among the coins.
@@ -259,7 +268,7 @@ def burn(_coins: DynArray[IERC20, IFeeCollector.MAX_COINS], _receiver: address):
             IFeeCollector.Transfer(
                 coin=coin.address,
                 to=_receiver,
-                amount=collector_balance * fee // IFeeCollector.WAD,
+                amount=collector_balance * fee // c.WAD,
             )
         )
         custody_transfers.append(
@@ -280,27 +289,28 @@ def burn(_coins: DynArray[IERC20, IFeeCollector.MAX_COINS], _receiver: address):
 @override(dutch_auction)
 @view
 def _auction_epoch(_timestamp: uint256) -> uint256:
-    # The cadence decision lives here, not in the core: this burner runs one
-    # auction per FeeCollector week, numbering epochs by the EXCHANGE frame's
-    # calendar week (always nonzero on any live chain).
+    # The cadence decision lives here, not in the core: one auction per
+    # FeeCollector distribution period, identified by its EXCHANGE window's
+    # start timestamp. A timestamp id needs no calendar constant — it stays
+    # monotone and unique under any (even changed) period, and is always
+    # nonzero on a live chain.
     exchange_start: uint256 = 0
     exchange_end: uint256 = 0
     exchange_start, exchange_end = self._exchange_frame(_timestamp)
-    return exchange_start // IFeeCollector.WEEK
+    return exchange_start
 
 
 @override(dutch_auction)
 @view
 def _epoch_bounds(_epoch: uint256) -> (uint256, uint256):
-    # Inverse of _auction_epoch: the FeeCollector week anchor is a multiple of
-    # WEEK, so an epoch's week start lands inside that distribution week and
-    # resolves to its EXCHANGE frame. One staticcall per lookup keeps the
-    # calendar defined in exactly one place — the FeeCollector. Epoch 0 is the
-    # never-staged sentinel and predates the FeeCollector calendar (whose frame
-    # lookup would revert): the empty window keeps every check inactive.
+    # An epoch is its own window's start timestamp, so the frame containing it
+    # IS its window — exact by construction, with the calendar defined in one
+    # place (the FeeCollector). Epoch 0 is the never-staged sentinel and
+    # predates the FeeCollector calendar (whose frame lookup would revert):
+    # the empty window keeps every check inactive.
     if _epoch == 0:
         return 0, 0
-    return self._exchange_frame(_epoch * IFeeCollector.WEEK)
+    return self._exchange_frame(_epoch)
 
 
 @override(dutch_auction)
@@ -332,6 +342,7 @@ def _auction_want() -> address:
 
 @external
 def resync_target(
+    _expected_target: address,
     _start_total: uint256,
     _floor_total: uint256,
     _decay_factor_ray: uint256,
@@ -347,14 +358,36 @@ def resync_target(
          current epoch once its window has opened — fills resume with the next
          epoch's staging; a resync before the window opens fences only the
          previous epoch, so a restage trades the same week. A same-target
-         retune keeps live lots untouched and reprices them immediately.
+         retune keeps live lots untouched.
          Stale CoW registrations need no generation bump: published orders for
          fenced lots fail check_order's fence and buy-token terms, while the
          watchtower handler quotes future orders from live views.
+         Allowed only during the SLEEP phase — before the week's staging, so
+         one configuration governs the entire distribution period: staging,
+         the trading window, and forwarding. Consequences: the price within a
+         window can never change (staging is confined to COLLECT), so the
+         plain Yearn-style take() needs no payment ceiling; the want fence
+         always stops at the previous epoch and no week is lost; and pairing
+         FeeCollector.set_target with the resync inside one SLEEP phase never
+         halts collection (burn() rejects a diverged target only in COLLECT).
+    @param _expected_target The target the curve parameters were tuned for.
+           Governance executes at an uncontrolled time: if the FeeCollector
+           target changed again since the vote was drafted, the totals would
+           bind to the wrong denomination — execution must revert instead.
     """
     roles._check_owner()
     new_target: address = staticcall self.fee_collector.target()
     assert new_target != empty(address), BadTarget()
+    assert new_target == _expected_target, TargetChanged()
+
+    sleep_start: uint256 = 0
+    sleep_end: uint256 = 0
+    sleep_start, sleep_end = staticcall self.fee_collector.epoch_time_frame(
+        IFeeCollector.Epoch.SLEEP, block.timestamp
+    )
+    assert sleep_start <= block.timestamp and block.timestamp < sleep_end, (
+        NotSleepEpoch()
+    )
 
     exchange_start: uint256 = 0
     exchange_end: uint256 = 0
@@ -415,17 +448,24 @@ def cow_next_poll(_token: address) -> uint256:
     exchange_start, exchange_end = self._exchange_frame(block.timestamp)
     if block.timestamp < exchange_start:
         return exchange_start
-    exchange_start, exchange_end = self._exchange_frame(
-        block.timestamp + IFeeCollector.WEEK
+    # FORWARD is the calendar's terminal phase, so its frame ends exactly at
+    # the period boundary — the frame there is the next period's window.
+    forward_start: uint256 = 0
+    forward_end: uint256 = 0
+    forward_start, forward_end = staticcall self.fee_collector.epoch_time_frame(
+        IFeeCollector.Epoch.FORWARD, block.timestamp
     )
+    exchange_start, exchange_end = self._exchange_frame(forward_end)
     return exchange_start
 
 
 @override(cow_watchtower)
 @view
 def _cow_rail_enabled() -> bool:
-    fallback: address = adapters.fallback_adapter
-    return fallback != empty(address) and adapters.enabled_adapters[fallback]
+    # Mirror the signature router's switches — the local set AND the registry
+    # activation flag — so a registry disable also stops registrations and
+    # watchtower publishing: the CoW rail behaves like any other adapter.
+    return adapters._route_to(adapters.fallback_adapter)
 
 
 # Recovery and interface discovery
@@ -443,7 +483,7 @@ def push_target() -> uint256:
 
 
 @external
-def recover(_coins: DynArray[IERC20, IFeeCollector.MAX_COINS]):
+def recover(_coins: DynArray[IERC20, c.MAX_COINS]):
     """
     @notice Return ERC-20 or native balances only to FeeCollector.
     @dev Emptying the balance kills the lot through the balance term of

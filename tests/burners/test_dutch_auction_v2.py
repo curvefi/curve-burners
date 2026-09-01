@@ -585,7 +585,12 @@ def test_collect_pays_fee_moves_custody_and_snapshots_lot(deployment: AuctionDep
     assert deployment.sell_token.balanceOf(deployment.burner) == staged
     assert lot[LOT_INITIAL_AMOUNT] == staged
     assert lot[LOT_START] < lot[LOT_END]
-    assert lot[LOT_EPOCH] == lot[LOT_START] // WEEK
+    # Epochs are identified by their own window's start timestamp; staging in
+    # COLLECT tags the lot with the SAME week's upcoming window — the frame
+    # lookup anchors to the week containing the timestamp, so at staging time
+    # the epoch is a strictly future timestamp.
+    assert lot[LOT_EPOCH] == lot[LOT_START]
+    assert _timestamp() < lot[LOT_START]
 
     assert lot_synced.address == deployment.burner.address
     assert lot_synced.token == deployment.sell_token.address
@@ -649,7 +654,7 @@ def test_weekly_rollover_resnapshots_unsold_inventory_and_new_receipts(
     new_staged, _ = _stage(deployment, deployment.sell_token, 200 * WAD)
     second_lot = _lot_with_bounds(deployment, deployment.sell_token)
 
-    assert second_lot[LOT_EPOCH] == first_lot[LOT_EPOCH] + 1
+    assert second_lot[LOT_EPOCH] == first_lot[LOT_EPOCH] + WEEK
     assert second_lot[LOT_INITIAL_AMOUNT] == unsold + new_staged
 
 
@@ -1172,6 +1177,23 @@ def test_cow_configuration_authority_and_initial_state(deployment: AuctionDeploy
     # ERC-1271 stays claimed for the signature router even with CoW disabled.
     assert not deployment.burner.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
     assert deployment.burner.supportsInterface(ERC1271_MAGIC_VALUE)
+
+
+def test_registry_disable_also_kills_cow_rail(deployment: AuctionDeployment):
+    """The CoW rail mirrors the signature router's dual switches: an emergency
+    registry disable must also stop registrations and watchtower publishing,
+    not only settlement routing."""
+    _configure_and_enable_cow(deployment)
+    assert deployment.burner.cow_enabled()
+
+    with boa.env.prank(deployment.emergency_owner):
+        deployment.registry.disable_adapter(deployment.cow_adapter)
+    assert not deployment.burner.cow_enabled()
+
+    # Reactivation restores the rail without touching burner-local state.
+    with boa.env.prank(deployment.owner):
+        deployment.registry.activate_adapter(deployment.cow_adapter)
+    assert deployment.burner.cow_enabled()
 
 
 def test_cow_lifecycle_events_and_staging_approvals(deployment: AuctionDeployment):
@@ -1993,7 +2015,7 @@ def test_recover_empties_lot_and_set_killed_fences_donation_revival(
 
     refreshed_lot = _lot_with_bounds(deployment, deployment.sell_token)
     expected_snapshot = donation + collector_balance - collect_fee
-    assert refreshed_lot[LOT_EPOCH] == lot[LOT_EPOCH] + 1
+    assert refreshed_lot[LOT_EPOCH] == lot[LOT_EPOCH] + WEEK
     assert refreshed_lot[LOT_INITIAL_AMOUNT] == expected_snapshot
     assert (
         deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
@@ -2023,7 +2045,7 @@ def test_recover_during_collect_frame_recollect_restages_unless_killed(
 
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
     recovery_epoch = deployment.burner.current_epoch()
-    assert recovery_epoch == first_lot[LOT_EPOCH] + 1
+    assert recovery_epoch == first_lot[LOT_EPOCH] + WEEK
     # An emergency evacuation batches recover with a COLLECT kill: recover
     # alone leaves the permissionless re-collect open in the same frame.
     with boa.env.prank(deployment.owner):
@@ -2224,10 +2246,10 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
     deployment: AuctionDeployment,
 ):
     """Target migration: divergence freezes every rail, resync re-pins the
-    denomination from the FeeCollector, and a resync landing before the
-    epoch's window opens fences only the previous epoch — a restage in the
-    same COLLECT frame trades the same week (no week is lost), including the
-    old target as regular sellable inventory."""
+    denomination from the FeeCollector during the next SLEEP phase — before
+    that week's staging — so the fence stops at the previous epoch and a
+    restage in the same week's COLLECT trades the same week (no week is
+    lost), including the old target as regular sellable inventory."""
     _, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
     assert deployment.burner.available(deployment.sell_token) == staged
 
@@ -2251,20 +2273,37 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
             [deployment.second_token.address], deployment.keeper
         )
 
+    # Resyncs are SLEEP-only: a COLLECT execution must wait for the next week.
+    with boa.env.prank(deployment.owner), boa.reverts(
+        custom_err("NotSleepEpoch()")
+    ):
+        deployment.burner.resync_target(
+            new_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+        )
+    _move_to_epoch(deployment.fee_collector, Epoch.SLEEP)
+
     with boa.env.prank(deployment.keeper), boa.reverts(custom_err("OnlyOwner()")):
         deployment.burner.resync_target(
-            START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            new_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
         )
     with boa.env.prank(deployment.owner), boa.reverts(
         custom_err("DecayMissesFloor()")
     ):
         deployment.burner.resync_target(
-            START_TOTAL, FLOOR_TOTAL, RAY - 1, STEP_DURATION
+            new_target, START_TOTAL, FLOOR_TOTAL, RAY - 1, STEP_DURATION
+        )
+    # Delayed-execution guard: params tuned for the old denomination must not
+    # bind to the new one.
+    with boa.env.prank(deployment.owner), boa.reverts(
+        custom_err("TargetChanged()")
+    ):
+        deployment.burner.resync_target(
+            old_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
         )
 
     with boa.env.prank(deployment.owner):
         deployment.burner.resync_target(
-            2 * START_TOTAL, 2 * FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            new_target, 2 * START_TOTAL, 2 * FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
         )
     resynced = next(
         log
@@ -2277,7 +2316,7 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
     assert deployment.burner.target() == new_target.address
     assert deployment.burner.start_total() == 2 * START_TOTAL
 
-    # The resync landed in COLLECT, before this epoch's window opened: the
+    # The resync landed in SLEEP, before this epoch's staging and window: the
     # fence stops at the previous epoch, so only the stale lot stays dead.
     fence = deployment.burner.reconfigured_epoch()
     assert fence == deployment.burner.current_epoch() - 1
@@ -2289,9 +2328,10 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
             deployment.sell_token, MAX_UINT256, deployment.buyer, b""
         )
 
-    # Same COLLECT frame: restage picks the new curve immediately; the old
+    # Same week's COLLECT: restage picks the new curve immediately; the old
     # target is now plain sellable inventory; fills pay in the new
     # denomination without waiting for the next week.
+    _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
     old_target._mint_for_testing(deployment.fee_collector, 10 * WAD)
     with boa.env.prank(deployment.keeper):
         deployment.fee_collector.collect(
@@ -2317,14 +2357,15 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
     assert deployment.burner.available(old_target) > 0
 
 
-def test_resync_during_exchange_fences_current_epoch_lot(
+def test_resync_only_in_sleep_fences_previous_lots(
     deployment: AuctionDeployment,
 ):
-    """The mispricing window proper: a lot staged this epoch under the old
-    denomination — including its already-published CoW order — must stay dead
-    after a mid-exchange resync."""
+    """Resyncs are confined to SLEEP — before the week's staging — so a want
+    change can never land under a staged lot: EXCHANGE and FORWARD attempts
+    revert, and the SLEEP resync fences every previous epoch, killing the old
+    week's lot and its published CoW order."""
     generation = _configure_and_enable_cow(deployment)
-    _, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
+    lot, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
     order = _tradeable_order(deployment, deployment.sell_token, generation)
     signature = _encode_erc1271_signature(
         order, deployment.burner, _static_input(deployment.sell_token, generation)
@@ -2338,12 +2379,30 @@ def test_resync_during_exchange_fences_current_epoch_lot(
     new_target = boa.load("contracts/testing/ERC20Mock.vy", "New Target", "NEWT", 18)
     with boa.env.prank(deployment.owner):
         deployment.fee_collector.set_target(new_target)
+        # The window is open: any resync must wait for the next SLEEP.
+        with boa.reverts(custom_err("NotSleepEpoch()")):
+            deployment.burner.resync_target(
+                new_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            )
+
+    # FORWARD — the window closed, but still not SLEEP.
+    _move_to_timestamp(lot[LOT_END])
+    with boa.env.prank(deployment.owner), boa.reverts(
+        custom_err("NotSleepEpoch()")
+    ):
         deployment.burner.resync_target(
-            START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            new_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
         )
 
-    lot = _lot_with_bounds(deployment, deployment.sell_token)
-    assert deployment.burner.reconfigured_epoch() == lot[LOT_EPOCH]
+    _move_to_epoch(deployment.fee_collector, Epoch.SLEEP)
+    with boa.env.prank(deployment.owner):
+        deployment.burner.resync_target(
+            new_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+        )
+
+    fence = deployment.burner.reconfigured_epoch()
+    assert fence == deployment.burner.current_epoch() - 1
+    assert lot[LOT_EPOCH] <= fence
     assert deployment.burner.available(deployment.sell_token) == 0
     with boa.env.prank(deployment.buyer), boa.reverts():
         deployment.burner.take(
@@ -2353,38 +2412,64 @@ def test_resync_during_exchange_fences_current_epoch_lot(
         deployment.burner.isValidSignature(order_hash, signature)
 
 
-def test_resync_same_target_retune_reprices_live_lots_immediately(
+def test_resync_same_target_retune_in_sleep_repins_curve(
     deployment: AuctionDeployment,
 ):
-    """Lots carry no curve snapshot: a same-target retune reprices live lots
-    at once (an emergency curve fix must not wait for the next staging), while
-    the want fence stays reserved for denomination changes."""
-    lot, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
-    quote_before = deployment.burner.getAmountNeeded(deployment.sell_token, staged)
-
+    """A same-target retune executed during SLEEP re-pins the curve without a
+    fence; the week staged right after trades the retuned curve from the
+    window open. Outside SLEEP every resync reverts, so the price a taker
+    sees can only decay — plain take() needs no payment bound."""
+    _move_to_epoch(deployment.fee_collector, Epoch.SLEEP)
     with boa.env.prank(deployment.owner):
         deployment.burner.resync_target(
-            2 * START_TOTAL, 2 * FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            deployment.target,
+            2 * START_TOTAL,
+            2 * FLOOR_TOTAL,
+            DECAY_FACTOR_RAY,
+            STEP_DURATION,
         )
 
     assert deployment.burner.reconfigured_epoch() == 0
     assert deployment.burner.want() == deployment.target.address
     assert deployment.burner.start_total() == 2 * START_TOTAL
-    assert deployment.burner.available(deployment.sell_token) == staged
 
+    # Staging moves to the same week's COLLECT — which is no longer SLEEP.
+    staged, _ = _stage(deployment, deployment.sell_token, 100 * WAD)
+    with boa.env.prank(deployment.owner), boa.reverts(
+        custom_err("NotSleepEpoch()")
+    ):
+        deployment.burner.resync_target(
+            deployment.target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+        )
+
+    lot = _lot_with_bounds(deployment, deployment.sell_token)
+    _move_to_timestamp(lot[LOT_START])
+    assert deployment.burner.available(deployment.sell_token) == staged
+    # Full lot at the window open quotes the retuned start total exactly.
+    assert (
+        deployment.burner.getAmountNeeded(deployment.sell_token, staged)
+        == 2 * START_TOTAL
+    )
+    # Mid-window retunes are rejected outright.
+    with boa.env.prank(deployment.owner), boa.reverts(
+        custom_err("NotSleepEpoch()")
+    ):
+        deployment.burner.resync_target(
+            deployment.target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+        )
+
+    # A fill mid-window pays along the retuned curve.
     timestamp = boa.env.evm.vm.state.timestamp
-    quote_after = deployment.burner.getAmountNeeded(deployment.sell_token, staged)
-    assert quote_after > quote_before
-    assert quote_after == _quote_from_total(
+    quote_live = deployment.burner.getAmountNeeded(deployment.sell_token, staged)
+    assert quote_live == _quote_from_total(
         _reference_total(lot, timestamp, 2 * START_TOTAL, 2 * FLOOR_TOTAL),
         staged,
         staged,
     )
-
-    deployment.target._mint_for_testing(deployment.buyer, quote_after)
+    deployment.target._mint_for_testing(deployment.buyer, quote_live)
     with boa.env.prank(deployment.buyer):
-        deployment.target.approve(deployment.burner, quote_after)
+        deployment.target.approve(deployment.burner, quote_live)
         deployment.burner.take(
             deployment.sell_token, MAX_UINT256, deployment.buyer, b""
         )
-    assert deployment.target.balanceOf(deployment.fee_collector) == quote_after
+    assert deployment.target.balanceOf(deployment.fee_collector) == quote_live
