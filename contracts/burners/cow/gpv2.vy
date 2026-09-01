@@ -1,4 +1,4 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
@@ -8,8 +8,8 @@
 @notice Stateless GPv2 order construction, hashing, flag, bucket, and
         conditional-order codec helpers plus the watchtower revert ABI.
 @dev Pure parametric helpers only: no storage, no external calls, no abstract
-     hooks. Shared by the embedded execution rail, the standalone watchtower
-     handler, and CoW order validators; the digest computation must stay
+     hooks. Shared by the CowAdapter verifier, the watchtower publishing shim,
+     and the standalone handler; the digest computation must stay
      byte-identical to the GPv2 EIP-712 reference.
 """
 

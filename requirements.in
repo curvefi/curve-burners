@@ -1,7 +1,7 @@
 # Application compiler and runtime. Keep these commits aligned with the Dutch
 # auction compiler pragma and the compatibility notes in requirements.lock.
 titanoboa @ git+https://github.com/vyperlang/titanoboa@7740c2efd9094973debb98c5cfe7923bc2552ce6
-vyper @ git+https://github.com/vyperlang/vyper@03e096e74b53993e652ed83dddecbee6f889fcc5
+vyper==0.5.0b1
 snekmate @ git+https://github.com/pcaversaccio/snekmate@7008a6af169d5c10b939a463b0b85331f99fe4ff
 
 # Titanoboa delegates contracts pinned below the application compiler to VVM.

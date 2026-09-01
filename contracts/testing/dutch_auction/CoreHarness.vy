@@ -1,4 +1,6 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
+# The core's unbounded callback type (Bytes[INF]) requires the Venom backend.
+# pragma experimental-codegen
 # pragma nonreentrancy on
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT

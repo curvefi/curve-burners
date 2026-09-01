@@ -50,6 +50,6 @@ def take(
     _from: address,
     maxAmount: uint256,
     takerReceiver: address,
-    data: Bytes[8192],
+    data: Bytes[...],
 ) -> uint256:
     ...

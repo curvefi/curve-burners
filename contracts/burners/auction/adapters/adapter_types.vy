@@ -1,4 +1,4 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
@@ -14,13 +14,6 @@
      authority by themselves: verifiers prove protocol digests and the
      auction's check_order view prices every fill.
 """
-
-
-# Shared auction-domain error: raised by the core when staging the want token
-# and by the adapters module when syncing its allowances. Declared here because
-# error names are globally unique per compilation unit.
-error TargetToken:
-    pass
 
 
 # The registry maps a verifier address (the routing key and the adapter's

@@ -43,7 +43,7 @@ ORDER_FIELD_TYPES = [
 ]
 
 HARNESS_SOURCE = """
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 
 import contracts.burners.cow.gpv2 as gpv2
 

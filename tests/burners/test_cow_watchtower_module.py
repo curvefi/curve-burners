@@ -54,7 +54,7 @@ ORDER_FIELD_TYPES = [
 
 
 SHIM_HARNESS_SOURCE = """
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 
 import contracts.burners.cow.watchtower as cow_watchtower
 
@@ -95,7 +95,9 @@ def _cow_rail_enabled() -> bool:
 # Mock auction exposing every public view the stateless handler reads,
 # with setters so tests fully control lot state and configuration.
 AUCTION_MOCK_SOURCE = """
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
+
+from contracts.burners.auction import dutch_auction_math as auction_math
 
 struct Lot:
     epoch: uint256
@@ -224,6 +226,22 @@ def set_available(_token: address, _amount: uint256):
 @external
 def set_next_poll(_next_poll: uint256):
     self.next_poll = _next_poll
+
+
+# The handler reads quotes from the auction; the mock prices with the shared
+# math so parity tests still pin the exact expected numbers.
+@external
+@view
+def quote(_token: address, _sell_amount: uint256, _ts: uint256) -> uint256:
+    lot: Lot = self.lots[_token]
+    total: uint256 = auction_math.total_price(
+        self.start_total,
+        self.floor_total,
+        self.decay_factor_ray,
+        _ts - self.epoch_start[lot.epoch],
+        self.step_duration,
+    )
+    return auction_math.proportional_payment(total, _sell_amount, lot.initial_amount)
 """
 
 

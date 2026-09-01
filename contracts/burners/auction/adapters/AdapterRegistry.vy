@@ -1,4 +1,4 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 # pragma nonreentrancy on
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
@@ -83,10 +83,6 @@ event AdapterActivated:
 event AdapterDisabled:
     verifier: indexed(address)
 
-# Codehash of an existing account with empty code; a fresh account reads as
-# empty(bytes32). Both mean "no runtime code", so neither can be a verifier.
-EMPTY_CODEHASH: constant(bytes32) = keccak256(b"")
-
 adapters: HashMap[address, adapter_types.AdapterConfig]
 
 
@@ -127,9 +123,9 @@ def set_adapter(_verifier: address, _executor: address):
     """
     roles._check_owner()
     assert _verifier != empty(address), ZeroVerifier()
-    # EOAs and empty accounts have no runtime code and can never verify.
-    assert _verifier.codehash != empty(bytes32), EmptyVerifier()
-    assert _verifier.codehash != EMPTY_CODEHASH, EmptyVerifier()
+    # EOAs and empty accounts can never verify, and set-once entries make a
+    # mistyped verifier a permanently burned key.
+    assert _verifier.is_contract, EmptyVerifier()
     assert _executor != empty(address), ZeroExecutor()
     assert self.adapters[_verifier].executor == empty(address), AlreadySet()
 

@@ -1,0 +1,66 @@
+"""
+@title IFeeCollector
+@author Curve Finance
+@license MIT
+@notice The FeeCollector ABI surface shared by burners: epoch flag, transfer
+        struct, and the views/actions burners integrate with.
+@dev The weekly-calendar constant lives with the importing burner and the
+     batch/scale constants in contracts/utils/constants.vy: .vyi constants
+     are not exposed to importers.
+"""
+
+from contracts.utils import constants as c
+
+
+flag Epoch:
+    SLEEP
+    COLLECT
+    EXCHANGE
+    FORWARD
+
+
+struct Transfer:
+    coin: address
+    to: address
+    amount: uint256
+
+
+@external
+@view
+def fee(_epoch: Epoch = ..., _timestamp: uint256 = ...) -> uint256:
+    ...
+
+
+@external
+@view
+def target() -> address:
+    ...
+
+
+@external
+@view
+def owner() -> address:
+    ...
+
+
+@external
+@view
+def emergency_owner() -> address:
+    ...
+
+
+@external
+@view
+def epoch_time_frame(_epoch: Epoch, _timestamp: uint256 = ...) -> (uint256, uint256):
+    ...
+
+
+@external
+@view
+def can_exchange(_coins: DynArray[address, c.MAX_COINS]) -> bool:
+    ...
+
+
+@external
+def transfer(_transfers: DynArray[Transfer, c.MAX_COINS]):
+    ...

@@ -387,6 +387,20 @@ def test_sync_rejects_target_token(harness, enable, keeper, want, token_a, adapt
         harness.sync_executor_approvals(relayer, [token_a.address, want.address])
 
 
+def test_sync_clears_want_allowance_of_released_executor(
+    harness, enable, disable, keeper, want, adapter_cow, relayer
+):
+    """A token promoted to want by a resync may carry a stale settlement
+    allowance; only granting refuses want — clearing must stay possible."""
+    enable(harness, adapter_cow)
+    disable(harness, adapter_cow)
+    with boa.env.prank(harness.address):
+        want.approve(relayer, 1234)
+    with boa.env.prank(keeper):
+        harness.sync_executor_approvals(relayer, [want.address])
+    assert want.allowance(harness, relayer) == 0
+
+
 # Exotic-token approval semantics
 
 

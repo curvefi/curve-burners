@@ -1,4 +1,4 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
@@ -9,10 +9,10 @@
         auctions: generates and verifies canonical GPv2 sell orders for the
         watchtower by reading the auction's public views.
 @dev Stateless and generic over auction deployments — ComposableCoW passes
-     the conditional-order owner, and every quote is recomputed from that
-     auction's published lot record and curve parameters via the shared
-     auction math, so this handler holds no configuration of its own.
-     Discovery only, never authority: the auction validates settlement
+     the conditional-order owner, and every quote is read from that auction's
+     own quote view at the stable bucket timestamp, so pricing exists in
+     exactly one place and this handler holds no math or configuration of its
+     own. Discovery only, never authority: the auction validates settlement
      signatures against live lot economics itself, so nothing this handler
      returns can weaken on-chain checks.
 @custom:kill Nothing to kill: no owner, no storage, no funds, no approvals.
@@ -20,7 +20,6 @@
      handler; stale registrations then stop validating generation checks.
 """
 
-from ..auction import dutch_auction_math as auction_math
 from . import gpv2
 
 
@@ -43,13 +42,10 @@ interface DutchAuction:
     def cow_next_poll(_token: address) -> uint256: view
     def want() -> address: view
     def proceeds_receiver() -> address: view
-    def start_total() -> uint256: view
-    def floor_total() -> uint256: view
-    def decay_factor_ray() -> uint256: view
-    def step_duration() -> uint256: view
     def lots(_token: address) -> Lot: view
     def epoch_bounds(_epoch: uint256) -> (uint256, uint256): view
     def available(_token: address) -> uint256: view
+    def quote(_token: address, _sell_amount: uint256, _ts: uint256) -> uint256: view
 
 
 # The CoW protocol constants live with the auction's fallback CowAdapter; the
@@ -82,27 +78,6 @@ def _decode_registered_static_input(
     if staticcall _auction.registered_generation(token) != generation:
         raise gpv2.OrderNotValid(reason="OrderNotRegistered")
     return token
-
-
-@internal
-@view
-def _bucket_quote(
-    _auction: DutchAuction,
-    _lot: Lot,
-    _lot_start: uint256,
-    _amount: uint256,
-    _quote_time: uint256,
-) -> uint256:
-    # Recomputed from the published lot snapshot, epoch window, and live curve
-    # parameters — must match the auction's own quote at the same timestamp.
-    total: uint256 = auction_math.total_price(
-        staticcall _auction.start_total(),
-        staticcall _auction.floor_total(),
-        staticcall _auction.decay_factor_ray(),
-        _quote_time - _lot_start,
-        staticcall _auction.step_duration(),
-    )
-    return auction_math.proportional_payment(total, _amount, _lot.initial_amount)
 
 
 @external
@@ -142,7 +117,9 @@ def getTradeableOrder(
         block.timestamp, lot_start, validity
     )
     valid_to: uint32 = gpv2._bucket_valid_to(block.timestamp, lot_end, validity)
-    buy_amount: uint256 = self._bucket_quote(auction, lot, lot_start, available, quote_time)
+    # Quoted by the auction itself at the stable bucket timestamp — signed
+    # amounts are bounded by the lot snapshot, not the live remainder.
+    buy_amount: uint256 = staticcall auction.quote(token, available, quote_time)
     assert buy_amount > 0, ZeroCowQuote()
 
     return gpv2._build_sell_order(
@@ -215,9 +192,10 @@ def verify(
         raise gpv2.OrderNotValid(reason="BadSellAmount")
     if _order.validTo != valid_to or convert(_order.validTo, uint256) <= block.timestamp:
         raise gpv2.OrderNotValid(reason="BadValidTo")
-    if _order.buyAmount < self._bucket_quote(
-        auction, lot, lot_start, _order.sellAmount, quote_time
-    ):
+    # The auction's own quote at the bucket timestamp; a zero quote means the
+    # lot went inactive between the liveness gate above and here.
+    bucket_quote: uint256 = staticcall auction.quote(token, _order.sellAmount, quote_time)
+    if bucket_quote == 0 or _order.buyAmount < bucket_quote:
         raise gpv2.OrderNotValid(reason="BadBuyAmount")
 
 

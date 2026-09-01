@@ -1,7 +1,7 @@
-# pragma version 0.5.0a4
+# pragma version 0.5.0b1
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
-# Compiler: vyper@03e096e74b53993e652ed83dddecbee6f889fcc5
+# Compiler: vyper==0.5.0b1
 """
 @title Dutch auction math
 @author Curve Finance
@@ -12,9 +12,11 @@
      quotes round up in favor of the receiver — the residual error is dwarfed
      by execution noise. Products are computed in checked uint256 arithmetic:
      quotes revert if a * b overflows; auction totals, amounts, and RAY
-     factors stay far below that domain by deployment policy. No Snekmate or
-     Yearn implementation code was used.
+     factors stay far below that domain by deployment policy.
 """
+
+
+from contracts.utils import constants as c
 
 
 error DivisionByZero:
@@ -34,7 +36,6 @@ error GrowthFactor:
 
 
 RAY: constant(uint256) = 10**27
-WAD: constant(uint256) = 10**18
 
 
 @internal
@@ -112,7 +113,7 @@ def total_price(
 @pure
 def unit_quote_wad(total_price: uint256, initial_amount: uint256) -> uint256:
     """@notice Calculate ceil(total_price * WAD / initial_amount)."""
-    return self.mul_div_up(total_price, WAD, initial_amount)
+    return self.mul_div_up(total_price, c.WAD, initial_amount)
 
 
 @internal
