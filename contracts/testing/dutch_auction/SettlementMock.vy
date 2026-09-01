@@ -1,5 +1,4 @@
 # pragma version 0.5.0b1
-# pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
 @title SettlementMock

@@ -209,7 +209,7 @@ def test_stage_without_enabled_adapters_grants_nothing(
 
 def test_stage_rejects_target_token(harness, want):
     want._mint_for_testing(harness.address, LOT_AMOUNT)
-    with boa.reverts(custom_err("TargetToken()")):
+    with boa.reverts(custom_err("WantNotSellable()")):
         harness.stage(want.address)
 
 
@@ -262,7 +262,7 @@ def test_enable_disable_authority_and_double_toggle(
         with boa.reverts(custom_err("AlreadyEnabled()")):
             harness.enable_adapter(adapter_cow)
 
-    with boa.env.prank(keeper), boa.reverts(custom_err("OnlyOwner()")):
+    with boa.env.prank(keeper), boa.reverts(custom_err("OnlyOwnerOrEmergency()")):
         harness.disable_adapter(adapter_cow)
     # Emergency can disable but never enable.
     with boa.env.prank(emergency_owner):
@@ -383,7 +383,7 @@ def test_sync_rejects_zero_executor(harness, keeper, token_a):
 
 def test_sync_rejects_target_token(harness, enable, keeper, want, token_a, adapter_cow, relayer):
     enable(harness, adapter_cow)
-    with boa.env.prank(keeper), boa.reverts(custom_err("TargetToken()")):
+    with boa.env.prank(keeper), boa.reverts(custom_err("WantNotSellable()")):
         harness.sync_executor_approvals(relayer, [token_a.address, want.address])
 
 

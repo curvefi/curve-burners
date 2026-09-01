@@ -1,0 +1,14 @@
+"""
+@title IComposableCow
+@author Curve Finance
+@license MIT
+@notice The ComposableCoW surface a conditional-order owner needs: creating a
+        conditional order that points at a handler.
+"""
+
+from contracts.burners.cow import gpv2
+
+
+@external
+def create(_params: gpv2.ConditionalOrderParams, _dispatch: bool):
+    ...

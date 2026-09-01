@@ -30,8 +30,8 @@
                  economic decision is delegated to msg.sender's check_order.
 """
 
-from ..auction.adapters import adapter_types
-from . import gpv2
+from contracts.burners.auction.adapters import adapter_types
+from contracts.burners.cow import gpv2
 
 
 error BadSettlement:
@@ -46,7 +46,7 @@ error BadVaultRelayer:
     pass
 
 
-error BadCowValidity:
+error ZeroOrderValidity:
     pass
 
 
@@ -89,7 +89,7 @@ def __init__(_settlement: address, _app_data: bytes32, _order_validity: uint256)
     @param _order_validity Seconds per stable-order bucket (handler quoting).
     """
     assert _settlement != empty(address), BadSettlement()
-    assert _order_validity > 0, BadCowValidity()
+    assert _order_validity > 0, ZeroOrderValidity()
     domain: bytes32 = staticcall Settlement(_settlement).domainSeparator()
     relayer: address = staticcall Settlement(_settlement).vaultRelayer()
     assert domain != empty(bytes32), BadDomainSeparator()

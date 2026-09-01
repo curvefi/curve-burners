@@ -1,6 +1,5 @@
 # pragma version 0.5.0b1
 # pragma nonreentrancy on
-# pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
 @title Auction adapter layer
@@ -30,8 +29,9 @@
 
 from ethereum.ercs import IERC20
 
-from . import adapter_types
-from .. import dutch_auction
+from contracts.burners.auction import dutch_auction
+from contracts.burners.auction.adapters import adapter_types
+from contracts.interfaces import IAdapterRegistry
 from contracts.utils import constants as c, roles, token
 
 uses: roles
@@ -69,10 +69,6 @@ error TooManyExecutors:
     pass
 
 
-interface AdapterRegistry:
-    def get_adapter(_verifier: address) -> adapter_types.AdapterConfig: view
-
-
 interface Verifier:
     def isValidSignature(
         _hash: bytes32, _signature: Bytes[adapter_types.MAX_SIGNATURE_LEN]
@@ -100,7 +96,7 @@ INVALID_SIGNATURE: constant(bytes4) = 0xffffffff
 MAX_EXECUTORS: constant(uint256) = 8
 
 # Adapter infrastructure, fixed at deployment (may be unset)
-registry: public(immutable(AdapterRegistry))
+registry: public(immutable(IAdapterRegistry))
 
 # Local adapter set and executor approvals. Executors are refcounted because
 # several adapters can share one (every permit2-family protocol pulls through
@@ -114,7 +110,7 @@ executors: public(DynArray[address, MAX_EXECUTORS])
 
 @deploy
 def __init__(_registry: address):
-    self.registry = AdapterRegistry(_registry)
+    self.registry = IAdapterRegistry(_registry)
 
 
 # Executor approvals
@@ -146,7 +142,7 @@ def sync_executor_approvals(_executor: address, _tokens: DynArray[IERC20, c.MAX_
     grant: bool = self.executor_refcount[_executor] > 0
     for coin: IERC20 in _tokens:
         if grant:
-            assert coin.address != self._auction_want(), dutch_auction.TargetToken()
+            assert coin.address != self._auction_want(), dutch_auction.WantNotSellable()
             token.max_approve(coin, _executor)
         else:
             token.clear_approve(coin, _executor)
@@ -235,7 +231,7 @@ def set_fallback_adapter(_verifier: address):
 
 @internal
 @view
-def _route_to(_verifier: address) -> bool:
+def _is_routable(_verifier: address) -> bool:
     # Both switches are live: the local set and the registry activation flag,
     # so either side kills routing immediately.
     if not self.enabled_adapters[_verifier]:
@@ -263,7 +259,7 @@ def isValidSignature(
             address,
         )
         if self.enabled_adapters[candidate]:
-            if not self._route_to(candidate):
+            if not self._is_routable(candidate):
                 return INVALID_SIGNATURE
             payload: Bytes[adapter_types.MAX_SIGNATURE_LEN] = b""
             if len(_signature) > adapter_types.ADAPTER_PREFIX_LEN:
@@ -275,7 +271,7 @@ def isValidSignature(
             return staticcall Verifier(candidate).isValidSignature(_hash, payload)
 
     fallback: address = self.fallback_adapter
-    if fallback == empty(address) or not self._route_to(fallback):
+    if fallback == empty(address) or not self._is_routable(fallback):
         return INVALID_SIGNATURE
     return staticcall Verifier(fallback).isValidSignature(_hash, _signature)
 

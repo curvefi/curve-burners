@@ -1,7 +1,5 @@
 # pragma version 0.5.0b1
-# pragma evm-version cancun
 # SPDX-License-Identifier: MIT
-# Compiler: vyper==0.5.0b1
 """
 @title Dutch auction math
 @author Curve Finance

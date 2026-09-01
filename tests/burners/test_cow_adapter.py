@@ -252,7 +252,7 @@ def test_deploy_rejects_zero_settlement(adapter_deployer):
 
 
 def test_deploy_rejects_zero_order_validity(adapter_deployer, settlement):
-    with boa.reverts(custom_err("BadCowValidity()")):
+    with boa.reverts(custom_err("ZeroOrderValidity()")):
         adapter_deployer.deploy(settlement, APP_DATA, 0)
 
 

@@ -392,7 +392,7 @@ def auction(want, proceeds_receiver):
 
 @pytest.fixture
 def handler():
-    return boa.load("contracts/burners/cow/WatchtowerHandler.vy", name="CowWatchtowerHandler")
+    return boa.load("contracts/burners/cow/WatchtowerHandler.vy", name="WatchtowerHandler")
 
 
 def register_token(auction, token, generation=1):
@@ -686,7 +686,7 @@ def test_tradeable_order_quote_parity_across_buckets_and_floor(
 def test_tradeable_order_zero_quote_reverts(handler, auction, token, sender):
     encoded_static_input = register_token(auction, token)
     set_live_lot(auction, token, start_total=0, floor_total=0)
-    with boa.reverts(custom_err("ZeroCowQuote()")):
+    with boa.reverts(custom_err("ZeroQuote()")):
         get_order(handler, auction, sender, encoded_static_input)
 
 

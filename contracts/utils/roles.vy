@@ -1,6 +1,4 @@
 # pragma version 0.5.0b1
-# pragma nonreentrancy on
-# pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
 @title Role source module
@@ -30,8 +28,10 @@ error OnlyOwner:
     pass
 
 
-# Both roles are read live from this source (the FeeCollector), so governance
-# of the importing contract always matches the protocol's current owners.
+error OnlyOwnerOrEmergency:
+    pass
+
+
 role_source: public(immutable(RoleSource))
 
 
@@ -67,14 +67,13 @@ def _check_owner():
 @internal
 @view
 def _check_owner_or_emergency():
-    assert msg.sender in [self._owner(), self._emergency_owner()], OnlyOwner()
+    assert msg.sender in [self._owner(), self._emergency_owner()], OnlyOwnerOrEmergency()
 
 
-# Both views are reentrant on purpose: they only relay the role source's
-# state, which the importer's lock does not guard anyway.
+# No nonreentrancy pragma: both views only relay the role source's state,
+# which the importer's lock does not guard anyway.
 @external
 @view
-@reentrant
 def owner() -> address:
     """@notice Governance owner, read live from the role source."""
     return self._owner()
@@ -82,7 +81,6 @@ def owner() -> address:
 
 @external
 @view
-@reentrant
 def emergency_owner() -> address:
     """@notice Emergency role, read live from the role source."""
     return self._emergency_owner()

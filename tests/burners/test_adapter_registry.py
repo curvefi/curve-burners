@@ -212,7 +212,7 @@ def test_disable_adapter_rejects_outsider(registry, owner, verifier, executor, a
     _register(registry, owner, verifier, executor)
     with boa.env.prank(owner):
         registry.activate_adapter(verifier)
-    with boa.env.prank(attacker), boa.reverts(custom_err("OnlyOwner()")):
+    with boa.env.prank(attacker), boa.reverts(custom_err("OnlyOwnerOrEmergency()")):
         registry.disable_adapter(verifier)
 
 
@@ -255,7 +255,7 @@ def test_roles_follow_source_emergency_owner_change(
     with boa.env.prank(owner):
         registry.activate_adapter(verifier)
     role_source.set_emergency_owner(attacker)
-    with boa.env.prank(emergency_owner), boa.reverts(custom_err("OnlyOwner()")):
+    with boa.env.prank(emergency_owner), boa.reverts(custom_err("OnlyOwnerOrEmergency()")):
         registry.disable_adapter(verifier)
     with boa.env.prank(attacker):
         registry.disable_adapter(verifier)

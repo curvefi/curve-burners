@@ -24,6 +24,11 @@
      later fills of the same lot.
 """
 
+from ethereum.ercs import IERC20
+
+from contracts.burners.auction import auction_types
+from contracts.interfaces import IDutchAuctionBurner
+
 
 error WrongChain:
     pass
@@ -99,23 +104,6 @@ struct ResolvedOrder:
     taker_receiver_offset: uint256
 
 
-# Mirror of the auction core's lot record. Time bounds are not part of the
-# record: the auction's calendar publishes them via epoch_bounds.
-struct Lot:
-    epoch: uint256
-    initial_amount: uint256
-
-
-interface DutchAuction:
-    def want() -> address: view
-    def proceeds_receiver() -> address: view
-    def current_epoch() -> uint256: view
-    def available(_from: address) -> uint256: view
-    def getAmountNeeded(_from: address, amountToTake: uint256) -> uint256: view
-    def lots(_token: address) -> Lot: view
-    def epoch_bounds(_epoch: uint256) -> (uint256, uint256): view
-
-
 RESOLVER_VERSION: public(constant(uint256)) = 1
 
 # abi-encoded DutchAuctionIntent: six static head words.
@@ -152,11 +140,11 @@ def resolve(_payload: Bytes[INTENT_PAYLOAD_LEN]) -> ResolvedOrder:
     assert intent.auction != empty(address), BadAuction()
     assert convert(intent.deadline, uint256) >= block.timestamp, IntentExpired()
 
-    auction: DutchAuction = DutchAuction(intent.auction)
+    auction: IDutchAuctionBurner = IDutchAuctionBurner(intent.auction)
     epoch: uint256 = staticcall auction.current_epoch()
     assert convert(intent.auction_epoch, uint256) == epoch, WrongEpoch()
 
-    # available() is 0 for unstaged, cancelled, out-of-window, killed, and
+    # available() is 0 for unstaged, fenced, out-of-window, killed, and
     # drained lots alike; take() would reject all of them the same way.
     available_amount: uint256 = staticcall auction.available(intent.sell_token)
     sell_amount: uint256 = min(intent.max_sell_amount, available_amount)
@@ -165,7 +153,7 @@ def resolve(_payload: Bytes[INTENT_PAYLOAD_LEN]) -> ResolvedOrder:
     payment: uint256 = staticcall auction.getAmountNeeded(intent.sell_token, sell_amount)
     want: address = staticcall auction.want()
     proceeds_receiver: address = staticcall auction.proceeds_receiver()
-    lot: Lot = staticcall auction.lots(intent.sell_token)
+    lot: auction_types.Lot = staticcall auction.lots(IERC20(intent.sell_token))
     lot_start: uint256 = 0
     lot_end: uint256 = 0
     lot_start, lot_end = staticcall auction.epoch_bounds(lot.epoch)

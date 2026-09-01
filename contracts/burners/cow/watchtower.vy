@@ -1,5 +1,4 @@
 # pragma version 0.5.0b1
-# pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
 @title Dutch auction watchtower publishing shim
@@ -10,13 +9,14 @@
         watchtower discovers and publishes auction orders automatically.
 @dev Discovery only, never authority: settlement validation runs through the
      auction's signature router and its CoW adapter's economic checks, so
-     neither the registration nor the handler can weaken what settles. The importing contract stays the
-     conditional-order owner because custody and vault-relayer approvals live
-     there; order generation and verification logic live in the standalone
-     handler contract (contracts/burners/cow/WatchtowerHandler.vy).
+     neither the registration nor the handler can weaken what settles. The
+     importing contract stays the conditional-order owner because custody and
+     vault-relayer approvals live there; order generation and verification
+     live in the standalone handler (contracts/burners/cow/WatchtowerHandler.vy).
 """
 
-from . import gpv2
+from contracts.burners.cow import gpv2
+from contracts.interfaces import IComposableCow
 
 
 error BadComposableCow:
@@ -25,10 +25,6 @@ error BadComposableCow:
 
 error BadHandler:
     pass
-
-
-interface ComposableCow:
-    def create(_params: gpv2.ConditionalOrderParams, _dispatch: bool): nonpayable
 
 
 event WatchtowerConfigured:
@@ -45,7 +41,7 @@ event ConditionalOrderRegistered:
 # Watchtower wiring. The importing contract deliberately starts unconfigured;
 # each reconfiguration bumps the generation so stale registrations are
 # re-created for the new handler on the next staging.
-composable_cow: public(ComposableCow)
+composable_cow: public(IComposableCow)
 cow_handler: public(address)
 cow_generation: public(uint256)
 registered_generation: public(HashMap[address, uint256])
@@ -56,7 +52,7 @@ def _configure_watchtower(_composable_cow: address, _handler: address):
     assert _composable_cow != empty(address), BadComposableCow()
     assert _handler != empty(address), BadHandler()
 
-    self.composable_cow = ComposableCow(_composable_cow)
+    self.composable_cow = IComposableCow(_composable_cow)
     self.cow_handler = _handler
     self.cow_generation += 1
 

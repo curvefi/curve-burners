@@ -1,6 +1,5 @@
 # pragma version 0.5.0b1
 # pragma nonreentrancy on
-# pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
 @title Dutch auction core module
@@ -27,7 +26,7 @@
 
 from ethereum.ercs import IERC20
 
-from . import dutch_auction_math as auction_math
+from contracts.burners.auction import auction_types, dutch_auction_math as auction_math
 
 
 error BadWant:
@@ -35,10 +34,9 @@ error BadWant:
 
 
 # The payment token never becomes inventory: raised when staging the want
-# token here and by the adapters layer's allowance sync. Declared in the core
-# (error names are globally unique per compilation unit) so the settlement
-# plumbing depends on the core, never the other way around.
-error TargetToken:
+# token here and by the adapters layer's allowance sync (declared in the core
+# so the settlement plumbing depends on the core, never the other way around).
+error WantNotSellable:
     pass
 
 
@@ -103,7 +101,7 @@ interface AuctionTaker:
     ): nonpayable
 
 
-event LotSynced:
+event LotStaged:
     token: indexed(IERC20)
     epoch: indexed(uint256)
     initial_amount: uint256
@@ -132,17 +130,13 @@ event EconomicsResynced:
     reconfigured_epoch: uint256
 
 
-struct Lot:
-    epoch: uint256
-    initial_amount: uint256
-
-
 # Auction economics. Mutable only through _resync_economics: lots store no
 # curve snapshot, so a retune reprices live lots immediately; a want change
 # under an open window additionally fences out the current epoch's lots so
 # the payment denomination never switches while fills can run.
 proceeds_receiver: public(immutable(address))
-# Private storage so the module can export an explicit reentrant want() view.
+# Private storage: a public(IERC20) getter would not satisfy the Yearn ABI's
+# address-returning want() under `implements`, so the view is explicit.
 want_token: IERC20
 start_total: public(uint256)
 floor_total: public(uint256)
@@ -153,9 +147,7 @@ step_duration: public(uint256)
 # in-flight transactions) could be priced in the old denomination. 0 means
 # the want was never changed.
 reconfigured_epoch: public(uint256)
-
-# Per-epoch lot accounting
-lots: public(HashMap[IERC20, Lot])
+lots: public(HashMap[IERC20, auction_types.Lot])
 
 
 @deploy
@@ -282,7 +274,7 @@ def current_epoch() -> uint256:
 @view
 @reentrant
 def want() -> address:
-    """@notice Return the target token accepted as payment."""
+    """@notice Return the token accepted as payment."""
     return self.want_token.address
 
 
@@ -292,7 +284,7 @@ def want() -> address:
 @internal
 @view
 def _check_stageable(_token: IERC20):
-    assert _token != self.want_token, TargetToken()
+    assert _token != self.want_token, WantNotSellable()
 
 
 @internal
@@ -309,12 +301,12 @@ def _stage_lot(_token: IERC20, _epoch: uint256) -> uint256:
     """
     self._check_stageable(_token)
     amount: uint256 = staticcall _token.balanceOf(self)
-    self.lots[_token] = Lot(epoch=_epoch, initial_amount=amount)
+    self.lots[_token] = auction_types.Lot(epoch=_epoch, initial_amount=amount)
     self._sync_stage_approvals(_token.address)
     start: uint256 = 0
     end: uint256 = 0
     start, end = self._epoch_bounds(_epoch)
-    log LotSynced(
+    log LotStaged(
         token=_token,
         epoch=_epoch,
         initial_amount=amount,
@@ -331,7 +323,7 @@ def _stage_lot(_token: IERC20, _epoch: uint256) -> uint256:
 
 @internal
 @view
-def _is_active(_from: IERC20, _lot: Lot, _timestamp: uint256) -> bool:
+def _is_active(_from: IERC20, _lot: auction_types.Lot, _timestamp: uint256) -> bool:
     if _from == self.want_token:
         return False
     if _lot.epoch == 0 or _lot.epoch != self._auction_epoch(_timestamp):
@@ -350,7 +342,7 @@ def _is_active(_from: IERC20, _lot: Lot, _timestamp: uint256) -> bool:
 
 @internal
 @view
-def _available_unchecked(_from: IERC20, _lot: Lot) -> uint256:
+def _available_unchecked(_from: IERC20, _lot: auction_types.Lot) -> uint256:
     balance: uint256 = staticcall _from.balanceOf(self)
     return min(_lot.initial_amount, balance)
 
@@ -358,7 +350,7 @@ def _available_unchecked(_from: IERC20, _lot: Lot) -> uint256:
 @internal
 @view
 def _available(_from: IERC20, _timestamp: uint256) -> uint256:
-    lot: Lot = self.lots[_from]
+    lot: auction_types.Lot = self.lots[_from]
     if not self._is_active(_from, lot, _timestamp):
         return 0
     return self._available_unchecked(_from, lot)
@@ -366,7 +358,7 @@ def _available(_from: IERC20, _timestamp: uint256) -> uint256:
 
 @internal
 @view
-def _lot_total_price(_lot: Lot, _timestamp: uint256) -> uint256:
+def _lot_total_price(_lot: auction_types.Lot, _timestamp: uint256) -> uint256:
     start: uint256 = 0
     end: uint256 = 0
     start, end = self._epoch_bounds(_lot.epoch)
@@ -382,7 +374,7 @@ def _lot_total_price(_lot: Lot, _timestamp: uint256) -> uint256:
 @internal
 @view
 def _quote_unchecked(_from: IERC20, _amount: uint256, _timestamp: uint256) -> uint256:
-    lot: Lot = self.lots[_from]
+    lot: auction_types.Lot = self.lots[_from]
     return auction_math.proportional_payment(
         self._lot_total_price(lot, _timestamp), _amount, lot.initial_amount
     )
@@ -416,7 +408,7 @@ def price(_from: address, _ts: uint256 = block.timestamp) -> uint256:
     coin: IERC20 = IERC20(_from)
     if self._available(coin, _ts) == 0:
         return 0
-    lot: Lot = self.lots[coin]
+    lot: auction_types.Lot = self.lots[coin]
     return auction_math.unit_quote_wad(
         self._lot_total_price(lot, _ts), lot.initial_amount
     )
@@ -454,7 +446,7 @@ def quote(_token: address, _sell_amount: uint256, _ts: uint256 = block.timestamp
     @param _ts Timestamp to evaluate at; defaults to now.
     """
     coin: IERC20 = IERC20(_token)
-    lot: Lot = self.lots[coin]
+    lot: auction_types.Lot = self.lots[coin]
     if not self._is_active(coin, lot, _ts):
         return 0
     assert _sell_amount <= lot.initial_amount, AmountExceedsLot()
@@ -465,7 +457,7 @@ def quote(_token: address, _sell_amount: uint256, _ts: uint256 = block.timestamp
 
 
 @internal
-def _take_core(
+def _take(
     _from: IERC20,
     _max_amount: uint256,
     _receiver: address,
@@ -476,7 +468,7 @@ def _take_core(
     amount_taken: uint256 = min(_max_amount, available_amount)
     assert amount_taken > 0, NothingAvailable()
 
-    lot: Lot = self.lots[_from]
+    lot: auction_types.Lot = self.lots[_from]
     payment: uint256 = self._quote_unchecked(_from, amount_taken, block.timestamp)
 
     assert extcall _from.transfer(_receiver, amount_taken, default_return_value=True)
@@ -536,7 +528,7 @@ def take(
     """
     amount_taken: uint256 = 0
     payment: uint256 = 0
-    amount_taken, payment = self._take_core(IERC20(_from), maxAmount, takerReceiver, data)
+    amount_taken, payment = self._take(IERC20(_from), maxAmount, takerReceiver, data)
     return amount_taken
 
 
@@ -560,7 +552,7 @@ def take_with_limits(
 
     amount_taken: uint256 = 0
     payment: uint256 = 0
-    amount_taken, payment = self._take_core(IERC20(_from), _max_amount, _receiver, _data)
+    amount_taken, payment = self._take(IERC20(_from), _max_amount, _receiver, _data)
     assert amount_taken >= _min_amount, InsufficientAmount()
     assert payment <= _max_payment, ExcessivePayment()
     return amount_taken, payment
@@ -600,7 +592,7 @@ def check_order(
          take callback.
     """
     token: IERC20 = IERC20(_sell_token)
-    lot: Lot = self.lots[token]
+    lot: auction_types.Lot = self.lots[token]
     # sell != buy is implied: the buy token must equal want and _is_active
     # rejects want as a lot token.
     if _buy_token != self.want_token.address:

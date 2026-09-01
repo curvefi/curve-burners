@@ -2,7 +2,7 @@
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
-@title CowWatchtowerHandler
+@title WatchtowerHandler
 @author Curve Finance
 @license MIT
 @notice Standalone ComposableCoW IConditionalOrderGenerator for Dutch
@@ -20,32 +20,20 @@
      handler; stale registrations then stop validating generation checks.
 """
 
-from . import gpv2
+from ethereum.ercs import IERC20
+
+from contracts.burners.auction import auction_types
+from contracts.burners.cow import gpv2
+from contracts.interfaces import IDutchAuctionBurner
 
 
-error ZeroCowQuote:
+# The auction's CoW rail is switched off.
+error CowDisabled:
     pass
 
 
-# Mirror of the auction core's lot record. Time bounds are not part of the
-# record: the auction's calendar publishes them via epoch_bounds.
-struct Lot:
-    epoch: uint256
-    initial_amount: uint256
-
-
-interface DutchAuction:
-    def cow_enabled() -> bool: view
-    def fallback_adapter() -> address: view
-    def cow_generation() -> uint256: view
-    def registered_generation(_token: address) -> uint256: view
-    def cow_next_poll(_token: address) -> uint256: view
-    def want() -> address: view
-    def proceeds_receiver() -> address: view
-    def lots(_token: address) -> Lot: view
-    def epoch_bounds(_epoch: uint256) -> (uint256, uint256): view
-    def available(_token: address) -> uint256: view
-    def quote(_token: address, _sell_amount: uint256, _ts: uint256) -> uint256: view
+error ZeroQuote:
+    pass
 
 
 # The CoW protocol constants live with the auction's fallback CowAdapter; the
@@ -58,13 +46,13 @@ interface CowAdapter:
 
 ERC165_INTERFACE_ID: constant(bytes4) = 0x01ffc9a7
 
-HANDLER_VERSION: public(constant(String[20])) = "DutchAuctionHandler"
+HANDLER_VERSION: public(constant(String[20])) = "WatchtowerHandler"
 
 
 @internal
 @view
-def _decode_registered_static_input(
-    _auction: DutchAuction,
+def _registered_token(
+    _auction: IDutchAuctionBurner,
     _static_input: Bytes[gpv2.MAX_HANDLER_INPUT_LEN],
 ) -> address:
     ok: bool = False
@@ -90,14 +78,14 @@ def getTradeableOrder(
     _offchain_input: Bytes[gpv2.MAX_OFFCHAIN_INPUT_LEN],
 ) -> gpv2.GPv2Order:
     """Generate a canonical, generation-aware GPv2 sell order for a watchtower."""
-    auction: DutchAuction = DutchAuction(_owner)
+    auction: IDutchAuctionBurner = IDutchAuctionBurner(_owner)
     if not staticcall auction.cow_enabled():
-        raise gpv2.CowDisabled()
+        raise CowDisabled()
     if len(_offchain_input) != 0:
         raise gpv2.OrderNotValid(reason="BadHandlerInput")
 
-    token: address = self._decode_registered_static_input(auction, _static_input)
-    lot: Lot = staticcall auction.lots(token)
+    token: address = self._registered_token(auction, _static_input)
+    lot: auction_types.Lot = staticcall auction.lots(IERC20(token))
     lot_start: uint256 = 0
     lot_end: uint256 = 0
     lot_start, lot_end = staticcall auction.epoch_bounds(lot.epoch)
@@ -120,7 +108,7 @@ def getTradeableOrder(
     # Quoted by the auction itself at the stable bucket timestamp — signed
     # amounts are bounded by the lot snapshot, not the live remainder.
     buy_amount: uint256 = staticcall auction.quote(token, available, quote_time)
-    assert buy_amount > 0, ZeroCowQuote()
+    assert buy_amount > 0, ZeroQuote()
 
     return gpv2._build_sell_order(
         token,
@@ -146,14 +134,14 @@ def verify(
     _order: gpv2.GPv2Order,
 ):
     """Validate every economic GPv2 field and reject disabled or stale conditional orders."""
-    auction: DutchAuction = DutchAuction(_owner)
+    auction: IDutchAuctionBurner = IDutchAuctionBurner(_owner)
     if not staticcall auction.cow_enabled():
-        raise gpv2.CowDisabled()
+        raise CowDisabled()
     if len(_offchain_input) != 0:
         raise gpv2.OrderNotValid(reason="BadHandlerInput")
 
-    token: address = self._decode_registered_static_input(auction, _static_input)
-    lot: Lot = staticcall auction.lots(token)
+    token: address = self._registered_token(auction, _static_input)
+    lot: auction_types.Lot = staticcall auction.lots(IERC20(token))
     lot_start: uint256 = 0
     lot_end: uint256 = 0
     lot_start, lot_end = staticcall auction.epoch_bounds(lot.epoch)

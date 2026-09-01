@@ -227,11 +227,11 @@ def test_underfunded_route_reverts(auction, taker, stage, sell_token, want, solv
 
 def test_callback_rejects_direct_calls(taker, auction, solver):
     with boa.env.prank(solver):
-        with boa.reverts(custom_err("OnlyTakenAuction()")):
+        with boa.reverts(custom_err("OnlyActiveAuction()")):
             taker.auctionTakeCallback(ZERO_ADDRESS, solver, 0, 0, b"")
     # Even the auction itself cannot enter outside an active take.
     with boa.env.prank(auction.address):
-        with boa.reverts(custom_err("OnlyTakenAuction()")):
+        with boa.reverts(custom_err("OnlyActiveAuction()")):
             taker.auctionTakeCallback(ZERO_ADDRESS, solver, 0, 0, b"")
 
 

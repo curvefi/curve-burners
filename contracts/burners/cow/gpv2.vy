@@ -1,5 +1,4 @@
 # pragma version 0.5.0b1
-# pragma evm-version cancun
 # SPDX-License-Identifier: MIT
 """
 @title CoW GPv2 order library
@@ -27,13 +26,6 @@ error PollTryAtEpoch:
     reason: String[32]
 
 
-# Auction-specific: CoW rail switched off.
-error CowDisabled:
-    pass
-
-
-# Raised by _reject_muxer_probe; a dedicated selector so the revert is
-# self-describing in traces.
 error NotSignatureVerifierMuxer:
     pass
 

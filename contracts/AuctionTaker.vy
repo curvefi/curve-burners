@@ -1,6 +1,4 @@
 # pragma version 0.5.0b1
-# The auction callback carries unbounded data (Bytes[INF]) — Venom required.
-# pragma experimental-codegen
 # pragma nonreentrancy on
 # pragma evm-version cancun
 # SPDX-License-Identifier: MIT
@@ -38,6 +36,8 @@
 
 from ethereum.ercs import IERC20
 
+from contracts.interfaces import IDutchAuction
+
 
 error ZeroAuction:
     pass
@@ -47,7 +47,7 @@ error ZeroReceiver:
     pass
 
 
-error OnlyTakenAuction:
+error OnlyActiveAuction:
     pass
 
 
@@ -55,19 +55,7 @@ error ProfitShortfall:
     pass
 
 
-interface DutchAuction:
-    def take(
-        _from: address,
-        maxAmount: uint256,
-        takerReceiver: address,
-        data: Bytes[INF],
-    ) -> uint256: nonpayable
-    def want() -> address: view
-
-
 # One route step, executed via raw_call with this contract as the sender.
-# Unbounded bytes cannot live inside a struct, so each step carries its own
-# bound; it comfortably fits aggregator swap calldata.
 struct Call:
     target: address
     data: Bytes[MAX_CALL_DATA]
@@ -82,21 +70,23 @@ event RouteTaken:
     profit: uint256
 
 
-# The auction forwards callback data unbounded; these bounds only cap the
-# route decoded on this side (the memory frame is allocated for the worst
-# case, so they trade route headroom against a fixed gas floor).
-MAX_CALLS: constant(uint256) = 8
-MAX_CALL_DATA: constant(uint256) = 8192
+# The auction forwards callback data unbounded, so the bound is set on this
+# side: longer data simply fails to decode. abi_encode(DynArray[Call, MAX_CALLS])
+# worst case is 32 (offset) + 32 (length) + MAX_CALLS * (32 + 96 + MAX_CALL_DATA)
+# bytes, which must fit MAX_CALLBACK_DATA.
+MAX_CALLBACK_DATA: constant(uint256) = 8192
+MAX_CALLS: constant(uint256) = 4
+MAX_CALL_DATA: constant(uint256) = 1888
 
 # The auction allowed to call back during the currently executing take, and
 # the payment it quoted in the callback (reported in RouteTaken).
-taken_auction: transient(address)
-taken_payment: transient(uint256)
+active_auction: transient(address)
+quoted_payment: transient(uint256)
 
 
 @external
 def take_with_route(
-    _auction: DutchAuction,
+    _auction: IDutchAuction,
     _from: IERC20,
     _max_amount: uint256,
     _min_profit: uint256,
@@ -118,11 +108,11 @@ def take_with_route(
     assert _auction.address != empty(address), ZeroAuction()
     assert _profit_receiver != empty(address), ZeroReceiver()
 
-    self.taken_auction = _auction.address
+    self.active_auction = _auction.address
     amount_taken: uint256 = extcall _auction.take(
         _from.address, _max_amount, self, abi_encode(_calls)
     )
-    self.taken_auction = empty(address)
+    self.active_auction = empty(address)
 
     # Everything left after the auction pulled its payment is profit; unspent
     # lot tokens are swept alongside so nothing stays claimable on the taker.
@@ -140,7 +130,7 @@ def take_with_route(
         token=_from.address,
         caller=msg.sender,
         amount_taken=amount_taken,
-        payment=self.taken_payment,
+        payment=self.quoted_payment,
         profit=profit,
     )
     return profit
@@ -153,7 +143,7 @@ def auctionTakeCallback(
     _sender: address,
     _amount_taken: uint256,
     _amount_needed: uint256,
-    _data: Bytes[INF],
+    _data: Bytes[MAX_CALLBACK_DATA],
 ):
     """
     @notice Auction callback: run the route, then fund the payment pull.
@@ -161,7 +151,7 @@ def auctionTakeCallback(
          lock while the auction calls back. Only the transiently recorded
          auction of the active take may enter.
     """
-    assert msg.sender == self.taken_auction, OnlyTakenAuction()
+    assert msg.sender == self.active_auction, OnlyActiveAuction()
 
     calls: DynArray[Call, MAX_CALLS] = abi_decode(_data, DynArray[Call, MAX_CALLS])
     for call: Call in calls:
@@ -170,6 +160,6 @@ def auctionTakeCallback(
     # Exact-amount allowance for the auction's payment pull; the pull returns
     # it to zero in the same transaction. want() is one of the auction's few
     # reentrant views, so it is readable while the auction's lock is held.
-    want: IERC20 = IERC20(staticcall DutchAuction(msg.sender).want())
+    want: IERC20 = IERC20(staticcall IDutchAuction(msg.sender).want())
     assert extcall want.approve(msg.sender, _amount_needed, default_return_value=True)
-    self.taken_payment = _amount_needed
+    self.quoted_payment = _amount_needed

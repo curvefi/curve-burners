@@ -576,7 +576,7 @@ def test_collect_pays_fee_moves_custody_and_snapshots_lot(deployment: AuctionDep
     lot_synced = next(
         log
         for log in deployment.fee_collector.get_logs()
-        if _event_name(log) == "LotSynced"
+        if _event_name(log) == "LotStaged"
     )
     lot = _lot_with_bounds(deployment, deployment.sell_token)
 
@@ -1414,7 +1414,7 @@ def test_permissionless_sync_executor_approvals_follows_derived_state(
         deployment.burner.sync_executor_approvals(
             ZERO_ADDRESS, [deployment.sell_token.address]
         )
-    with boa.env.prank(deployment.keeper), boa.reverts(custom_err("TargetToken()")):
+    with boa.env.prank(deployment.keeper), boa.reverts(custom_err("WantNotSellable()")):
         deployment.burner.sync_executor_approvals(relayer, [deployment.target.address])
 
     # While the executor is referenced, sync is a top-up path and stays at max.
@@ -2037,7 +2037,7 @@ def test_recover_during_collect_frame_recollect_restages_unless_killed(
     generation = _configure_and_enable_cow(deployment)
     staged, _ = _stage(deployment, deployment.sell_token, 100 * WAD)
     first_lot = _lot_with_bounds(deployment, deployment.sell_token)
-    assert deployment.burner.created(deployment.sell_token)
+    assert deployment.burner.cow_registered(deployment.sell_token)
     assert (
         deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
         == MAX_UINT256
@@ -2122,7 +2122,7 @@ def test_recover_before_first_staging_leaves_no_state_and_collect_restages(
         deployment.burner.recover([deployment.sell_token.address])
 
     assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_EPOCH] == 0
-    assert not deployment.burner.created(deployment.sell_token)
+    assert not deployment.burner.cow_registered(deployment.sell_token)
     assert deployment.composable_cow.create_count() == 0
     assert deployment.sell_token.balanceOf(deployment.burner) == 0
     assert (
@@ -2149,7 +2149,7 @@ def test_recover_before_first_staging_leaves_no_state_and_collect_restages(
     assert refreshed_lot[LOT_EPOCH] == recovery_epoch
     assert refreshed_lot[LOT_INITIAL_AMOUNT] == expected_snapshot
     assert deployment.sell_token.balanceOf(deployment.keeper) == keeper_before + fee
-    assert deployment.burner.created(deployment.sell_token)
+    assert deployment.burner.cow_registered(deployment.sell_token)
     assert deployment.composable_cow.create_count() == 1
     assert (
         deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)

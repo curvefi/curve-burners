@@ -46,13 +46,14 @@
 
 from ethereum.ercs import IERC20
 
-from ..interfaces import IDutchAuction, IFeeCollector
-from ..utils import constants as c, recovery, roles
-from .auction import dutch_auction
-from .auction.adapters import adapters
-from .cow import gpv2, watchtower as cow_watchtower
+from contracts.interfaces import IDutchAuction, IDutchAuctionBurner, IFeeCollector
+from contracts.utils import constants as c, recovery, roles
+from contracts.burners.auction import dutch_auction
+from contracts.burners.auction.adapters import adapters
+from contracts.burners.cow import gpv2, watchtower as cow_watchtower
 
 implements: IDutchAuction
+implements: IDutchAuctionBurner
 initializes: roles
 initializes: dutch_auction
 initializes: adapters[roles := roles]
@@ -102,9 +103,6 @@ exports: (
 )
 
 
-# Shared authorization/lot errors are reused from the auction modules
-# (roles.OnlyOwner, dutch_auction.AmountExceedsLot); only
-# burner-specific conditions are declared here.
 error BadFeeCollector:
     pass
 
@@ -190,8 +188,8 @@ def __init__(
 # Shared helpers
 
 
-# Reentrant like the core's want(): only echoes configuration, and take()
-# callbacks need the payment token while the contract-wide lock is held.
+# Reentrant like the core's want() getter: only echoes configuration, and
+# take() callbacks need the payment token while the contract-wide lock is held.
 @external
 @view
 @reentrant
@@ -431,8 +429,8 @@ def cow_enabled() -> bool:
 
 @external
 @view
-def created(_token: address) -> bool:
-    """@notice Return whether token is registered for the current CoW generation."""
+def cow_registered(_token: address) -> bool:
+    """@notice Whether the token's conditional order is registered for the current generation."""
     generation: uint256 = cow_watchtower.cow_generation
     return generation != 0 and cow_watchtower.registered_generation[_token] == generation
 
@@ -465,7 +463,7 @@ def _cow_rail_enabled() -> bool:
     # Mirror the signature router's switches — the local set AND the registry
     # activation flag — so a registry disable also stops registrations and
     # watchtower publishing: the CoW rail behaves like any other adapter.
-    return adapters._route_to(adapters.fallback_adapter)
+    return adapters._is_routable(adapters.fallback_adapter)
 
 
 # Recovery and interface discovery

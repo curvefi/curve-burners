@@ -1,0 +1,327 @@
+"""
+@title IDutchAuctionBurner
+@author Curve Finance
+@license MIT
+@notice Full external ABI of DutchAuctionBurner: the Yearn-compatible
+        IDutchAuction subset plus the auction core, adapter router, watchtower
+        registration, roles, and FeeCollector integration surfaces.
+@dev The burner `implements` this file, so every declaration is checked
+     against the real surface at compile time; peer contracts (watchtower
+     handler, intent resolver) and tooling read the burner through it; the
+     lot record comes from auction_types, so nothing is mirrored.
+"""
+
+from ethereum.ercs import IERC20
+
+from contracts.burners.auction import auction_types
+from contracts.burners.auction.adapters import adapter_types
+from contracts.interfaces import IAdapterRegistry, IComposableCow
+from contracts.utils import constants as c, roles
+
+
+# Auction core
+
+
+@external
+@view
+def current_epoch() -> uint256:
+    ...
+
+
+@external
+@view
+def want() -> address:
+    ...
+
+
+@external
+@view
+def proceeds_receiver() -> address:
+    ...
+
+
+@external
+@view
+def start_total() -> uint256:
+    ...
+
+
+@external
+@view
+def floor_total() -> uint256:
+    ...
+
+
+@external
+@view
+def decay_factor_ray() -> uint256:
+    ...
+
+
+@external
+@view
+def step_duration() -> uint256:
+    ...
+
+
+@external
+@view
+def reconfigured_epoch() -> uint256:
+    ...
+
+
+@external
+@view
+def lots(_token: IERC20) -> auction_types.Lot:
+    ...
+
+
+@external
+@view
+def epoch_bounds(_epoch: uint256) -> (uint256, uint256):
+    ...
+
+
+@external
+@view
+def available(_from: address, _ts: uint256 = ...) -> uint256:
+    ...
+
+
+@external
+@view
+def price(_from: address, _ts: uint256 = ...) -> uint256:
+    ...
+
+
+@external
+@view
+def getAmountNeeded(_from: address, amountToTake: uint256, _ts: uint256 = ...) -> uint256:
+    ...
+
+
+@external
+@view
+def quote(_token: address, _sell_amount: uint256, _ts: uint256 = ...) -> uint256:
+    ...
+
+
+@external
+@view
+def check_order(
+    _sell_token: address,
+    _buy_token: address,
+    _receiver: address,
+    _sell_amount: uint256,
+    _min_buy_amount: uint256,
+    _valid_to: uint256,
+) -> String[32]:
+    ...
+
+
+@external
+def take(
+    _from: address,
+    maxAmount: uint256,
+    takerReceiver: address,
+    data: Bytes[...],
+) -> uint256:
+    ...
+
+
+@external
+def take_with_limits(
+    _from: address,
+    _max_amount: uint256,
+    _min_amount: uint256,
+    _max_payment: uint256,
+    _receiver: address,
+    _deadline: uint256,
+    _data: Bytes[...],
+) -> (uint256, uint256):
+    ...
+
+
+# Adapter router
+
+
+@external
+@view
+def registry() -> IAdapterRegistry:
+    ...
+
+
+@external
+@view
+def enabled_adapters(_verifier: address) -> bool:
+    ...
+
+
+@external
+@view
+def fallback_adapter() -> address:
+    ...
+
+
+@external
+@view
+def executor_refcount(_executor: address) -> uint256:
+    ...
+
+
+@external
+@view
+def executors(_index: uint256) -> address:
+    ...
+
+
+@external
+@view
+def isValidSignature(
+    _hash: bytes32, _signature: Bytes[adapter_types.MAX_SIGNATURE_LEN]
+) -> bytes4:
+    ...
+
+
+@external
+def enable_adapter(_verifier: address):
+    ...
+
+
+@external
+def disable_adapter(_verifier: address):
+    ...
+
+
+@external
+def set_fallback_adapter(_verifier: address):
+    ...
+
+
+@external
+def sync_executor_approvals(_executor: address, _tokens: DynArray[IERC20, c.MAX_COINS]):
+    ...
+
+
+# Watchtower registration
+
+
+@external
+@view
+def composable_cow() -> IComposableCow:
+    ...
+
+
+@external
+@view
+def cow_handler() -> address:
+    ...
+
+
+@external
+@view
+def cow_generation() -> uint256:
+    ...
+
+
+@external
+@view
+def registered_generation(_token: address) -> uint256:
+    ...
+
+
+@external
+@view
+def cow_enabled() -> bool:
+    ...
+
+
+@external
+@view
+def cow_registered(_token: address) -> bool:
+    ...
+
+
+@external
+@view
+def cow_next_poll(_token: address) -> uint256:
+    ...
+
+
+@external
+def configure_watchtower(_composable_cow: address, _handler: address):
+    ...
+
+
+# FeeCollector integration
+
+
+@external
+@view
+def VERSION() -> String[20]:
+    ...
+
+
+@external
+@view
+def fee_collector() -> address:
+    ...
+
+
+@external
+@view
+def target() -> address:
+    ...
+
+
+@external
+def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
+    ...
+
+
+@external
+def resync_target(
+    _expected_target: address,
+    _start_total: uint256,
+    _floor_total: uint256,
+    _decay_factor_ray: uint256,
+    _step_duration: uint256,
+):
+    ...
+
+
+@external
+def push_target() -> uint256:
+    ...
+
+
+@external
+def recover(_coins: DynArray[IERC20, c.MAX_COINS]):
+    ...
+
+
+@external
+@view
+def supportsInterface(_interface_id: bytes4) -> bool:
+    ...
+
+
+# Roles
+
+
+@external
+@view
+def role_source() -> roles.RoleSource:
+    ...
+
+
+@external
+@view
+def owner() -> address:
+    ...
+
+
+@external
+@view
+def emergency_owner() -> address:
+    ...

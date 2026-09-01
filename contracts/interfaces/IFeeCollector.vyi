@@ -4,9 +4,8 @@
 @license MIT
 @notice The FeeCollector ABI surface shared by burners: epoch flag, transfer
         struct, and the views/actions burners integrate with.
-@dev The weekly-calendar constant lives with the importing burner and the
-     batch/scale constants in contracts/utils/constants.vy: .vyi constants
-     are not exposed to importers.
+@dev Batch/scale constants live in contracts/utils/constants.vy: .vyi
+     constants are not exposed to importers.
 """
 
 from contracts.utils import constants as c
