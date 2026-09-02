@@ -3,19 +3,21 @@
 @author Curve Finance
 @license MIT
 @notice Full external ABI of DutchAuctionBurner: the Yearn-compatible
-        IDutchAuction subset plus the auction core, adapter router, watchtower
-        registration, roles, and FeeCollector integration surfaces.
+        IDutchAuction subset plus the auction core, adapter router, roles, and
+        FeeCollector integration surfaces.
 @dev The burner `implements` this file, so every declaration is checked
-     against the real surface at compile time; peer contracts (watchtower
-     handler, intent resolver) and tooling read the burner through it; the
-     lot record comes from auction_types, so nothing is mirrored.
+     against the real surface at compile time; peer contracts (CowAdapter's
+     publisher helper, the intent resolver) and tooling read the burner
+     through it; the lot record comes from auction_types, so nothing is
+     mirrored. isValidSignature takes the adapter signature template
+     `verifier ++ payload` (adapter_types).
 """
 
 from ethereum.ercs import IERC20
 
 from contracts.burners.auction import auction_types
 from contracts.burners.auction.adapters import adapter_types
-from contracts.interfaces import IAdapterRegistry, IComposableCow
+from contracts.interfaces import IAdapterRegistry
 from contracts.utils import constants as c, roles
 
 
@@ -159,19 +161,7 @@ def enabled_adapters(_verifier: address) -> bool:
 
 @external
 @view
-def fallback_adapter() -> address:
-    ...
-
-
-@external
-@view
 def executor_refcount(_executor: address) -> uint256:
-    ...
-
-
-@external
-@view
-def executors(_index: uint256) -> address:
     ...
 
 
@@ -194,62 +184,7 @@ def disable_adapter(_verifier: address):
 
 
 @external
-def set_fallback_adapter(_verifier: address):
-    ...
-
-
-@external
 def sync_executor_approvals(_executor: address, _tokens: DynArray[IERC20, c.MAX_COINS]):
-    ...
-
-
-# Watchtower registration
-
-
-@external
-@view
-def composable_cow() -> IComposableCow:
-    ...
-
-
-@external
-@view
-def cow_handler() -> address:
-    ...
-
-
-@external
-@view
-def cow_generation() -> uint256:
-    ...
-
-
-@external
-@view
-def registered_generation(_token: address) -> uint256:
-    ...
-
-
-@external
-@view
-def cow_enabled() -> bool:
-    ...
-
-
-@external
-@view
-def cow_registered(_token: address) -> bool:
-    ...
-
-
-@external
-@view
-def cow_next_poll(_token: address) -> uint256:
-    ...
-
-
-@external
-def configure_watchtower(_composable_cow: address, _handler: address):
     ...
 
 

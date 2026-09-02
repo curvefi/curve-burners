@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from eth_abi import encode
+from eth_abi import decode, encode
 from eth_utils import keccak
 
 from scripts import dutch_auction_preflight as preflight
@@ -12,7 +12,6 @@ from scripts import dutch_auction_preflight as preflight
 CHAIN_ID = 100
 FEE_COLLECTOR = "0x0000000000000000000000000000000000000001"
 TARGET = "0x0000000000000000000000000000000000000002"
-COMPOSABLE_COW = "0x0000000000000000000000000000000000000003"
 SETTLEMENT = "0x0000000000000000000000000000000000000004"
 VAULT_RELAYER = "0x0000000000000000000000000000000000000005"
 BURNER = "0x0000000000000000000000000000000000000006"
@@ -21,9 +20,8 @@ EMERGENCY_OWNER = "0x0000000000000000000000000000000000000008"
 REGISTRY = "0x0000000000000000000000000000000000000009"
 VERIFIER = "0x000000000000000000000000000000000000000b"
 EXECUTOR = "0x000000000000000000000000000000000000000E"
-COW_ADAPTER = "0x000000000000000000000000000000000000000F"
 SELL_TOKEN = "0x000000000000000000000000000000000000000C"
-HANDLER = "0x000000000000000000000000000000000000000D"
+COW_ADAPTER = "0x000000000000000000000000000000000000000F"
 APP_DATA = "0x" + "11" * 32
 DOMAIN_SEPARATOR = bytes.fromhex("22" * 32)
 FAKE_CODE = b"\x60\x00"
@@ -83,14 +81,8 @@ class FakeRpc:
             return encode(["address"], [VAULT_RELAYER])
         if selector == preflight._selector("supportsInterface(bytes4)"):
             interface_id = data[4:8]
-            if (
-                address == BURNER
-                and interface_id == preflight.CONDITIONAL_ORDER_INTERFACE_ID
-            ):
-                # The burner never claims the generator interface; the
-                # standalone handler does.
-                return encode(["bool"], [False])
-            return encode(["bool"], [True])
+            # The burner is not a watchtower handler: no generator interface.
+            return encode(["bool"], [interface_id != preflight.CONDITIONAL_ORDER_INTERFACE_ID])
         if selector == preflight._selector("fee_collector()"):
             return encode(["address"], [FEE_COLLECTOR])
         if selector == preflight._selector("app_data()"):
@@ -102,31 +94,22 @@ class FakeRpc:
             return encode(["uint256"], [1])
         if selector == preflight._selector("decay_factor_ray()"):
             return encode(["uint256"], [preflight.RAY - 1])
-        if selector in {
-            preflight._selector("step_duration()"),
-            preflight._selector("cow_generation()"),
-        }:
+        if selector == preflight._selector("step_duration()"):
             return encode(["uint256"], [1])
         if selector == preflight._selector("order_validity()"):
             assert address == COW_ADAPTER
             return encode(["uint256"], [1])
-        if selector == preflight._selector("cow_enabled()"):
-            return encode(["bool"], [True])
-        if selector == preflight._selector("composable_cow()"):
-            return encode(["address"], [COMPOSABLE_COW])
         if selector == preflight._selector("vault_relayer()"):
             assert address == COW_ADAPTER
             return encode(["address"], [VAULT_RELAYER])
         if selector == preflight._selector("settlement()"):
             assert address == COW_ADAPTER
             return encode(["address"], [SETTLEMENT])
-        if selector == preflight._selector("cow_handler()"):
-            return encode(["address"], [HANDLER])
-        if selector == preflight._selector("fallback_adapter()"):
-            return encode(["address"], [COW_ADAPTER])
         if selector == preflight._selector("domain_separator()"):
+            # The adapter pinned the canonical domain at deploy; a settlement
+            # answering something else is exactly the mismatch to catch.
             assert address == COW_ADAPTER
-            return encode(["bytes32"], [self.settlement_domain_separator])
+            return encode(["bytes32"], [DOMAIN_SEPARATOR])
         if selector == preflight._selector("registry()"):
             return encode(["address"], [REGISTRY])
         if selector == preflight._selector("executor_refcount(address)"):
@@ -134,6 +117,10 @@ class FakeRpc:
         if selector == preflight._selector("enabled_adapters(address)"):
             return encode(["bool"], [True])
         if selector == preflight._selector("get_adapter(address)"):
+            assert address == REGISTRY
+            (verifier,) = decode(["address"], data[4:])
+            if verifier.lower() == COW_ADAPTER.lower():
+                return encode(["address", "bool"], [VAULT_RELAYER, True])
             return encode(["address", "bool"], [EXECUTOR, True])
         raise AssertionError(f"unexpected eth_call to {address}: 0x{data.hex()}")
 
@@ -145,10 +132,9 @@ def _full_config() -> dict[str, Any]:
         "target": TARGET,
         "targetDecimals": 18,
         "cowEnabled": True,
-        "composableCow": COMPOSABLE_COW,
         "settlement": SETTLEMENT,
         "vaultRelayer": VAULT_RELAYER,
-        "handler": HANDLER,
+        "cowAdapter": COW_ADAPTER,
         "appData": APP_DATA,
         "defaultX": 1,
         "floor": 1,
@@ -159,13 +145,13 @@ def _full_config() -> dict[str, Any]:
         "emergencyOwner": EMERGENCY_OWNER,
         "burner": BURNER,
         "registry": REGISTRY,
-        "cowAdapter": COW_ADAPTER,
         "adapters": [
+            {"verifier": COW_ADAPTER, "executor": VAULT_RELAYER},
             {
                 "verifier": VERIFIER,
                 "executor": EXECUTOR,
                 "verifierCodeHash": "0x" + FAKE_CODE_HASH.hex(),
-            }
+            },
         ],
     }
 
@@ -180,15 +166,19 @@ def test_full_preflight_preserves_existing_checks_and_adds_cancun_probe():
     assert rpc.probe_code == preflight.CANCUN_PROBE_INIT_CODE
     assert report.checks["burner.interface.erc1271"] is True
     assert report.checks["burner.interface.conditionalOrder"] is False
-    assert report.checks["handler.interface.conditionalOrder"] is True
-    assert report.checks["burner.fallbackAdapter"] == COW_ADAPTER
     assert report.checks["cowAdapter.settlement"] == SETTLEMENT
     assert report.checks["cowAdapter.vaultRelayer"] == preflight.to_checksum_address(
         VAULT_RELAYER
     )
-    assert report.checks["burner.cowHandler"] == preflight.to_checksum_address(HANDLER)
+    assert report.checks["cowAdapter.domainSeparator"] is True
     assert report.checks["burner.registry"] == REGISTRY
-    assert report.checks["burner.vaultRelayerRefcount.positive"] is True
+    cow_label = f"adapter.{preflight.to_checksum_address(COW_ADAPTER)}"
+    assert report.checks[f"{cow_label}.enabled"] is True
+    assert report.checks[f"{cow_label}.active"] is True
+    assert report.checks[f"{cow_label}.executor"] == preflight.to_checksum_address(
+        VAULT_RELAYER
+    )
+    assert report.checks[f"{cow_label}.executorRefcount.positive"] is True
     adapter_label = f"adapter.{preflight.to_checksum_address(VERIFIER)}"
     assert report.checks[f"{adapter_label}.enabled"] is True
     assert report.checks[f"{adapter_label}.active"] is True
@@ -204,7 +194,7 @@ def test_full_preflight_preserves_existing_checks_and_adds_cancun_probe():
 def test_full_preflight_check_count_is_pinned():
     report = preflight.run_preflight(FakeRpc(), _full_config())
     assert not report.errors
-    assert len(report.checks) == 61
+    assert len(report.checks) == 54
 
 
 def test_cow_domain_separator_mismatch_is_an_error():
@@ -214,10 +204,15 @@ def test_cow_domain_separator_mismatch_is_an_error():
     )
 
     assert any(
-        error.startswith("composableCow.domainSeparator:")
-        and "must be nonzero and exactly equal Settlement" in error
-        for error in report.errors
+        error.startswith("cowAdapter.domainSeparator:") for error in report.errors
     )
+
+
+def test_cow_adapter_must_be_a_registered_adapter():
+    config = _full_config()
+    config["adapters"] = config["adapters"][1:]
+    with pytest.raises(ValueError, match="cowAdapter must be listed in adapters"):
+        preflight.validate_config(config)
 
 
 def test_native_only_cancun_probe_failure_is_an_error_without_cow_reads():
@@ -241,27 +236,21 @@ def test_native_only_cancun_probe_failure_is_an_error_without_cow_reads():
     assert preflight.ZERO_ADDRESS not in rpc.read_addresses
 
 
-def test_lifecycle_calldata_covers_cow_adapters_and_executor_sync():
+def test_lifecycle_calldata_covers_adapters_and_executor_sync():
     calls = preflight.lifecycle_calldata(
         _full_config(), BURNER, VAULT_RELAYER, [SELL_TOKEN]
     )
 
+    # The CoW adapter is enabled and disabled like any other registry adapter.
     assert [call["function"] for call in calls["configuration"]] == [
         "enable_adapter(address)",
-        "set_fallback_adapter(address)",
-        "configure_watchtower(address,address)",
         "enable_adapter(address)",
     ]
     assert calls["configuration"][0]["data"] == preflight.encode_call(
-        "enable_adapter(address)", ["address"], [COW_ADAPTER]
+        "enable_adapter(address)", ["address"], [preflight.to_checksum_address(COW_ADAPTER)]
     )
     assert calls["configuration"][1]["data"] == preflight.encode_call(
-        "set_fallback_adapter(address)", ["address"], [COW_ADAPTER]
-    )
-    assert calls["configuration"][2]["data"] == preflight.encode_call(
-        "configure_watchtower(address,address)",
-        ["address", "address"],
-        [COMPOSABLE_COW, HANDLER],
+        "enable_adapter(address)", ["address"], [preflight.to_checksum_address(VERIFIER)]
     )
     assert [call["function"] for call in calls["emergency"]] == [
         "disable_adapter(address)",
@@ -270,18 +259,7 @@ def test_lifecycle_calldata_covers_cow_adapters_and_executor_sync():
     assert [call["function"] for call in calls["permissionless"]] == [
         "sync_executor_approvals(address,address[])",
     ]
-    assert all(
-        call["to"] == BURNER
-        for group in calls.values()
-        for call in group
-    )
-
-    assert calls["configuration"][3]["data"] == preflight.encode_call(
-        "enable_adapter(address)", ["address"], [preflight.to_checksum_address(VERIFIER)]
-    )
-    assert calls["emergency"][1]["data"] == preflight.encode_call(
-        "disable_adapter(address)", ["address"], [preflight.to_checksum_address(VERIFIER)]
-    )
+    assert all(call["to"] == BURNER for group in calls.values() for call in group)
     assert calls["permissionless"][0]["data"] == preflight.encode_call(
         "sync_executor_approvals(address,address[])",
         ["address", "address[]"],

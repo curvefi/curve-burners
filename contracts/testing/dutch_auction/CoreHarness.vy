@@ -48,12 +48,9 @@ exports: (
 exports: (
     adapters.registry,
     adapters.enabled_adapters,
-    adapters.fallback_adapter,
     adapters.executor_refcount,
-    adapters.executors,
     adapters.enable_adapter,
     adapters.disable_adapter,
-    adapters.set_fallback_adapter,
     adapters.sync_executor_approvals,
     adapters.isValidSignature,
 )
@@ -143,11 +140,6 @@ def _epoch_bounds(_epoch: uint256) -> (uint256, uint256):
 @view
 def _sellable(_token: address) -> bool:
     return not self.not_sellable[_token]
-
-
-@override(dutch_auction)
-def _sync_stage_approvals(_token: address):
-    adapters._ensure_executor_approvals(IERC20(_token))
 
 
 # Adapter layer hook overrides

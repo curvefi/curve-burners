@@ -1,7 +1,6 @@
 # pragma version 0.5.0b1
 # pragma optimize codesize
-# Venom backend is required to fit EIP-170: the legacy pipeline emits ~27.4kB
-# of runtime code for the combined core + watchtower + burner surface.
+# The core's unbounded callback type (Bytes[INF]) requires the Venom backend.
 # pragma experimental-codegen
 # pragma nonreentrancy on
 # pragma evm-version cancun
@@ -12,15 +11,14 @@
 @license MIT
 @notice Thin FeeCollector wrapper around the Dutch auction core: stages weekly
         fee-token lots and sells them along a geometric Dutch curve through
-        native takes and registry adapters reached by the shape-based ERC-1271
-        signature router. CoW settles through the fallback CowAdapter; the
-        burner itself only registers watchtower conditional orders.
+        native takes and registry adapters (CoW among them) reached by the
+        prefix-based ERC-1271 signature router.
 @custom:kill FeeCollector kill masks stop all fills. The FeeCollector owner or
-             emergency owner can disable individual adapters (the CoW rail
-             included) and recover inventory — only back to FeeCollector.
-             Native take and push_target stay permissionless while a lot is
-             alive. Disabling an adapter does not clear its executor's
-             allowances: the emergency multisig batches the disable with
+             emergency owner can disable individual adapters and recover
+             inventory — only back to FeeCollector. Native take and
+             push_target stay permissionless while a lot is alive. Disabling
+             an adapter does not clear its executor's allowances: the
+             emergency multisig batches the disable with
              sync_executor_approvals in one transaction.
 @custom:migration FeeCollector.set_burner only redirects future staging;
                   nothing detaches here. Calm path: let live lots trade out
@@ -36,7 +34,8 @@
                  always at or above the curve price and always in favor of
                  FeeCollector; available never exceeds the snapshot.
                  Executor approvals are infinite but only toward executors of
-                 owner-enabled registry adapters while a reference is held.
+                 owner-enabled registry adapters while a reference is held,
+                 and only through the permissionless sync.
                  Signature validation is routed to registry verifiers; every
                  fill they admit is priced by the core's check_order view.
                  Tokens with transfer fees, rebases, callbacks, or blacklist
@@ -50,14 +49,12 @@ from contracts.interfaces import IDutchAuction, IDutchAuctionBurner, IFeeCollect
 from contracts.utils import constants as c, recovery, roles
 from contracts.burners.auction import dutch_auction
 from contracts.burners.auction.adapters import adapters
-from contracts.burners.cow import gpv2, watchtower as cow_watchtower
 
 implements: IDutchAuction
 implements: IDutchAuctionBurner
 initializes: roles
 initializes: dutch_auction
 initializes: adapters[roles := roles]
-initializes: cow_watchtower
 exports: (
     dutch_auction.current_epoch,
     dutch_auction.want,
@@ -86,20 +83,11 @@ exports: (
 exports: (
     adapters.registry,
     adapters.enabled_adapters,
-    adapters.fallback_adapter,
     adapters.executor_refcount,
-    adapters.executors,
     adapters.enable_adapter,
     adapters.disable_adapter,
-    adapters.set_fallback_adapter,
     adapters.sync_executor_approvals,
     adapters.isValidSignature,
-)
-exports: (
-    cow_watchtower.composable_cow,
-    cow_watchtower.cow_handler,
-    cow_watchtower.cow_generation,
-    cow_watchtower.registered_generation,
 )
 
 
@@ -135,7 +123,9 @@ VERSION: public(constant(String[20])) = "DutchAuction"
 # FeeCollector integration fixed at deployment. The payment token lives in the
 # core as `want`, mirrors fee_collector.target() and follows it only through
 # the owner's resync_target; target()/want() getters stay for existing tooling.
-fee_collector: public(immutable(IFeeCollector))
+# Private with an explicit address getter: an interface-typed public getter
+# would not match the address-returning fee_collector() under `implements`.
+collector: immutable(IFeeCollector)
 
 
 @deploy
@@ -182,10 +172,19 @@ def __init__(
         exchange_end - exchange_start - 1,
     )
 
-    self.fee_collector = _fee_collector
+    self.collector = _fee_collector
 
 
 # Shared helpers
+
+
+# Reentrant: echoes deployment configuration only.
+@external
+@view
+@reentrant
+def fee_collector() -> address:
+    """@notice The FeeCollector this burner stages for and pays into."""
+    return self.collector.address
 
 
 # Reentrant like the core's want() getter: only echoes configuration, and
@@ -208,8 +207,8 @@ def epoch_bounds(_epoch: uint256) -> (uint256, uint256):
     """
     @notice Active window of an auction epoch.
     @dev Lots store no time bounds: the calendar lives with this burner, and
-         independent contracts (watchtower handler, resolver, keepers) read
-         epoch windows from here.
+         independent contracts (resolver, keepers) read epoch windows from
+         here.
     """
     return self._epoch_bounds(_epoch)
 
@@ -217,13 +216,13 @@ def epoch_bounds(_epoch: uint256) -> (uint256, uint256):
 @internal
 @view
 def _target_is_current() -> bool:
-    return staticcall self.fee_collector.target() == dutch_auction.want_token.address
+    return staticcall self.collector.target() == dutch_auction.want_token.address
 
 
 @internal
 @view
 def _exchange_frame(_timestamp: uint256) -> (uint256, uint256):
-    return staticcall self.fee_collector.epoch_time_frame(
+    return staticcall self.collector.epoch_time_frame(
         IFeeCollector.Epoch.EXCHANGE, _timestamp
     )
 
@@ -235,16 +234,16 @@ def _exchange_frame(_timestamp: uint256) -> (uint256, uint256):
 def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
     """
     @notice Pay the COLLECT incentive, take custody, and snapshot upcoming lots.
-    @dev Staging also tops enabled executors' approvals up to infinity inside
-         the core, so a freshly staged lot is immediately pullable by enabled
-         adapters. Restaging a leftover lot needs no fresh fees: a
-         permissionless FeeCollector.collect during any later COLLECT frame
-         re-snapshots the burner's full balance for the upcoming week from
-         the top of the curve.
+    @dev Staging touches no allowances: the keeper follows up with the
+         permissionless sync_executor_approvals so the staged tokens become
+         pullable by enabled adapters. Restaging a leftover lot needs no fresh
+         fees: a permissionless FeeCollector.collect during any later COLLECT
+         frame re-snapshots the burner's full balance for the upcoming week
+         from the top of the curve.
     @param _coins Sorted tokens supplied by FeeCollector.
     @param _receiver Receiver of the FeeCollector COLLECT incentive.
     """
-    assert msg.sender == self.fee_collector.address, OnlyFeeCollector()
+    assert msg.sender == self.collector.address, OnlyFeeCollector()
     assert self._target_is_current(), TargetChanged()
 
     exchange_start: uint256 = 0
@@ -252,7 +251,7 @@ def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
     exchange_start, exchange_end = self._exchange_frame(block.timestamp)
     epoch: uint256 = exchange_start
 
-    fee: uint256 = staticcall self.fee_collector.fee(
+    fee: uint256 = staticcall self.collector.fee(
         IFeeCollector.Epoch.COLLECT, block.timestamp
     )
     fee_payouts: DynArray[IFeeCollector.Transfer, c.MAX_COINS] = []
@@ -261,7 +260,7 @@ def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
     for coin: IERC20 in _coins:
         # Fail before any transfer when the target token is among the coins.
         dutch_auction._check_stageable(coin)
-        collector_balance: uint256 = staticcall coin.balanceOf(self.fee_collector.address)
+        collector_balance: uint256 = staticcall coin.balanceOf(self.collector.address)
         fee_payouts.append(
             IFeeCollector.Transfer(
                 coin=coin.address,
@@ -273,12 +272,11 @@ def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
             IFeeCollector.Transfer(coin=coin.address, to=self, amount=max_value(uint256))
         )
 
-    extcall self.fee_collector.transfer(fee_payouts)
-    extcall self.fee_collector.transfer(custody_transfers)
+    extcall self.collector.transfer(fee_payouts)
+    extcall self.collector.transfer(custody_transfers)
 
     for coin: IERC20 in _coins:
         dutch_auction._stage_lot(coin, epoch)
-        cow_watchtower._register_cow_order(coin.address)
 
 
 # Auction core integration hooks
@@ -316,14 +314,9 @@ def _epoch_bounds(_epoch: uint256) -> (uint256, uint256):
 def _sellable(_token: address) -> bool:
     # The core already excludes the want token; this adds the FeeCollector
     # target-migration and kill-mask checks.
-    return self._target_is_current() and staticcall self.fee_collector.can_exchange(
+    return self._target_is_current() and staticcall self.collector.can_exchange(
         [_token]
     )
-
-
-@override(dutch_auction)
-def _sync_stage_approvals(_token: address):
-    adapters._ensure_executor_approvals(IERC20(_token))
 
 
 # Adapter layer integration hooks
@@ -357,9 +350,6 @@ def resync_target(
          epoch's staging; a resync before the window opens fences only the
          previous epoch, so a restage trades the same week. A same-target
          retune keeps live lots untouched.
-         Stale CoW registrations need no generation bump: published orders for
-         fenced lots fail check_order's fence and buy-token terms, while the
-         watchtower handler quotes future orders from live views.
          Allowed only during the SLEEP phase — before the week's staging, so
          one configuration governs the entire distribution period: staging,
          the trading window, and forwarding. Consequences: the price within a
@@ -374,13 +364,13 @@ def resync_target(
            bind to the wrong denomination — execution must revert instead.
     """
     roles._check_owner()
-    new_target: address = staticcall self.fee_collector.target()
+    new_target: address = staticcall self.collector.target()
     assert new_target != empty(address), BadTarget()
     assert new_target == _expected_target, TargetChanged()
 
     sleep_start: uint256 = 0
     sleep_end: uint256 = 0
-    sleep_start, sleep_end = staticcall self.fee_collector.epoch_time_frame(
+    sleep_start, sleep_end = staticcall self.collector.epoch_time_frame(
         IFeeCollector.Epoch.SLEEP, block.timestamp
     )
     assert sleep_start <= block.timestamp and block.timestamp < sleep_end, (
@@ -407,65 +397,6 @@ def resync_target(
     )
 
 
-# ComposableCoW watchtower lifecycle
-
-
-@external
-def configure_watchtower(_composable_cow: address, _handler: address):
-    """
-    @notice Configure the ComposableCoW registration wiring; settlement itself
-            runs through the fallback CowAdapter enabled on the adapter layer.
-    """
-    roles._check_owner()
-    cow_watchtower._configure_watchtower(_composable_cow, _handler)
-
-
-@external
-@view
-def cow_enabled() -> bool:
-    """@notice Whether the CoW rail (the fallback adapter route) is live."""
-    return self._cow_rail_enabled()
-
-
-@external
-@view
-def cow_registered(_token: address) -> bool:
-    """@notice Whether the token's conditional order is registered for the current generation."""
-    generation: uint256 = cow_watchtower.cow_generation
-    return generation != 0 and cow_watchtower.registered_generation[_token] == generation
-
-
-# Reentrant: only the FeeCollector calendar, no burner storage.
-@external
-@view
-@reentrant
-def cow_next_poll(_token: address) -> uint256:
-    """@notice Next timestamp worth polling for a token's conditional order."""
-    exchange_start: uint256 = 0
-    exchange_end: uint256 = 0
-    exchange_start, exchange_end = self._exchange_frame(block.timestamp)
-    if block.timestamp < exchange_start:
-        return exchange_start
-    # FORWARD is the calendar's terminal phase, so its frame ends exactly at
-    # the period boundary — the frame there is the next period's window.
-    forward_start: uint256 = 0
-    forward_end: uint256 = 0
-    forward_start, forward_end = staticcall self.fee_collector.epoch_time_frame(
-        IFeeCollector.Epoch.FORWARD, block.timestamp
-    )
-    exchange_start, exchange_end = self._exchange_frame(forward_end)
-    return exchange_start
-
-
-@override(cow_watchtower)
-@view
-def _cow_rail_enabled() -> bool:
-    # Mirror the signature router's switches — the local set AND the registry
-    # activation flag — so a registry disable also stops registrations and
-    # watchtower publishing: the CoW rail behaves like any other adapter.
-    return adapters._is_routable(adapters.fallback_adapter)
-
-
 # Recovery and interface discovery
 
 
@@ -475,7 +406,7 @@ def push_target() -> uint256:
     amount: uint256 = staticcall dutch_auction.want_token.balanceOf(self)
     if amount != 0:
         assert extcall dutch_auction.want_token.transfer(
-            self.fee_collector.address, amount, default_return_value=True
+            self.collector.address, amount, default_return_value=True
         )
     return amount
 
@@ -492,7 +423,7 @@ def recover(_coins: DynArray[IERC20, c.MAX_COINS]):
     roles._check_owner_or_emergency()
 
     for coin: IERC20 in _coins:
-        recovery._recover_coin(coin, self.fee_collector.address)
+        recovery._recover_coin(coin, self.collector.address)
 
 
 # Reentrant: answers from constants only.
@@ -502,9 +433,6 @@ def recover(_coins: DynArray[IERC20, c.MAX_COINS]):
 def supportsInterface(_interface_id: bytes4) -> bool:
     """
     @notice Return burner interfaces. ERC-1271 is always claimed: the signature
-            router stays live for adapters. The conditional-order-generator
-            interface belongs to the external watchtower handler; the muxer
-            probe must revert (see gpv2._reject_muxer_probe).
+            router stays live for adapters.
     """
-    gpv2._reject_muxer_probe(_interface_id)
     return _interface_id in [ERC165_INTERFACE_ID, BURNER_INTERFACE_ID, ERC1271_INTERFACE_ID]

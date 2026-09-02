@@ -1,9 +1,10 @@
-"""Shape-based ERC-1271 signature router and the shared check_order view.
+"""Prefix-based ERC-1271 signature router and the shared check_order view.
 
 Routing is sender-agnostic: a signature whose first 20 bytes name an enabled
-verifier is forwarded with the prefix stripped, anything else goes verbatim to
-the fallback adapter. Economic authority never leaves the auction: verifiers
-call check_order, covered here on the core harness.
+verifier is forwarded with the prefix stripped; on the plain router anything
+else is invalid (built-in rails such as CoW compose their own isValidSignature
+on top of the same internals). Economic authority never leaves the auction:
+verifiers call check_order, covered here on the core harness.
 """
 
 from typing import Any
@@ -169,12 +170,12 @@ def test_state_writing_verifier_is_neutralized_by_staticcall(harness, verifier):
     assert verifier.write_count() == 0
 
 
-def test_unknown_prefix_without_fallback_is_invalid(harness, verifier_deployer):
+def test_unknown_prefix_is_invalid(harness, verifier_deployer):
     stranger = verifier_deployer.deploy()
     assert harness.isValidSignature(DIGEST, _prefix(stranger) + b"x") == ERC1271_INVALID
 
 
-def test_short_and_empty_signatures_without_fallback_are_invalid(harness):
+def test_short_and_empty_signatures_are_invalid(harness):
     assert harness.isValidSignature(DIGEST, b"") == ERC1271_INVALID
     assert harness.isValidSignature(DIGEST, b"\x00" * 19) == ERC1271_INVALID
 
@@ -196,49 +197,16 @@ def test_registry_disable_kills_prefixed_route_immediately(
     assert harness.isValidSignature(DIGEST, _prefix(verifier)) == ERC1271_INVALID
 
 
-# Fallback route
+# Unprefixed encodings
 
 
-def test_fallback_receives_unprefixed_signature_verbatim(harness, verifier, owner):
-    with boa.env.prank(owner):
-        harness.set_fallback_adapter(verifier)
-    # Bytes without a known prefix — including short ones — go to the fallback.
-    assert harness.isValidSignature(DIGEST, b"") == ERC1271_MAGIC_VALUE
-    assert harness.isValidSignature(DIGEST, b"\x00" * 384) == ERC1271_MAGIC_VALUE
+def test_unprefixed_signatures_are_invalid_on_the_plain_router(harness, verifier):
+    # No fallback exists: bytes that select no enabled verifier — including
+    # the zero-padded CoW shapes — answer the invalid magic without reverting.
+    assert harness.isValidSignature(DIGEST, bytes(20) + b"\x01" * 364) == ERC1271_INVALID
+    assert harness.isValidSignature(DIGEST, b"\x00" * 384) == ERC1271_INVALID
     # A prefixed signature still takes the stripped adapter path.
     assert harness.isValidSignature(DIGEST, _prefix(verifier) + b"x") == ERC1271_MAGIC_VALUE
-
-
-def test_fallback_requires_enabled_adapter(harness, verifier_deployer, owner):
-    stranger = verifier_deployer.deploy()
-    with boa.env.prank(owner), boa.reverts(custom_err("FallbackNotEnabled()")):
-        harness.set_fallback_adapter(stranger)
-
-
-def test_fallback_can_be_cleared(harness, verifier, owner):
-    with boa.env.prank(owner):
-        harness.set_fallback_adapter(verifier)
-        harness.set_fallback_adapter(ZERO_ADDRESS)
-    assert harness.fallback_adapter() == ZERO_ADDRESS
-    assert harness.isValidSignature(DIGEST, b"") == ERC1271_INVALID
-
-
-def test_disabled_fallback_is_invalid_not_forwarded(harness, verifier, owner, registry, emergency_owner):
-    with boa.env.prank(owner):
-        harness.set_fallback_adapter(verifier)
-    with boa.env.prank(emergency_owner):
-        registry.disable_adapter(verifier)
-    assert harness.isValidSignature(DIGEST, b"") == ERC1271_INVALID
-    with boa.env.prank(owner):
-        registry.activate_adapter(verifier)
-        harness.disable_adapter(verifier)
-    assert harness.isValidSignature(DIGEST, b"") == ERC1271_INVALID
-
-
-def test_fallback_authority_is_owner_only(harness, verifier, emergency_owner, solver):
-    for account in (emergency_owner, solver):
-        with boa.env.prank(account), boa.reverts(custom_err("OnlyOwner()")):
-            harness.set_fallback_adapter(verifier)
 
 
 # check_order — the shared economic order check

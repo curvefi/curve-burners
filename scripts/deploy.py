@@ -76,26 +76,24 @@ def deploy_burner(fee_collector):
                           30,  # ALTER: step_duration
                           registry.address,
                           )
+        # burner = boa.load_partial("contracts/burners/DutchAuctionBurner.vy").at("")
 
         cow_enabled = True  # ALTER: False on chains without CoW
         if cow_enabled:
+            # CoW is a regular registry adapter: orders are published to the CoW
+            # orderbook (signing scheme eip1271) with signature
+            # `cow_adapter ++ abi.encode(order)`; keepers grant the vault relayer via
+            # burner.sync_executor_approvals(relayer, tokens) after each collect.
             cow_adapter = boa.load("contracts/burners/cow/CowAdapter.vy",
                                    COW_SETTLEMENT,
-                                   bytes.fromhex("058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"),
-                                   120,  # ALTER: cow_order_validity
+                                   bytes.fromhex("058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"),  # ALTER: appData
                                    )
             # cow_adapter = boa.load_partial("contracts/burners/cow/CowAdapter.vy").at("")
             print(f"CowAdapter: {cow_adapter.address}")
-            handler = boa.load("contracts/burners/cow/WatchtowerHandler.vy")
-            # handler = boa.load_partial("contracts/burners/cow/WatchtowerHandler.vy").at("")
-            print(f"CowWatchtowerHandler: {handler.address}")
             registry.set_adapter(cow_adapter.address, cow_adapter.vault_relayer())
             registry.activate_adapter(cow_adapter.address)
             burner.enable_adapter(cow_adapter.address)
-            burner.set_fallback_adapter(cow_adapter.address)
-            burner.configure_watchtower(COMPOSABLE_COW, handler.address)
         return burner
-        # return boa.load_partial("contracts/burners/DutchAuctionBurner.vy").at("")
     raise ValueError("Burner not specified")
 
 

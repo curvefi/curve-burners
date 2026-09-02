@@ -19,7 +19,6 @@ LOT_AMOUNT = 250 * WAD
 LOT_EPOCH = 0
 LOT_INITIAL_AMOUNT = 1
 
-MAX_EXECUTORS = 8
 
 
 @pytest.fixture(autouse=True)
@@ -176,24 +175,34 @@ def stage():
     return _stage
 
 
-# Staging drives executor approvals
+# Staging never grants; the permissionless sync does, to referenced executors only
 
 
-def test_stage_grants_max_to_enabled_executor_only(
-    harness, enable, stage, adapter_cow, token_a, relayer, permit2
+def test_stage_grants_nothing_and_sync_grants_referenced_executors_only(
+    harness, enable, stage, keeper, adapter_cow, token_a, relayer, permit2
 ):
     enable(harness, adapter_cow)
     stage(harness, token_a)
+    assert token_a.allowance(harness, relayer) == 0
+    assert token_a.allowance(harness, permit2) == 0
+
+    with boa.env.prank(keeper):
+        harness.sync_executor_approvals(relayer, [token_a.address])
+        harness.sync_executor_approvals(permit2, [token_a.address])
     assert token_a.allowance(harness, relayer) == MAX_UINT256
+    # Unreferenced executor: the sync is a clearing pass, never a grant.
     assert token_a.allowance(harness, permit2) == 0
 
 
-def test_stage_grants_every_referenced_executor(
-    harness, enable, stage, adapter_cow, adapter_p2a, token_a, relayer, permit2
+def test_sync_grants_every_referenced_executor(
+    harness, enable, stage, keeper, adapter_cow, adapter_p2a, token_a, relayer, permit2
 ):
     enable(harness, adapter_cow)
     enable(harness, adapter_p2a)
     stage(harness, token_a)
+    with boa.env.prank(keeper):
+        harness.sync_executor_approvals(relayer, [token_a.address])
+        harness.sync_executor_approvals(permit2, [token_a.address])
     assert token_a.allowance(harness, relayer) == MAX_UINT256
     assert token_a.allowance(harness, permit2) == MAX_UINT256
 
@@ -271,25 +280,18 @@ def test_enable_disable_authority_and_double_toggle(
         harness.disable_adapter(adapter_cow)
 
 
-def test_shared_executor_refcount_and_enumeration(
+def test_shared_executor_refcount(
     harness, enable, disable, adapter_p2a, adapter_p2b, permit2
 ):
     enable(harness, adapter_p2a)
     assert harness.executor_refcount(permit2) == 1
-    assert harness.executors(0) == permit2
     enable(harness, adapter_p2b)
-    # One shared Permit2: counted twice, listed once.
+    # One shared Permit2, counted per enabled adapter.
     assert harness.executor_refcount(permit2) == 2
-    with boa.reverts():
-        harness.executors(1)
-
     disable(harness, adapter_p2a)
     assert harness.executor_refcount(permit2) == 1
-    assert harness.executors(0) == permit2
     disable(harness, adapter_p2b)
     assert harness.executor_refcount(permit2) == 0
-    with boa.reverts():
-        harness.executors(0)
 
 
 def test_shared_executor_approved_once_and_kept_until_full_release(
@@ -298,6 +300,8 @@ def test_shared_executor_approved_once_and_kept_until_full_release(
     enable(harness, adapter_p2a)
     enable(harness, adapter_p2b)
     stage(harness, token_a)
+    with boa.env.prank(keeper):
+        harness.sync_executor_approvals(permit2, [token_a.address])
     assert token_a.allowance(harness, permit2) == MAX_UINT256
 
     disable(harness, adapter_p2a)
@@ -310,22 +314,6 @@ def test_shared_executor_approved_once_and_kept_until_full_release(
     with boa.env.prank(keeper):
         harness.sync_executor_approvals(permit2, [token_a.address])
     assert token_a.allowance(harness, permit2) == 0
-
-
-def test_executor_list_capacity_bound(
-    harness, registry, owner, verifier_deployer
-):
-    with boa.env.prank(owner):
-        for i in range(MAX_EXECUTORS):
-            adapter = verifier_deployer.deploy()
-            registry.set_adapter(adapter, boa.env.generate_address(f"executor{i}"))
-            registry.activate_adapter(adapter)
-            harness.enable_adapter(adapter)
-        overflow = verifier_deployer.deploy()
-        registry.set_adapter(overflow, boa.env.generate_address("executor_overflow"))
-        registry.activate_adapter(overflow)
-        with boa.reverts(custom_err("TooManyExecutors()")):
-            harness.enable_adapter(overflow)
 
 
 # Permissionless sync
@@ -348,6 +336,9 @@ def test_sync_revokes_after_release(
 ):
     enable(harness, adapter_cow)
     stage(harness, token_a)
+    with boa.env.prank(keeper):
+        harness.sync_executor_approvals(relayer, [token_a.address])
+    assert token_a.allowance(harness, relayer) == MAX_UINT256
     disable(harness, adapter_cow)
     with boa.env.prank(keeper):
         harness.sync_executor_approvals(relayer, [token_a.address])
@@ -414,16 +405,6 @@ def test_usdt_style_grant_from_zero_allowance(
     assert problem_token.allowance(harness, relayer) == MAX_UINT256
 
 
-def test_usdt_style_grant_from_zero_allowance_on_stage(
-    harness, enable, stage, problem_token, adapter_cow, relayer
-):
-    enable(harness, adapter_cow)
-    problem_token.set_requires_approval_reset(True)
-    problem_token.mint(harness.address, LOT_AMOUNT)
-    harness.stage(problem_token.address)
-    assert problem_token.allowance(harness, relayer) == MAX_UINT256
-
-
 def test_nonzero_residual_allowance_left_untouched_while_referenced(
     harness, enable, keeper, problem_token, adapter_cow, relayer
 ):
@@ -437,18 +418,19 @@ def test_nonzero_residual_allowance_left_untouched_while_referenced(
     assert problem_token.allowance(harness, relayer) == 1234
 
 
-def test_approval_failure_blocks_staging_loudly(
-    harness, enable, problem_token, token_a, stage, adapter_cow, relayer
+def test_approval_failure_never_blocks_staging(
+    harness, enable, keeper, problem_token, adapter_cow, relayer
 ):
+    # Staging touches no allowances, so a token whose approve fails still
+    # stages and trades natively; only the sync leg for it reverts.
     enable(harness, adapter_cow)
     problem_token.set_fails_nonzero_approval(True)
     problem_token.mint(harness.address, LOT_AMOUNT)
-    with boa.reverts():
-        harness.stage(problem_token.address)
-
-    # Well-behaved tokens keep staging with the full grant.
-    stage(harness, token_a)
-    assert token_a.allowance(harness, relayer) == MAX_UINT256
+    harness.stage(problem_token.address)
+    assert harness.lots(problem_token.address)[LOT_INITIAL_AMOUNT] == LOT_AMOUNT
+    with boa.env.prank(keeper), boa.reverts():
+        harness.sync_executor_approvals(relayer, [problem_token.address])
+    assert problem_token.allowance(harness, relayer) == 0
 
 
 def test_approve_failure_reverts_sync(

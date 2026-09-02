@@ -6,8 +6,8 @@
 @license MIT
 @notice Shared Dutch auction records.
 @dev Stateless module: lets contracts that only read an auction (interfaces,
-     the watchtower handler, the intent resolver) name the lot record without
-     importing the stateful core.
+     the CowAdapter publisher helper, the intent resolver) name the lot record
+     without importing the stateful core.
 """
 
 

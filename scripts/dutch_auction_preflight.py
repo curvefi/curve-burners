@@ -2,17 +2,18 @@
 
 This utility never sends a transaction. It validates one chain configuration
 against JSON-RPC and emits the mutable lifecycle calls in their required
-order: ``enable_adapter`` + ``set_fallback_adapter`` for the CowAdapter,
-``configure_watchtower``, then ``enable_adapter`` per additional adapter.
-Emergency calldata covers ``disable_adapter``; allowance maintenance is the
-permissionless ``sync_executor_approvals`` (the target allowance is derived
+order: ``burner.enable_adapter`` per adapter (the CowAdapter is one of them).
+Emergency calldata covers ``burner.disable_adapter``; allowance maintenance is
+the permissionless ``sync_executor_approvals`` (the target allowance is derived
 on-chain from the executor refcount, so the calldata is safe for anyone to
 send).
 
 The JSON object follows the implementation-requirements manifest fields:
 ``chainId``, ``feeCollector``, ``target``, ``targetDecimals``, ``cowEnabled``,
-``composableCow``, ``settlement``, ``vaultRelayer``, ``cowAdapter``, and
-``appData``. Curve calibration checks run when ``defaultX``, ``floor``,
+``settlement``, ``vaultRelayer``, ``cowAdapter``, and ``appData``. The CoW
+adapter must also appear in ``adapters`` (verifier = cowAdapter, executor =
+vaultRelayer): the generic adapter checks cover its registry entry, local
+enablement, and executor refcount. Curve calibration checks run when ``defaultX``, ``floor``,
 ``decayFactorRay``, and ``stepDuration`` are all present. ``owner``,
 ``emergencyOwner``, ``burner``, ``cowOrderValidity``, and
 ``expectedCodeHashes`` enable stricter post-deploy checks without requiring a
@@ -331,10 +332,12 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         raise ValueError("adapters require registry")
     normalized["adapters"] = normalized_adapters
 
-    cow_names = ("composableCow", "settlement", "vaultRelayer", "handler", "cowAdapter")
+    cow_names = ("settlement", "vaultRelayer", "cowAdapter")
     if normalized["cowEnabled"]:
         for name in cow_names:
             normalized[name] = _address(config[name], name)
+        if normalized["cowAdapter"] not in {a["verifier"] for a in normalized_adapters}:
+            raise ValueError("cowAdapter must be listed in adapters")
     else:
         for name in cow_names:
             normalized[name] = _address(
@@ -355,10 +358,8 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
     if config["cowEnabled"]:
         required_contracts.update(
             {
-                "composableCow": config["composableCow"],
                 "settlement": config["settlement"],
                 "vaultRelayer": config["vaultRelayer"],
-                "handler": config["handler"],
                 "cowAdapter": config["cowAdapter"],
             }
         )
@@ -460,35 +461,39 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
 
     if config["cowEnabled"]:
         try:
-            composable_cow_domain_separator = _read_bytes32(
-                rpc,
-                config["composableCow"],
-                "domainSeparator()",
-            )
+            cow_adapter = config["cowAdapter"]
             settlement_domain_separator = _read_bytes32(
-                rpc,
+                rpc, config["settlement"], "domainSeparator()"
+            )
+            report.require_equal(
+                "cowAdapter.settlement",
+                _read_address(rpc, cow_adapter, "settlement()"),
                 config["settlement"],
-                "domainSeparator()",
             )
-            report.require(
-                "composableCow.domainSeparator",
-                composable_cow_domain_separator != "0x" + "00" * 32
-                and composable_cow_domain_separator == settlement_domain_separator,
-                "ComposableCoW domain separator "
-                f"{composable_cow_domain_separator} must be nonzero and exactly equal "
-                f"Settlement {settlement_domain_separator}",
+            report.require_equal(
+                "cowAdapter.vaultRelayer",
+                _read_address(rpc, cow_adapter, "vault_relayer()"),
+                config["vaultRelayer"],
             )
-        except (PreflightError, requests.RequestException) as exc:
-            report.errors.append(f"CoW domain separator interface: {exc}")
-
-        try:
             report.require_equal(
                 "settlement.vaultRelayer",
                 _read_address(rpc, config["settlement"], "vaultRelayer()"),
                 config["vaultRelayer"],
             )
+            report.require_equal(
+                "cowAdapter.appData",
+                _read_bytes32(rpc, cow_adapter, "app_data()"),
+                config["appData"],
+            )
+            report.require(
+                "cowAdapter.domainSeparator",
+                settlement_domain_separator != "0x" + "00" * 32
+                and _read_bytes32(rpc, cow_adapter, "domain_separator()")
+                == settlement_domain_separator,
+                "CowAdapter domain separator must be nonzero and equal the Settlement's",
+            )
         except (PreflightError, requests.RequestException) as exc:
-            report.errors.append(f"Settlement interface: {exc}")
+            report.errors.append(f"CowAdapter interface: {exc}")
 
     burner = config.get("burner")
     if burner:
@@ -526,96 +531,24 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
                         _read_uint(rpc, burner, getter),
                         config[config_name],
                     )
-            cow_enabled = _read_bool(rpc, burner, "cow_enabled()")
-            report.require_equal("burner.cowEnabled", cow_enabled, config["cowEnabled"])
-            # The generator interface belongs to the standalone handler; the
-            # burner must never claim it or ComposableCoW misclassifies it.
+            # The burner is not a ComposableCoW handler: it never claims the
+            # conditional-order generator interface.
             report.require_equal(
                 "burner.interface.conditionalOrder",
                 _supports_interface(rpc, burner, CONDITIONAL_ORDER_INTERFACE_ID),
                 False,
             )
-            # The ERC-1271 dispatcher stays live for adapters even with CoW
-            # disabled, so the interface claim must hold unconditionally.
+            # The ERC-1271 dispatcher is the settlement entry for every adapter.
             report.require(
                 "burner.interface.erc1271",
                 _supports_interface(rpc, burner, ERC1271_INTERFACE_ID),
                 "ERC-1271 interface missing",
             )
             report.require_equal(
-                "burner.composableCow",
-                _read_address(rpc, burner, "composable_cow()"),
-                config["composableCow"],
-            )
-            report.require_equal(
-                "burner.cowHandler",
-                _read_address(rpc, burner, "cow_handler()"),
-                config["handler"],
-            )
-            if config["cowEnabled"]:
-                cow_adapter = config["cowAdapter"]
-                report.require_equal(
-                    "burner.fallbackAdapter",
-                    _read_address(rpc, burner, "fallback_adapter()"),
-                    cow_adapter,
-                )
-                report.require_equal(
-                    "cowAdapter.settlement",
-                    _read_address(rpc, cow_adapter, "settlement()"),
-                    config["settlement"],
-                )
-                report.require_equal(
-                    "cowAdapter.vaultRelayer",
-                    _read_address(rpc, cow_adapter, "vault_relayer()"),
-                    config["vaultRelayer"],
-                )
-                report.require_equal(
-                    "cowAdapter.appData",
-                    _read_bytes32(rpc, cow_adapter, "app_data()"),
-                    config["appData"],
-                )
-                if "cowOrderValidity" in config:
-                    report.require_equal(
-                        "cowAdapter.orderValidity",
-                        _read_uint(rpc, cow_adapter, "order_validity()"),
-                        config["cowOrderValidity"],
-                    )
-                report.require_equal(
-                    "cowAdapter.domainSeparator",
-                    _read_bytes32(rpc, cow_adapter, "domain_separator()"),
-                    _read_bytes32(rpc, config["settlement"], "domainSeparator()"),
-                )
-                report.require(
-                    "handler.interface.conditionalOrder",
-                    _supports_interface(
-                        rpc, config["handler"], CONDITIONAL_ORDER_INTERFACE_ID
-                    ),
-                    "handler does not claim the generator interface",
-                )
-            generation = _read_uint(rpc, burner, "cow_generation()")
-            report.checks["burner.cowGeneration"] = generation
-            if cow_enabled and generation == 0:
-                report.errors.append("burner.cowGeneration: enabled with zero generation")
-            report.require_equal(
                 "burner.registry",
                 _read_address(rpc, burner, "registry()"),
                 config.get("registry", ZERO_ADDRESS),
             )
-            if cow_enabled:
-                relayer_refcount = _read(
-                    rpc,
-                    burner,
-                    "executor_refcount(address)",
-                    ["uint256"],
-                    ["address"],
-                    [config["vaultRelayer"]],
-                )[0]
-                report.checks["burner.vaultRelayerRefcount"] = relayer_refcount
-                report.require(
-                    "burner.vaultRelayerRefcount.positive",
-                    relayer_refcount >= 1,
-                    "CoW enabled but the vault relayer holds no executor refcount",
-                )
         except (PreflightError, requests.RequestException) as exc:
             report.errors.append(f"DutchAuctionBurner interface: {exc}")
 
@@ -706,29 +639,6 @@ def lifecycle_calldata(
             "function": "disable_adapter(address)",
             "data": encode_call("disable_adapter(address)", ["address"], [verifier]),
         }
-
-    if config["cowEnabled"]:
-        cow_adapter = config["cowAdapter"]
-        calls["configuration"] = [
-            _enable(cow_adapter),
-            {
-                "to": burner,
-                "function": "set_fallback_adapter(address)",
-                "data": encode_call(
-                    "set_fallback_adapter(address)", ["address"], [cow_adapter]
-                ),
-            },
-            {
-                "to": burner,
-                "function": "configure_watchtower(address,address)",
-                "data": encode_call(
-                    "configure_watchtower(address,address)",
-                    ["address", "address"],
-                    [config["composableCow"], config["handler"]],
-                ),
-            },
-        ]
-        calls["emergency"].append(_disable(cow_adapter))
 
     for adapter in config["adapters"]:
         calls["configuration"].append(_enable(adapter["verifier"]))

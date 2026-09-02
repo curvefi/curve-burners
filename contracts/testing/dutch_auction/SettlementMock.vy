@@ -5,7 +5,7 @@
 @author Curve Finance
 @license MIT
 @notice Minimal GPv2Settlement stand-in: fixed EIP-712 domain separator and
-        vault relayer for CowAdapter deployment in tests.
+        vault relayer for CowAdapter deployments in tests.
 @custom:kill Test-only contract; never deployed to production.
 @custom:security Deliberately trusting test double.
 """

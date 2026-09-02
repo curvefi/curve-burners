@@ -15,11 +15,10 @@ permissionless sync.
 Usage:
     python scripts/emergency_cow_disable.py <burner> <verifier> <executor> <token> [<token> ...]
 
-The verifier is the adapter address (``burner.fallback_adapter()`` for CoW);
-the executor is ``registry.get_adapter(verifier).executor`` (the vault
-relayer for CoW). Note: sync only clears once the executor's refcount is zero
-— if other enabled adapters still reference it, the sync leg keeps allowances
-at max by design.
+The verifier is the adapter address (the CowAdapter for CoW); the executor is
+``registry.get_adapter(verifier).executor`` (the vault relayer for CoW). Note:
+sync only clears once the executor's refcount is zero — if other enabled
+adapters still reference it, the sync leg keeps allowances at max by design.
 """
 
 import sys

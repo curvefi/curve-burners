@@ -17,10 +17,9 @@
      budget, so tokens donated after the snapshot can be sold along the same
      curve — always at or above the curve price and always in favor of the
      proceeds receiver; initial_amount pins the unit price and caps available.
-     Router approvals and the ERC-1271 signature router live in the sibling
-     adapters module; staging reaches it through _sync_stage_approvals, and
-     settlement verifiers price their orders through the external check_order
-     view.
+     Executor approvals and the ERC-1271 signature router live in the sibling
+     adapters module; settlement verifiers price their orders through the
+     external check_order view.
 """
 
 
@@ -294,15 +293,13 @@ def _stage_lot(_token: IERC20, _epoch: uint256) -> uint256:
     @dev The importing contract must transfer custody first; the full current
          balance becomes initial_amount. The lot's active window is not
          stored: it is the calendar's _epoch_bounds(_epoch), owned by the
-         importing contract. The _sync_stage_approvals hook lets the importer
-         top settlement-rail allowances up so staging alone makes the lot
-         pullable by enabled rails.
+         importing contract. Settlement-rail allowances are not staging's
+         concern (see the adapters module's sync_executor_approvals).
     @return The snapshot initial amount.
     """
     self._check_stageable(_token)
     amount: uint256 = staticcall _token.balanceOf(self)
     self.lots[_token] = auction_types.Lot(epoch=_epoch, initial_amount=amount)
-    self._sync_stage_approvals(_token.address)
     start: uint256 = 0
     end: uint256 = 0
     start, end = self._epoch_bounds(_epoch)
@@ -562,8 +559,8 @@ def take_with_limits(
 
 
 # The returned reason strings are a FROZEN cross-contract ABI: CowAdapter
-# reverts them verbatim as OrderNotValid(reason) and the off-chain watchtower
-# classifies orders by them. Renaming one is a silent breaking change no
+# reverts them verbatim as OrderNotValid(reason) and CoW tooling classifies
+# orders by them. Renaming one is a silent breaking change no
 # compiler will catch — never edit an existing reason, only add new ones.
 @external
 @view
@@ -581,15 +578,16 @@ def check_order(
     @dev Verifiers prove that their protocol's digest matches these fields and
          delegate the economics here, so pricing rules exist in exactly one
          place. Returns an empty string for a fillable order and a
-         watchtower-canonical reason otherwise, letting CoW-facing adapters
-         revert OrderNotValid(reason) verbatim. Partial-fill totals are
+         CoW-canonical reason otherwise, letting CoW-facing adapters revert
+         OrderNotValid(reason) verbatim. Partial-fill totals are
          compared against the signed lot's initial_amount, not the live
          remainder: a persistent partially fillable order keeps its original
          total after partial fills. Replay needs no commitment beyond these
          checks: nothing signs on the auction's behalf, so any payload
-         passing them settles at or above the live curve price. The
-         contract-wide nonreentrancy lock rejects validation during a native
-         take callback.
+         passing them settles at or above the live curve price. Locked like
+         every other quote view: a view only reads the contract-wide lock, so
+         the verifier's staticcall back from isValidSignature passes, while a
+         read during a native take callback is rejected.
     """
     token: IERC20 = IERC20(_sell_token)
     lot: auction_types.Lot = self.lots[token]
@@ -640,10 +638,3 @@ def _epoch_bounds(_epoch: uint256) -> (uint256, uint256): ...
 @view
 @abstract
 def _sellable(_token: address) -> bool: ...
-
-
-# Staging-time settlement-rail approvals live with the importing contract's
-# adapter layer; the core only reports that a lot was (re)staged.
-@internal
-@abstract
-def _sync_stage_approvals(_token: address): ...

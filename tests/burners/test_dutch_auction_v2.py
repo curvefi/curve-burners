@@ -24,6 +24,7 @@ FLOOR_TOTAL = WAD
 STEP_DURATION = 60
 COW_ORDER_VALIDITY = 120
 APP_DATA = bytes.fromhex("058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f")
+DOMAIN_SEPARATOR = keccak(b"test GPv2 settlement domain")
 ZERO_BYTES32 = bytes(32)
 MAX_UINT256 = 2**256 - 1
 
@@ -70,8 +71,7 @@ class AuctionDeployment:
     buyer: str
     receiver: str
     watcher: str
-    retired_relayer: str
-    new_relayer: str
+    relayer: str
     target: Any
     sell_token: Any
     second_token: Any
@@ -79,13 +79,9 @@ class AuctionDeployment:
     problem_token: Any
     weth: Any
     fee_collector: Any
-    composable_cow: Any
     settlement: Any
-    new_settlement: Any
-    handler: Any
     registry: Any
     cow_adapter: Any
-    new_cow_adapter: Any
     burner: Any
 
 
@@ -120,10 +116,6 @@ def _address_bytes(address: Any) -> bytes:
     return bytes.fromhex(str(address)[2:])
 
 
-def _static_input(token: Any, generation: int) -> bytes:
-    return _address_bytes(token.address) + generation.to_bytes(32, "big")
-
-
 def _stage(
     deployment: AuctionDeployment,
     token: Any,
@@ -138,6 +130,10 @@ def _stage(
     fee = amount * deployment.fee_collector.fee(Epoch.COLLECT) // WAD
     with boa.env.prank(deployment.keeper):
         deployment.fee_collector.collect([token.address], receiver)
+        if deployment.burner.enabled_adapters(deployment.cow_adapter):
+            # The keeper's post-collect step: staging grants nothing, the
+            # permissionless sync gives the relayer its allowance.
+            deployment.burner.sync_executor_approvals(deployment.relayer, [token.address])
     return amount - fee, fee
 
 
@@ -155,6 +151,10 @@ def _stage_problem_token(
     fee = amount * deployment.fee_collector.fee(Epoch.COLLECT) // WAD
     with boa.env.prank(deployment.keeper):
         deployment.fee_collector.collect([token.address], receiver)
+        if deployment.burner.enabled_adapters(deployment.cow_adapter):
+            # The keeper's post-collect step: staging grants nothing, the
+            # permissionless sync gives the relayer its allowance.
+            deployment.burner.sync_executor_approvals(deployment.relayer, [token.address])
     return amount - fee, fee
 
 
@@ -166,35 +166,12 @@ def _activate_lot(deployment: AuctionDeployment, token: Any, amount: int) -> tup
     return lot, staged
 
 
-def _configure_and_enable_cow(
-    deployment: AuctionDeployment,
-    *,
-    adapter: Any | None = None,
-) -> int:
-    adapter = adapter or deployment.cow_adapter
+def _configure_and_enable_cow(deployment: AuctionDeployment) -> None:
+    """Switch the CoW rail on: the CowAdapter is a regular registry adapter, so
+    the owner enables it locally (the fixture registered and activated it)."""
     with boa.env.prank(deployment.owner):
-        deployment.burner.enable_adapter(adapter)
-        deployment.burner.set_fallback_adapter(adapter)
-        deployment.burner.configure_watchtower(
-            deployment.composable_cow, deployment.handler
-        )
-    return deployment.burner.cow_generation()
-
-
-def _tradeable_order(
-    deployment: AuctionDeployment,
-    token: Any,
-    generation: int | None = None,
-    offchain_input: bytes = b"",
-) -> Any:
-    generation = deployment.burner.cow_generation() if generation is None else generation
-    return deployment.handler.getTradeableOrder(
-        deployment.burner.address,
-        deployment.watcher,
-        ZERO_BYTES32,
-        _static_input(token, generation),
-        offchain_input,
-    )
+        deployment.burner.enable_adapter(deployment.cow_adapter)
+    assert deployment.burner.enabled_adapters(deployment.cow_adapter)
 
 
 def _gpv2_order_digest(order: Any, domain_separator: bytes) -> bytes:
@@ -226,31 +203,6 @@ def _gpv2_order_digest(order: Any, domain_separator: bytes) -> bytes:
         )
     )
     return keccak(b"\x19\x01" + bytes(domain_separator) + struct_hash)
-
-
-def _verify_order(
-    deployment: AuctionDeployment,
-    token: Any,
-    order: Any,
-    *,
-    generation: int | None = None,
-    static_input: bytes | None = None,
-    offchain_input: bytes = b"",
-) -> None:
-    generation = deployment.burner.cow_generation() if generation is None else generation
-    static_input = static_input or _static_input(token, generation)
-    domain_separator = deployment.composable_cow.domainSeparator()
-    order_hash = _gpv2_order_digest(order, domain_separator)
-    deployment.handler.verify(
-        deployment.burner.address,
-        deployment.watcher,
-        order_hash,
-        domain_separator,
-        ZERO_BYTES32,
-        static_input,
-        offchain_input,
-        order,
-    )
 
 
 def _ray_mul(a: int, b: int) -> int:
@@ -296,20 +248,38 @@ def _event_name(log: Any) -> str:
     return event_type.name if event_type is not None else type(log).__name__
 
 
-def _encode_erc1271_signature(order: Any, burner: Any, static_input: bytes) -> bytes:
+def _encode_erc1271_signature(order: Any, adapter: Any) -> bytes:
+    """The eip1271 signature a publisher posts: adapter prefix ++ bare order."""
     order_type = (
         "(address,address,address,uint256,uint256,uint32,bytes32,uint256,"
         "bytes32,bool,bytes32,bytes32)"
     )
-    payload_type = "(bytes32[],(address,bytes32,bytes),bytes)"
-    normalized_order = (
-        str(order[0]),
-        str(order[1]),
-        str(order[2]),
-        *order[3:],
-    )
-    payload = ([], (str(burner.address), ZERO_BYTES32, static_input), b"")
-    return encode([order_type, payload_type], [normalized_order, payload])
+    normalized_order = (str(order[0]), str(order[1]), str(order[2]), *order[3:])
+    return _address_bytes(adapter.address) + encode([order_type], [normalized_order])
+
+
+def _cow_order(deployment: AuctionDeployment, token: Any, **overrides: Any) -> tuple:
+    """A CoW order for the token's live lot as a publisher would build it: sell
+    everything available at the live quote, proceeds to the FeeCollector,
+    valid until the lot window ends."""
+    available = deployment.burner.available(token)
+    lot = _lot_with_bounds(deployment, token)
+    fields = {
+        "sell_token": token.address,
+        "buy_token": deployment.target.address,
+        "receiver": deployment.fee_collector.address,
+        "sell_amount": available,
+        "buy_amount": deployment.burner.getAmountNeeded(token, available) if available else 0,
+        "valid_to": lot[LOT_END],
+        "app_data": APP_DATA,
+        "fee_amount": 0,
+        "kind": SELL_KIND,
+        "partially_fillable": True,
+        "sell_balance": ERC20_BALANCE,
+        "buy_balance": ERC20_BALANCE,
+    }
+    fields.update(overrides)
+    return tuple(fields.values())
 
 
 def _take_calldata(token: Any, max_amount: int, receiver: Any) -> bytes:
@@ -338,8 +308,7 @@ def deployment(burner_deployer: Any) -> AuctionDeployment:
     buyer = boa.env.generate_address("buyer")
     receiver = boa.env.generate_address("receiver")
     watcher = boa.env.generate_address("watcher")
-    retired_relayer = boa.env.generate_address("retired_relayer")
-    new_relayer = boa.env.generate_address("new_relayer")
+    relayer = boa.env.generate_address("relayer")
 
     erc20 = boa.load_partial("contracts/testing/ERC20Mock.vy")
     no_return_erc20 = boa.load_partial("contracts/testing/ERC20MockNoReturn.vy")
@@ -354,22 +323,11 @@ def deployment(burner_deployer: Any) -> AuctionDeployment:
     fee_collector = boa.load(
         "contracts/FeeCollector.vy", target, weth, owner, emergency_owner
     )
-    composable_cow = boa.load("contracts/testing/dutch_auction/ComposableCowMock.vy")
-    domain_separator = composable_cow.domainSeparator()
     settlement = boa.load(
-        "contracts/testing/dutch_auction/SettlementMock.vy", domain_separator, retired_relayer
+        "contracts/testing/dutch_auction/SettlementMock.vy", DOMAIN_SEPARATOR, relayer
     )
-    new_settlement = boa.load(
-        "contracts/testing/dutch_auction/SettlementMock.vy", domain_separator, new_relayer
-    )
-    handler = boa.load("contracts/burners/cow/WatchtowerHandler.vy")
     registry = boa.load("contracts/burners/auction/adapters/AdapterRegistry.vy", fee_collector.address)
-    cow_adapter = boa.load(
-        "contracts/burners/cow/CowAdapter.vy", settlement, APP_DATA, COW_ORDER_VALIDITY
-    )
-    new_cow_adapter = boa.load(
-        "contracts/burners/cow/CowAdapter.vy", new_settlement, APP_DATA, COW_ORDER_VALIDITY
-    )
+    cow_adapter = boa.load("contracts/burners/cow/CowAdapter.vy", settlement, APP_DATA)
 
     burner = burner_deployer.deploy(
         fee_collector,
@@ -382,10 +340,10 @@ def deployment(burner_deployer: Any) -> AuctionDeployment:
     with boa.env.prank(owner):
         fee_collector.set_burner(burner)
         fee_collector.set_killed([(ZERO_ADDRESS, 0)])
-        registry.set_adapter(cow_adapter, cow_adapter.vault_relayer())
+        # CoW is a regular registry adapter: verifier = CowAdapter, executor =
+        # vault relayer. Tests opt in locally via _configure_and_enable_cow.
+        registry.set_adapter(cow_adapter, relayer)
         registry.activate_adapter(cow_adapter)
-        registry.set_adapter(new_cow_adapter, new_cow_adapter.vault_relayer())
-        registry.activate_adapter(new_cow_adapter)
 
     return AuctionDeployment(
         owner,
@@ -394,8 +352,7 @@ def deployment(burner_deployer: Any) -> AuctionDeployment:
         buyer,
         receiver,
         watcher,
-        retired_relayer,
-        new_relayer,
+        relayer,
         target,
         sell_token,
         second_token,
@@ -403,13 +360,9 @@ def deployment(burner_deployer: Any) -> AuctionDeployment:
         problem_token,
         weth,
         fee_collector,
-        composable_cow,
         settlement,
-        new_settlement,
-        handler,
         registry,
         cow_adapter,
-        new_cow_adapter,
         burner,
     )
 
@@ -420,17 +373,22 @@ def test_constructor_and_fixed_interfaces(deployment: AuctionDeployment):
     assert burner.VERSION() == "DutchAuction"
     assert burner.want() == deployment.target.address
     assert burner.target() == deployment.target.address
+    assert burner.fee_collector() == deployment.fee_collector.address
     assert burner.registry() == deployment.registry.address
     assert burner.supportsInterface(ERC165_INTERFACE)
     assert burner.supportsInterface(BURNER_INTERFACE)
-    assert not burner.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
     # The adapter dispatcher is always live, so ERC-1271 is claimed unconditionally.
     assert burner.supportsInterface(ERC1271_MAGIC_VALUE)
+    # No watchtower: the burner is not a conditional-order handler, and the
+    # ComposableCoW muxer probe is a plain False like any unknown interface.
+    assert not burner.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
+    assert not burner.supportsInterface(SIGNATURE_VERIFIER_MUXER_INTERFACE)
 
-    assert not burner.cow_enabled()
-    assert burner.composable_cow() == ZERO_ADDRESS
-    assert burner.fallback_adapter() == ZERO_ADDRESS
-    assert burner.cow_generation() == 0
+    # CoW is a registry adapter: registered and active, not yet enabled locally.
+    assert not burner.enabled_adapters(deployment.cow_adapter)
+    assert deployment.cow_adapter.settlement() == deployment.settlement.address
+    assert deployment.cow_adapter.vault_relayer() == deployment.relayer
+    assert bytes(deployment.cow_adapter.app_data()) == APP_DATA
 
     signatures = _function_signatures(burner)
     assert {
@@ -446,28 +404,31 @@ def test_constructor_and_fixed_interfaces(deployment: AuctionDeployment):
         "sync_executor_approvals(address,address[])",
         "enable_adapter(address)",
         "disable_adapter(address)",
-        "set_fallback_adapter(address)",
         "enabled_adapters(address)",
-        "fallback_adapter()",
         "executor_refcount(address)",
         "registry()",
         "target()",
         "current_epoch()",
     } <= signatures
-    # Retired finite-budget surface must be gone from the ABI.
-    assert "revoke_cow_allowances(address[],address)" not in signatures
-    # CoW execution left the burner for the fallback CowAdapter.
-    assert "configure_cow(address,address,address)" not in signatures
-    assert "enable_cow()" not in signatures
-    assert "settlement()" not in signatures
-    assert "vault_relayer()" not in signatures
-    assert "retired_relayer(address)" not in signatures
-    assert "MAX_COW_BUDGET()" not in signatures
-    # The core is epoch-based; the weekly naming must be gone from the ABI.
-    assert "current_week()" not in signatures
-    assert "cancelled_week(address)" not in signatures
-    # Cancellation retired: emergency is recover + FeeCollector.set_killed.
-    assert "cancelled_epoch(address)" not in signatures
+    # No CoW surface on the burner: CoW is an external adapter, and there is
+    # no fallback route, watchtower, or local CoW switch.
+    for retired in (
+        "configure_cow(address,address,address)",
+        "configure_watchtower(address,address)",
+        "enable_cow()",
+        "set_fallback_adapter(address)",
+        "fallback_adapter()",
+        "cow_enabled()",
+        "cow_generation()",
+        "register_cow_orders(address[])",
+        "sync_cow_approvals(address[])",
+        "getTradeableOrder(address,address,bytes32,bytes,bytes)",
+        "settlement()",
+        "vault_relayer()",
+        "current_week()",
+        "cancelled_epoch(address)",
+    ):
+        assert retired not in signatures
 
 
 def test_yearn_auction_abi_is_exact(deployment: AuctionDeployment):
@@ -554,7 +515,7 @@ def test_constructor_rejects_invalid_curve_parameters(
             floor_total,
             decay_factor,
             step_duration,
-            ZERO_ADDRESS,
+            deployment.registry,
         )
 
 
@@ -1137,267 +1098,107 @@ def test_taken_event_captures_accounting_result(deployment: AuctionDeployment):
     assert taken.remaining_balance == staged - amount
 
 
-def test_cow_configuration_authority_and_initial_state(deployment: AuctionDeployment):
-    with boa.env.prank(deployment.keeper), boa.reverts():
-        deployment.burner.configure_watchtower(
-            deployment.composable_cow, deployment.handler
-        )
-    with boa.env.prank(deployment.keeper), boa.reverts():
-        deployment.burner.enable_adapter(deployment.cow_adapter)
-    with boa.env.prank(deployment.keeper), boa.reverts():
-        deployment.burner.set_fallback_adapter(deployment.cow_adapter)
-    # The fallback route requires a locally enabled adapter first.
-    with boa.env.prank(deployment.owner), boa.reverts(
-        custom_err("FallbackNotEnabled()")
-    ):
-        deployment.burner.set_fallback_adapter(deployment.cow_adapter)
-
-    generation = _configure_and_enable_cow(deployment)
-    assert generation == 1
-    assert deployment.burner.cow_enabled()
-    assert deployment.burner.composable_cow() == deployment.composable_cow.address
-    assert deployment.burner.fallback_adapter() == deployment.cow_adapter.address
-    assert deployment.burner.executor_refcount(deployment.retired_relayer) == 1
-    assert deployment.cow_adapter.settlement() == deployment.settlement.address
-    assert deployment.cow_adapter.vault_relayer() == deployment.retired_relayer
-    assert deployment.burner.cow_handler() == deployment.handler.address
-    # The generator interface belongs to the external handler, never the burner.
-    assert not deployment.burner.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
-    assert deployment.burner.supportsInterface(ERC1271_MAGIC_VALUE)
-
+def test_cow_adapter_enable_authority_and_switches(deployment: AuctionDeployment):
+    burner = deployment.burner
+    adapter = deployment.cow_adapter
+    # Enabling is owner-only; disabling also belongs to the emergency owner.
+    for account in (deployment.keeper, deployment.emergency_owner):
+        with boa.env.prank(account), boa.reverts():
+            burner.enable_adapter(adapter)
+    _configure_and_enable_cow(deployment)
+    assert burner.executor_refcount(deployment.relayer) == 1
     with boa.env.prank(deployment.owner), boa.reverts(custom_err("AlreadyEnabled()")):
-        deployment.burner.enable_adapter(deployment.cow_adapter)
+        burner.enable_adapter(adapter)
     with boa.env.prank(deployment.keeper), boa.reverts():
-        deployment.burner.disable_adapter(deployment.cow_adapter)
+        burner.disable_adapter(adapter)
 
     with boa.env.prank(deployment.emergency_owner):
-        deployment.burner.disable_adapter(deployment.cow_adapter)
-    assert not deployment.burner.cow_enabled()
-    assert deployment.burner.executor_refcount(deployment.retired_relayer) == 0
+        burner.disable_adapter(adapter)
+    assert not burner.enabled_adapters(adapter)
+    assert burner.executor_refcount(deployment.relayer) == 0
     # ERC-1271 stays claimed for the signature router even with CoW disabled.
-    assert not deployment.burner.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
-    assert deployment.burner.supportsInterface(ERC1271_MAGIC_VALUE)
+    assert burner.supportsInterface(ERC1271_MAGIC_VALUE)
 
 
 def test_registry_disable_also_kills_cow_rail(deployment: AuctionDeployment):
-    """The CoW rail mirrors the signature router's dual switches: an emergency
-    registry disable must also stop registrations and watchtower publishing,
-    not only settlement routing."""
+    """Both switches are live: an emergency registry disable stops settlement
+    routing immediately, without any burner-local action."""
     _configure_and_enable_cow(deployment)
-    assert deployment.burner.cow_enabled()
+    _activate_lot(deployment, deployment.sell_token, 100 * WAD)
+    order = _cow_order(deployment, deployment.sell_token)
+    signature = _encode_erc1271_signature(order, deployment.cow_adapter)
+    order_hash = _gpv2_order_digest(order, deployment.settlement.domainSeparator())
+    assert deployment.burner.isValidSignature(order_hash, signature) == ERC1271_MAGIC_VALUE
 
     with boa.env.prank(deployment.emergency_owner):
         deployment.registry.disable_adapter(deployment.cow_adapter)
-    assert not deployment.burner.cow_enabled()
+    assert deployment.burner.enabled_adapters(deployment.cow_adapter)
+    assert deployment.burner.isValidSignature(order_hash, signature) == ERC1271_INVALID
 
     # Reactivation restores the rail without touching burner-local state.
     with boa.env.prank(deployment.owner):
         deployment.registry.activate_adapter(deployment.cow_adapter)
-    assert deployment.burner.cow_enabled()
+    assert deployment.burner.isValidSignature(order_hash, signature) == ERC1271_MAGIC_VALUE
 
 
 def test_cow_lifecycle_events_and_staging_approvals(deployment: AuctionDeployment):
     with boa.env.prank(deployment.owner):
         deployment.burner.enable_adapter(deployment.cow_adapter)
-        enabled = next(
-            log
-            for log in deployment.burner.get_logs()
-            if _event_name(log) == "AdapterEnabled"
-        )
-        deployment.burner.set_fallback_adapter(deployment.cow_adapter)
-        routed = next(
-            log
-            for log in deployment.burner.get_logs()
-            if _event_name(log) == "FallbackAdapterSet"
-        )
-        deployment.burner.configure_watchtower(
-            deployment.composable_cow, deployment.handler
-        )
-        wired = next(
-            log
-            for log in deployment.burner.get_logs()
-            if _event_name(log) == "WatchtowerConfigured"
-        )
-    assert enabled.address == deployment.burner.address
+    enabled = next(
+        log for log in deployment.burner.get_logs() if _event_name(log) == "AdapterEnabled"
+    )
     assert enabled.verifier == deployment.cow_adapter.address
-    assert enabled.executor == deployment.retired_relayer
-    assert routed.verifier == deployment.cow_adapter.address
-    assert wired.composable_cow == deployment.composable_cow.address
-    assert wired.handler == deployment.handler.address
-    assert wired.generation == 1
-    assert deployment.burner.cow_enabled()
+    assert enabled.executor == deployment.relayer
 
+    # Staging grants nothing; the keeper's sync gives the relayer its allowance.
     _stage(deployment, deployment.sell_token, 100 * WAD)
-    logs = deployment.fee_collector.get_logs()
-    registered = next(log for log in logs if _event_name(log) == "ConditionalOrderRegistered")
-    assert registered.address == deployment.burner.address
-    assert registered.token == deployment.sell_token.address
-    assert registered.generation == 1
     assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
+        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
         == MAX_UINT256
     )
 
     with boa.env.prank(deployment.owner):
         deployment.burner.disable_adapter(deployment.cow_adapter)
     disabled = next(
-        log
-        for log in deployment.burner.get_logs()
-        if _event_name(log) == "AdapterDisabled"
+        log for log in deployment.burner.get_logs() if _event_name(log) == "AdapterDisabled"
     )
     assert disabled.verifier == deployment.cow_adapter.address
-    assert disabled.executor == deployment.retired_relayer
-    assert not deployment.burner.cow_enabled()
-
-    # Rail migration: a new adapter (new settlement, new relayer) takes over.
-    with boa.env.prank(deployment.owner):
-        deployment.burner.enable_adapter(deployment.new_cow_adapter)
-        deployment.burner.set_fallback_adapter(deployment.new_cow_adapter)
-        deployment.burner.configure_watchtower(
-            deployment.composable_cow, deployment.handler
-        )
-        rewired = next(
-            log
-            for log in deployment.burner.get_logs()
-            if _event_name(log) == "WatchtowerConfigured"
-        )
-    assert rewired.generation == 2
+    assert disabled.executor == deployment.relayer
 
     # Retired-executor cleanup is permissionless once its refcount is released.
     with boa.env.prank(deployment.keeper):
         deployment.burner.sync_executor_approvals(
-            deployment.retired_relayer, [deployment.sell_token.address]
+            deployment.relayer, [deployment.sell_token.address]
         )
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer) == 0
-    )
+    assert deployment.sell_token.allowance(deployment.burner, deployment.relayer) == 0
 
 
-def test_first_collect_registers_generation_static_data_and_infinite_allowance(
-    deployment: AuctionDeployment,
-):
-    generation = _configure_and_enable_cow(deployment)
-    staged, _ = _stage(deployment, deployment.sell_token, 100 * WAD)
-
-    assert deployment.composable_cow.create_count() == 1
-    assert deployment.composable_cow.last_owner() == deployment.burner.address
-    assert deployment.composable_cow.last_handler() == deployment.handler.address
-    assert deployment.composable_cow.last_salt() == ZERO_BYTES32
-    assert deployment.composable_cow.last_static_data() == _static_input(
-        deployment.sell_token, generation
-    )
-    assert deployment.composable_cow.last_dispatch()
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
-        == MAX_UINT256
-    )
-
-    with boa.env.prank(deployment.keeper):
-        deployment.fee_collector.collect(
-            [deployment.sell_token.address], deployment.keeper
-        )
-    assert deployment.composable_cow.create_count() == 1
-    assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_INITIAL_AMOUNT] == staged
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
-        == MAX_UINT256
-    )
-
-
-def test_tokens_staged_while_disabled_register_only_on_next_collect(
+def test_tokens_staged_while_disabled_get_allowance_via_sync_or_restage(
     deployment: AuctionDeployment,
 ):
     staged, _ = _stage(deployment, deployment.sell_token, 100 * WAD)
-    assert deployment.composable_cow.create_count() == 0
+    assert deployment.sell_token.allowance(deployment.burner, deployment.relayer) == 0
 
-    generation = _configure_and_enable_cow(deployment)
-    assert deployment.composable_cow.create_count() == 0
+    _configure_and_enable_cow(deployment)
     # Approvals follow staging, not enabling: nothing is approved retroactively.
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer) == 0
-    )
+    assert deployment.sell_token.allowance(deployment.burner, deployment.relayer) == 0
     with boa.env.prank(deployment.keeper):
-        deployment.fee_collector.collect(
-            [deployment.sell_token.address], deployment.keeper
+        deployment.burner.sync_executor_approvals(
+            deployment.relayer, [deployment.sell_token.address]
         )
-
-    assert deployment.composable_cow.create_count() == 1
-    assert deployment.composable_cow.last_static_data() == _static_input(
-        deployment.sell_token, generation
-    )
-    assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_INITIAL_AMOUNT] == staged
     assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
+        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
         == MAX_UINT256
     )
 
-
-def test_disable_enable_without_reconfiguration_does_not_duplicate_orders(
-    deployment: AuctionDeployment,
-):
-    generation = _configure_and_enable_cow(deployment)
-    _stage(deployment, deployment.sell_token, 100 * WAD)
-
-    with boa.env.prank(deployment.owner):
-        deployment.burner.disable_adapter(deployment.cow_adapter)
-        assert deployment.burner.executor_refcount(deployment.retired_relayer) == 0
-        deployment.burner.enable_adapter(deployment.cow_adapter)
-    assert deployment.burner.cow_generation() == generation
-    assert deployment.burner.executor_refcount(deployment.retired_relayer) == 1
-
+    # A restage in the same frame keeps the snapshot and the allowance.
     with boa.env.prank(deployment.keeper):
         deployment.fee_collector.collect(
             [deployment.sell_token.address], deployment.keeper
         )
-    assert deployment.composable_cow.create_count() == 1
-
-
-def test_reconfiguration_increments_generation_and_rejects_stale_orders(
-    deployment: AuctionDeployment,
-):
-    old_generation = _configure_and_enable_cow(deployment)
-    _stage(deployment, deployment.sell_token, 100 * WAD)
-    lot = _lot_with_bounds(deployment, deployment.sell_token)
-    _move_to_timestamp(lot[LOT_START])
-    old_order = _tradeable_order(deployment, deployment.sell_token, old_generation)
-
-    with boa.env.prank(deployment.owner):
-        deployment.burner.disable_adapter(deployment.cow_adapter)
-        deployment.burner.enable_adapter(deployment.new_cow_adapter)
-        deployment.burner.set_fallback_adapter(deployment.new_cow_adapter)
-        deployment.burner.configure_watchtower(
-            deployment.composable_cow, deployment.handler
-        )
-    new_generation = deployment.burner.cow_generation()
-    assert new_generation == old_generation + 1
-
-    with boa.reverts():
-        deployment.handler.getTradeableOrder(
-            deployment.burner.address,
-            deployment.watcher,
-            ZERO_BYTES32,
-            _static_input(deployment.sell_token, old_generation),
-            b"",
-        )
-    with boa.reverts():
-        _verify_order(
-            deployment,
-            deployment.sell_token,
-            old_order,
-            generation=old_generation,
-        )
-
-    _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
-    with boa.env.prank(deployment.keeper):
-        deployment.fee_collector.collect(
-            [deployment.sell_token.address], deployment.keeper
-        )
-    assert deployment.composable_cow.create_count() == 2
-    assert deployment.composable_cow.last_static_data() == _static_input(
-        deployment.sell_token, new_generation
-    )
+    assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_INITIAL_AMOUNT] == staged
     assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.new_relayer)
+        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
         == MAX_UINT256
     )
 
@@ -1407,7 +1208,7 @@ def test_permissionless_sync_executor_approvals_follows_derived_state(
 ):
     _configure_and_enable_cow(deployment)
     _stage(deployment, deployment.sell_token, 100 * WAD)
-    relayer = deployment.retired_relayer
+    relayer = deployment.relayer
     assert deployment.sell_token.allowance(deployment.burner, relayer) == MAX_UINT256
 
     with boa.env.prank(deployment.keeper), boa.reverts(custom_err("BadExecutor()")):
@@ -1448,7 +1249,7 @@ def test_emergency_disable_bundle_leaves_no_allowance_window(
 
     _configure_and_enable_cow(deployment)
     _stage(deployment, deployment.sell_token, 100 * WAD)
-    relayer = deployment.retired_relayer
+    relayer = deployment.relayer
     assert deployment.sell_token.allowance(deployment.burner, relayer) == MAX_UINT256
 
     # The script's calldata must match the live ABI of both bundled calls.
@@ -1482,34 +1283,24 @@ def test_emergency_disable_bundle_leaves_no_allowance_window(
             relayer, [deployment.sell_token.address]
         )
 
-    assert not deployment.burner.cow_enabled()
+    assert not deployment.burner.enabled_adapters(deployment.cow_adapter)
     assert deployment.sell_token.allowance(deployment.burner, relayer) == 0
 
 
-def test_disabled_cow_handlers_revert_while_native_take_remains_live(
+def test_disabled_cow_rail_rejects_signatures_while_native_take_remains_live(
     deployment: AuctionDeployment,
 ):
-    generation = _configure_and_enable_cow(deployment)
+    _configure_and_enable_cow(deployment)
     lot, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
-    order = _tradeable_order(deployment, deployment.sell_token, generation)
-    signature = _encode_erc1271_signature(
-        order, deployment.burner, _static_input(deployment.sell_token, generation)
-    )
-    order_hash = _gpv2_order_digest(
-        order, deployment.composable_cow.domainSeparator()
-    )
+    order = _cow_order(deployment, deployment.sell_token)
+    signature = _encode_erc1271_signature(order, deployment.cow_adapter)
+    order_hash = _gpv2_order_digest(order, deployment.settlement.domainSeparator())
+    assert deployment.burner.isValidSignature(order_hash, signature) == ERC1271_MAGIC_VALUE
+
     with boa.env.prank(deployment.emergency_owner):
         deployment.burner.disable_adapter(deployment.cow_adapter)
-
-    with boa.reverts():
-        _tradeable_order(deployment, deployment.sell_token, generation)
-    with boa.reverts():
-        _verify_order(deployment, deployment.sell_token, order, generation=generation)
     # The router has no live route left and answers the invalid magic.
-    assert (
-        deployment.burner.isValidSignature(order_hash, signature) == ERC1271_INVALID
-    )
-    assert not deployment.burner.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
+    assert deployment.burner.isValidSignature(order_hash, signature) == ERC1271_INVALID
     assert deployment.burner.supportsInterface(ERC1271_MAGIC_VALUE)
 
     payment = deployment.burner.getAmountNeeded(deployment.sell_token, staged)
@@ -1527,42 +1318,6 @@ def test_disabled_cow_handlers_revert_while_native_take_remains_live(
         )
 
 
-def test_tradeable_order_fields_quote_and_validity_buckets(deployment: AuctionDeployment):
-    generation = _configure_and_enable_cow(deployment)
-    _stage(deployment, deployment.sell_token, 100 * WAD)
-    lot = _lot_with_bounds(deployment, deployment.sell_token)
-    bucket_start = (
-        (lot[LOT_START] + COW_ORDER_VALIDITY - 1) // COW_ORDER_VALIDITY
-    ) * COW_ORDER_VALIDITY
-    _move_to_timestamp(bucket_start)
-
-    order = _tradeable_order(deployment, deployment.sell_token, generation)
-    available = deployment.burner.available(deployment.sell_token)
-    assert order[ORDER_SELL_TOKEN] == deployment.sell_token.address
-    assert order[ORDER_BUY_TOKEN] == deployment.target.address
-    assert order[ORDER_RECEIVER] == deployment.fee_collector.address
-    assert order[ORDER_SELL_AMOUNT] == available
-    assert order[ORDER_BUY_AMOUNT] == deployment.burner.getAmountNeeded(
-        deployment.sell_token, available
-    )
-    assert order[ORDER_VALID_TO] == min(
-        bucket_start + COW_ORDER_VALIDITY, lot[LOT_END]
-    )
-    assert order[ORDER_APP_DATA] == APP_DATA
-    assert order[ORDER_FEE_AMOUNT] == 0
-    assert order[ORDER_KIND] == SELL_KIND
-    assert order[ORDER_PARTIALLY_FILLABLE]
-    assert order[ORDER_SELL_BALANCE] == ERC20_BALANCE
-    assert order[ORDER_BUY_BALANCE] == ERC20_BALANCE
-
-    _move_to_timestamp(bucket_start + COW_ORDER_VALIDITY - 1)
-    assert _tradeable_order(deployment, deployment.sell_token, generation) == order
-    _move_to_timestamp(bucket_start + COW_ORDER_VALIDITY)
-    next_order = _tradeable_order(deployment, deployment.sell_token, generation)
-    assert next_order[ORDER_BUY_AMOUNT] <= order[ORDER_BUY_AMOUNT]
-    assert next_order[ORDER_VALID_TO] > order[ORDER_VALID_TO]
-
-
 def test_cow_pull_then_donation_resells_in_favor_of_fee_collector(
     deployment: AuctionDeployment,
 ):
@@ -1573,7 +1328,7 @@ def test_cow_pull_then_donation_resells_in_favor_of_fee_collector(
     cow_amount = staged * 40 // 100
     unit_price = deployment.burner.price(deployment.sell_token)
 
-    with boa.env.prank(deployment.retired_relayer):
+    with boa.env.prank(deployment.relayer):
         deployment.sell_token.transferFrom(
             deployment.burner, deployment.receiver, cow_amount
         )
@@ -1606,7 +1361,7 @@ def test_cow_pull_then_donation_resells_in_favor_of_fee_collector(
 def test_native_fill_then_donation_revives_availability_up_to_snapshot(
     deployment: AuctionDeployment,
 ):
-    generation = _configure_and_enable_cow(deployment)
+    _configure_and_enable_cow(deployment)
     _, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
     native_amount = staged * 40 // 100
     remaining = staged - native_amount
@@ -1627,10 +1382,10 @@ def test_native_fill_then_donation_revives_availability_up_to_snapshot(
     # cap, and the CoW order re-quotes the whole refilled amount at curve price.
     deployment.sell_token._mint_for_testing(deployment.burner, native_amount)
     assert deployment.burner.available(deployment.sell_token) == staged
-    order = _tradeable_order(deployment, deployment.sell_token, generation)
+    order = _cow_order(deployment, deployment.sell_token)
     assert order[ORDER_SELL_AMOUNT] == staged
 
-    with boa.env.prank(deployment.retired_relayer):
+    with boa.env.prank(deployment.relayer):
         deployment.sell_token.transferFrom(
             deployment.burner, deployment.watcher, order[ORDER_SELL_AMOUNT]
         )
@@ -1641,50 +1396,20 @@ def test_native_fill_then_donation_revives_availability_up_to_snapshot(
     assert deployment.burner.available(deployment.sell_token) == 0
 
 
-def test_tradeable_order_rejects_zero_unsynced_outside_killed_and_bad_inputs(
-    deployment: AuctionDeployment,
-):
-    generation = _configure_and_enable_cow(deployment)
-    with boa.reverts():
-        _tradeable_order(deployment, deployment.sell_token, generation)
-
-    _stage(deployment, deployment.sell_token, 100 * WAD)
-    lot = _lot_with_bounds(deployment, deployment.sell_token)
-    with boa.reverts():
-        _tradeable_order(deployment, deployment.sell_token, generation)
-
-    _move_to_timestamp(lot[LOT_START])
-    with boa.reverts():
-        deployment.handler.getTradeableOrder(
-            deployment.burner.address,
-            deployment.watcher,
-            ZERO_BYTES32,
-            _static_input(deployment.sell_token, generation)[:-1],
-            b"",
-        )
-    with boa.reverts():
-        _tradeable_order(deployment, deployment.sell_token, generation, b"unexpected")
-
-    with boa.env.prank(deployment.owner):
-        deployment.fee_collector.set_killed(
-            [(deployment.sell_token.address, Epoch.EXCHANGE)]
-        )
-    with boa.reverts():
-        _tradeable_order(deployment, deployment.sell_token, generation)
-
-
-def test_verify_rejects_every_security_relevant_gpv2_field(deployment: AuctionDeployment):
-    generation = _configure_and_enable_cow(deployment)
+def test_erc1271_rejects_every_security_relevant_gpv2_field(deployment: AuctionDeployment):
+    _configure_and_enable_cow(deployment)
     lot, _ = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
-    bucket_start = (
-        (_timestamp() + COW_ORDER_VALIDITY - 1) // COW_ORDER_VALIDITY
-    ) * COW_ORDER_VALIDITY
-    if bucket_start < lot[LOT_END]:
-        _move_to_timestamp(bucket_start)
-    order = list(_tradeable_order(deployment, deployment.sell_token, generation))
-    _verify_order(deployment, deployment.sell_token, order)
+    order = list(_cow_order(deployment, deployment.sell_token))
+    domain_separator = deployment.settlement.domainSeparator()
 
-    invalid_orders: list[list[Any]] = []
+    def validate(candidate: list[Any]) -> bytes:
+        return deployment.burner.isValidSignature(
+            _gpv2_order_digest(candidate, domain_separator),
+            _encode_erc1271_signature(candidate, deployment.cow_adapter),
+        )
+
+    assert validate(order) == ERC1271_MAGIC_VALUE
+
     mutations = {
         ORDER_SELL_TOKEN: deployment.second_token.address,
         ORDER_BUY_TOKEN: deployment.second_token.address,
@@ -1702,73 +1427,56 @@ def test_verify_rejects_every_security_relevant_gpv2_field(deployment: AuctionDe
     for index, invalid_value in mutations.items():
         invalid = deepcopy(order)
         invalid[index] = invalid_value
-        invalid_orders.append(invalid)
-
-    for invalid_order in invalid_orders:
         with boa.reverts():
-            _verify_order(deployment, deployment.sell_token, invalid_order)
+            validate(invalid)
 
+    # The digest binds the payload to the executed order: a valid payload
+    # presented under another order's digest is rejected as well.
+    invalid = deepcopy(order)
+    invalid[ORDER_BUY_AMOUNT] = order[ORDER_BUY_AMOUNT] - 1
     with boa.reverts():
-        _verify_order(
-            deployment,
-            deployment.sell_token,
-            order,
-            static_input=_static_input(deployment.second_token, generation),
-        )
-    with boa.reverts():
-        _verify_order(
-            deployment,
-            deployment.sell_token,
-            order,
-            offchain_input=b"unexpected",
+        deployment.burner.isValidSignature(
+            _gpv2_order_digest(invalid, domain_separator),
+            _encode_erc1271_signature(order, deployment.cow_adapter),
         )
 
 
-def test_erc1271_valid_payload_magic_invalid_payload_and_stale_generation(
+def test_erc1271_valid_payload_magic_and_invalid_payloads(
     deployment: AuctionDeployment,
 ):
-    generation = _configure_and_enable_cow(deployment)
+    _configure_and_enable_cow(deployment)
     lot, _ = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
-    order = _tradeable_order(deployment, deployment.sell_token, generation)
-    signature = _encode_erc1271_signature(
-        order, deployment.burner, _static_input(deployment.sell_token, generation)
-    )
-    order_hash = _gpv2_order_digest(
-        order, deployment.composable_cow.domainSeparator()
-    )
+    order = _cow_order(deployment, deployment.sell_token)
+    signature = _encode_erc1271_signature(order, deployment.cow_adapter)
+    order_hash = _gpv2_order_digest(order, deployment.settlement.domainSeparator())
 
+    assert deployment.burner.isValidSignature(order_hash, signature) == ERC1271_MAGIC_VALUE
+    # A partial-fill order (a persistent order after fills) validates too.
+    partial = _cow_order(
+        deployment,
+        deployment.sell_token,
+        sell_amount=order[ORDER_SELL_AMOUNT] // 2,
+        buy_amount=deployment.burner.getAmountNeeded(
+            deployment.sell_token, order[ORDER_SELL_AMOUNT] // 2
+        ),
+    )
     assert (
-        deployment.burner.isValidSignature(order_hash, signature)
-        == ERC1271_MAGIC_VALUE
-    )
-    with boa.reverts():
-        deployment.burner.isValidSignature(keccak(b"order"), b"malformed")
-    # ComposableCoW's muxer probe must revert: only the reverting probe drops
-    # the real ComposableCoW into its plain-ERC-1271 catch branch, while a
-    # successful False answer is InvalidFallbackHandler().
-    with boa.reverts(custom_err("NotSignatureVerifierMuxer()")):
-        deployment.burner.supportsInterface(SIGNATURE_VERIFIER_MUXER_INTERFACE)
-
-    # A signature with an unknown 20-byte prefix falls through to the CoW
-    # fallback, whose canonical decode rejects it loudly.
-    with boa.reverts():
-        deployment.burner.isValidSignature(order_hash, bytes(20) + bytes(32))
-
-    # A watchtower rewire bumps the generation without touching settlement.
-    with boa.env.prank(deployment.owner):
-        deployment.burner.configure_watchtower(
-            deployment.composable_cow, deployment.handler
+        deployment.burner.isValidSignature(
+            _gpv2_order_digest(partial, deployment.settlement.domainSeparator()),
+            _encode_erc1271_signature(partial, deployment.cow_adapter),
         )
-    assert deployment.burner.cow_generation() == generation + 1
-    # The wrapper is transport, never authority: a stale registration only
-    # stops watchtower discovery, while settlement validation stays purely
-    # economic — the still-active lot keeps validating the same order.
-    assert (
-        deployment.burner.isValidSignature(order_hash, signature)
         == ERC1271_MAGIC_VALUE
     )
+
+    # Malformed payloads behind the adapter prefix revert loudly.
     with boa.reverts():
-        _tradeable_order(deployment, deployment.sell_token, generation)
+        deployment.burner.isValidSignature(
+            keccak(b"order"), _address_bytes(deployment.cow_adapter.address) + b"malformed"
+        )
+    # Without the prefix nothing routes: the historical unprefixed encoding and
+    # an unknown prefix both answer the invalid magic.
+    assert deployment.burner.isValidSignature(order_hash, signature[20:]) == ERC1271_INVALID
+    assert deployment.burner.isValidSignature(order_hash, bytes(20) + signature[20:]) == ERC1271_INVALID
     assert lot[LOT_EPOCH] != 0
 
 
@@ -1828,37 +1536,39 @@ def test_usdt_style_token_granted_from_zero_allowance(deployment: AuctionDeploym
 
     _stage_problem_token(deployment, deployment.problem_token, 100 * WAD)
     assert (
-        deployment.problem_token.allowance(deployment.burner, deployment.retired_relayer)
+        deployment.problem_token.allowance(deployment.burner, deployment.relayer)
         == MAX_UINT256
     )
 
 
-def test_router_approval_failure_blocks_staging(
-    deployment: AuctionDeployment,
-):
-    # Approvals are strict single calls: a token whose approve fails reverts
-    # its staging, so the keeper excludes it from the collect batch instead of
-    # silently staging a lot the CoW rail cannot pull.
+def test_relayer_approval_failure_blocks_only_the_sync(deployment: AuctionDeployment):
+    # Staging touches no allowances: a token whose approve fails still stages
+    # and trades natively; the strict single approve inside the sync reverts,
+    # so the keeper retries the sync later.
     _configure_and_enable_cow(deployment)
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
     deployment.problem_token.set_fails_nonzero_approval(True)
 
     deployment.problem_token._mint_for_testing(deployment.fee_collector, 100 * WAD)
     with boa.env.prank(deployment.keeper):
-        with boa.reverts():
-            deployment.fee_collector.collect(
-                [deployment.problem_token.address], deployment.keeper
-            )
-    assert deployment.problem_token.allowance(
-        deployment.burner, deployment.retired_relayer
-    ) == 0
-
-    # Once the token behaves, staging goes through with the full grant.
-    deployment.problem_token.set_fails_nonzero_approval(False)
-    _stage_problem_token(deployment, deployment.problem_token, 0)
+        deployment.fee_collector.collect(
+            [deployment.problem_token.address], deployment.keeper
+        )
     assert _lot_with_bounds(deployment, deployment.problem_token)[LOT_INITIAL_AMOUNT] > 0
+    with boa.env.prank(deployment.keeper), boa.reverts():
+        deployment.burner.sync_executor_approvals(
+            deployment.relayer, [deployment.problem_token.address]
+        )
+    assert deployment.problem_token.allowance(deployment.burner, deployment.relayer) == 0
+
+    # Once the token behaves, the sync goes through with the full grant.
+    deployment.problem_token.set_fails_nonzero_approval(False)
+    with boa.env.prank(deployment.keeper):
+        deployment.burner.sync_executor_approvals(
+            deployment.relayer, [deployment.problem_token.address]
+        )
     assert (
-        deployment.problem_token.allowance(deployment.burner, deployment.retired_relayer)
+        deployment.problem_token.allowance(deployment.burner, deployment.relayer)
         == MAX_UINT256
     )
 
@@ -1869,9 +1579,7 @@ def test_no_return_token_approval_can_be_synced_after_disable(
     _configure_and_enable_cow(deployment)
     _stage(deployment, deployment.no_return_token, 100 * 10**8)
     assert (
-        deployment.no_return_token.allowance(
-            deployment.burner, deployment.retired_relayer
-        )
+        deployment.no_return_token.allowance(deployment.burner, deployment.relayer)
         == MAX_UINT256
     )
 
@@ -1879,12 +1587,10 @@ def test_no_return_token_approval_can_be_synced_after_disable(
         deployment.burner.disable_adapter(deployment.cow_adapter)
     with boa.env.prank(deployment.keeper):
         deployment.burner.sync_executor_approvals(
-            deployment.retired_relayer, [deployment.no_return_token.address]
+            deployment.relayer, [deployment.no_return_token.address]
         )
     assert (
-        deployment.no_return_token.allowance(
-            deployment.burner, deployment.retired_relayer
-        )
+        deployment.no_return_token.allowance(deployment.burner, deployment.relayer)
         == 0
     )
 
@@ -1930,15 +1636,12 @@ def test_reentrant_sell_token_transfer_reverts_without_accounting_loss(
 def test_recover_empties_lot_and_set_killed_fences_donation_revival(
     deployment: AuctionDeployment,
 ):
-    generation = _configure_and_enable_cow(deployment)
+    _configure_and_enable_cow(deployment)
     lot, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
-    order = _tradeable_order(deployment, deployment.sell_token, generation)
-    static_input = _static_input(deployment.sell_token, generation)
-    signature = _encode_erc1271_signature(
-        order, deployment.burner, static_input
-    )
+    order = _cow_order(deployment, deployment.sell_token)
+    signature = _encode_erc1271_signature(order, deployment.cow_adapter)
     order_hash = _gpv2_order_digest(
-        order, deployment.composable_cow.domainSeparator()
+        order, deployment.settlement.domainSeparator()
     )
 
     with boa.env.prank(deployment.owner):
@@ -1967,12 +1670,6 @@ def test_recover_empties_lot_and_set_killed_fences_donation_revival(
             deployment.sell_token, 1, deployment.receiver, b""
         )
     with boa.reverts():
-        _tradeable_order(deployment, deployment.sell_token, generation)
-    with boa.reverts():
-        _verify_order(
-            deployment, deployment.sell_token, order, generation=generation
-        )
-    with boa.reverts():
         deployment.burner.isValidSignature(order_hash, signature)
 
     # A donation revives the still-registered lot — it resells at curve price
@@ -1989,8 +1686,6 @@ def test_recover_empties_lot_and_set_killed_fences_donation_revival(
         )
     assert deployment.burner.available(deployment.sell_token) == 0
     assert deployment.burner.price(deployment.sell_token) == 0
-    with boa.reverts():
-        _tradeable_order(deployment, deployment.sell_token, generation)
     with boa.reverts():
         deployment.burner.isValidSignature(order_hash, signature)
 
@@ -2018,28 +1713,25 @@ def test_recover_empties_lot_and_set_killed_fences_donation_revival(
     assert refreshed_lot[LOT_EPOCH] == lot[LOT_EPOCH] + WEEK
     assert refreshed_lot[LOT_INITIAL_AMOUNT] == expected_snapshot
     assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
+        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
         == MAX_UINT256
     )
 
     _move_to_timestamp(refreshed_lot[LOT_START])
     assert deployment.burner.available(deployment.sell_token) == expected_snapshot
     assert deployment.burner.price(deployment.sell_token) > 0
-    refreshed_order = _tradeable_order(
-        deployment, deployment.sell_token, generation
-    )
+    refreshed_order = _cow_order(deployment, deployment.sell_token)
     assert refreshed_order[ORDER_SELL_AMOUNT] == expected_snapshot
 
 
 def test_recover_during_collect_frame_recollect_restages_unless_killed(
     deployment: AuctionDeployment,
 ):
-    generation = _configure_and_enable_cow(deployment)
+    _configure_and_enable_cow(deployment)
     staged, _ = _stage(deployment, deployment.sell_token, 100 * WAD)
     first_lot = _lot_with_bounds(deployment, deployment.sell_token)
-    assert deployment.burner.cow_registered(deployment.sell_token)
     assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
+        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
         == MAX_UINT256
     )
 
@@ -2074,7 +1766,6 @@ def test_recover_during_collect_frame_recollect_restages_unless_killed(
     assert deployment.sell_token.balanceOf(deployment.fee_collector) == collector_before
     assert deployment.sell_token.balanceOf(deployment.keeper) == keeper_before
     assert deployment.sell_token.balanceOf(deployment.burner) == 0
-    assert deployment.composable_cow.create_count() == 1
 
     # Once the kill is lifted, the very same frame's permissionless collect
     # restages the evacuated funds from the top of the curve.
@@ -2094,23 +1785,20 @@ def test_recover_during_collect_frame_recollect_restages_unless_killed(
     assert deployment.sell_token.balanceOf(deployment.burner) == expected_snapshot
     assert deployment.sell_token.balanceOf(deployment.keeper) == keeper_before + fee
     assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
+        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
         == MAX_UINT256
     )
-    assert deployment.composable_cow.create_count() == 1
 
     _move_to_timestamp(refreshed_lot[LOT_START])
     assert deployment.burner.available(deployment.sell_token) == expected_snapshot
-    refreshed_order = _tradeable_order(
-        deployment, deployment.sell_token, generation
-    )
+    refreshed_order = _cow_order(deployment, deployment.sell_token)
     assert refreshed_order[ORDER_SELL_AMOUNT] == expected_snapshot
 
 
 def test_recover_before_first_staging_leaves_no_state_and_collect_restages(
     deployment: AuctionDeployment,
 ):
-    generation = _configure_and_enable_cow(deployment)
+    _configure_and_enable_cow(deployment)
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
     recovery_epoch = deployment.burner.current_epoch()
     recovered_amount = 10 * WAD
@@ -2122,16 +1810,14 @@ def test_recover_before_first_staging_leaves_no_state_and_collect_restages(
         deployment.burner.recover([deployment.sell_token.address])
 
     assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_EPOCH] == 0
-    assert not deployment.burner.cow_registered(deployment.sell_token)
-    assert deployment.composable_cow.create_count() == 0
     assert deployment.sell_token.balanceOf(deployment.burner) == 0
     assert (
         deployment.sell_token.balanceOf(deployment.fee_collector)
         == recovered_amount
     )
-    # Approvals only follow staging: nothing was approved before the recovery.
+    # Approvals only come from the keeper's sync: nothing was approved yet.
     assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
+        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
         == 0
     )
 
@@ -2143,22 +1829,21 @@ def test_recover_before_first_staging_leaves_no_state_and_collect_restages(
         deployment.fee_collector.collect(
             [deployment.sell_token.address], deployment.keeper
         )
+        deployment.burner.sync_executor_approvals(
+            deployment.relayer, [deployment.sell_token.address]
+        )
 
     refreshed_lot = _lot_with_bounds(deployment, deployment.sell_token)
     expected_snapshot = recovered_amount - fee
     assert refreshed_lot[LOT_EPOCH] == recovery_epoch
     assert refreshed_lot[LOT_INITIAL_AMOUNT] == expected_snapshot
     assert deployment.sell_token.balanceOf(deployment.keeper) == keeper_before + fee
-    assert deployment.burner.cow_registered(deployment.sell_token)
-    assert deployment.composable_cow.create_count() == 1
     assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.retired_relayer)
+        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
         == MAX_UINT256
     )
     _move_to_timestamp(refreshed_lot[LOT_START])
-    assert _tradeable_order(
-        deployment, deployment.sell_token, generation
-    )[ORDER_SELL_AMOUNT] == expected_snapshot
+    assert _cow_order(deployment, deployment.sell_token)[ORDER_SELL_AMOUNT] == expected_snapshot
 
 
 def test_push_target_and_recovery_only_return_assets_to_fee_collector(
@@ -2204,7 +1889,7 @@ def test_full_lifecycle_collect_cow_and_native_fills_then_forward(
 
     cow_amount = staged * 40 // 100
     cow_payment = deployment.burner.getAmountNeeded(deployment.sell_token, cow_amount)
-    with boa.env.prank(deployment.retired_relayer):
+    with boa.env.prank(deployment.relayer):
         deployment.sell_token.transferFrom(
             deployment.burner, deployment.receiver, cow_amount
         )
@@ -2364,13 +2049,11 @@ def test_resync_only_in_sleep_fences_previous_lots(
     change can never land under a staged lot: EXCHANGE and FORWARD attempts
     revert, and the SLEEP resync fences every previous epoch, killing the old
     week's lot and its published CoW order."""
-    generation = _configure_and_enable_cow(deployment)
+    _configure_and_enable_cow(deployment)
     lot, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
-    order = _tradeable_order(deployment, deployment.sell_token, generation)
-    signature = _encode_erc1271_signature(
-        order, deployment.burner, _static_input(deployment.sell_token, generation)
-    )
-    order_hash = _gpv2_order_digest(order, deployment.composable_cow.domainSeparator())
+    order = _cow_order(deployment, deployment.sell_token)
+    signature = _encode_erc1271_signature(order, deployment.cow_adapter)
+    order_hash = _gpv2_order_digest(order, deployment.settlement.domainSeparator())
     assert (
         deployment.burner.isValidSignature(order_hash, signature)
         == ERC1271_MAGIC_VALUE
