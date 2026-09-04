@@ -43,11 +43,12 @@
 
 from ethereum.ercs import IERC20
 
-from contracts.interfaces import IDutchAuction, IDutchAuctionBurner, IFeeCollector
+from contracts.interfaces import IBurner, IDutchAuction, IDutchAuctionBurner, IFeeCollector
 from contracts.utils import constants as c, recovery, roles
 from contracts.burners.auction import dutch_auction
 from contracts.burners.auction.adapters import adapters
 
+implements: IBurner
 implements: IDutchAuction
 implements: IDutchAuctionBurner
 initializes: roles
