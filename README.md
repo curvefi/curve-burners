@@ -10,8 +10,8 @@ This is grouped into phase `Collect`.
 Keepers get % from each earned coin according to Dutch auction.
 
 Next comes `Exchange` phase when all collected coins are converted into crvUSD.
-This may be done using different burners like [`CowSwapBurner`](contracts/burners/CowSwapBurner.vy)
-which delegates price discovery and settlement to CowSwap auction.
+This may be done using [`DutchAuctionBurner`](contracts/burners/DutchAuctionBurner.vy),
+which supports native Dutch-auction settlement and external settlement adapters.
 
 Final phase is `Forward` which is applied to resulting crvUSD.
 Mainly it bridges to Ethereum or FeeDistributor,

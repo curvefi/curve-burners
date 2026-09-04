@@ -6,11 +6,6 @@ Note: latest StableSwap and CryptoSwap implementations send fees automatically
 Basically a template Burner, that allows to collect coins with associated payout.
 
 
-## CowSwapBurner
-Using `ComposableCow` to post orders into CowSwap.
-Coins are priced via CowSwap solvers' internal auction.
-
-
 ## DutchAuctionBurner
 
 During `FeeCollector`'s COLLECT phase, each token's full burner balance is

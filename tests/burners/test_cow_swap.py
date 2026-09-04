@@ -44,7 +44,7 @@ def isValidSafeSignature(safe: address, sender: address, _hash: bytes32, _domain
 @pytest.fixture(scope="module", autouse=True)
 def burner(admin, fee_collector, cow_swap):
     with boa.env.prank(admin):
-        burner = boa.load("contracts/burners/CowSwapBurner.vy", fee_collector, cow_swap, cow_swap, 1)
+        burner = boa.load("contracts/deprecated/CowSwapBurner.vy", fee_collector, cow_swap, cow_swap, 1)
         fee_collector.set_burner(burner)
         fee_collector.set_killed([(ZERO_ADDRESS, 0)])
     return burner

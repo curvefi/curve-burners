@@ -55,13 +55,13 @@ def deploy_burner(fee_collector):
         return boa.load("contracts/burners/XYZBurner.vy", fee_collector)
         # return boa.load_partial("contracts/burners/XYZBurner.vy").at("")
     if BURNER == "CowSwap":
-        return boa.load("contracts/burners/CowSwapBurner.vy",
+        return boa.load("contracts/deprecated/CowSwapBurner.vy",
                         fee_collector,
                         COMPOSABLE_COW,
                         COW_VAULT_RELAYER,
                         MIN_EXCHANGE_AMOUNT,
                         )
-        # return boa.load_partial("contracts/burners/CowSwapBurner.vy").at("")
+        # return boa.load_partial("contracts/deprecated/CowSwapBurner.vy").at("")
     if BURNER == "DutchAuction":
         # Run scripts/dutch_auction_preflight.py against the final chain config first.
         registry = boa.load("contracts/burners/auction/adapters/AdapterRegistry.vy", fee_collector)  # roles follow FeeCollector owner/emergency_owner
