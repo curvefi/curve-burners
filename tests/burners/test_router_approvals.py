@@ -1,4 +1,11 @@
-from typing import Any
+"""Executor allowance sync driven by the registry's executor activity.
+
+The auction holds no adapter state of its own: the AdapterRegistry is the
+single switch. activate_adapter references the adapter's executor,
+disable_adapter releases it, and the permissionless sync_executor_approvals
+grants max allowance while is_executor_active(executor) and clears it
+otherwise. Staging never touches allowances.
+"""
 
 import boa
 import pytest
@@ -16,9 +23,7 @@ STEP_DURATION = 60
 DECAY_FACTOR_RAY = 992031276831159793484252056
 LOT_AMOUNT = 250 * WAD
 
-LOT_EPOCH = 0
 LOT_INITIAL_AMOUNT = 1
-
 
 
 @pytest.fixture(autouse=True)
@@ -92,8 +97,8 @@ def role_source(owner, emergency_owner):
 
 
 @pytest.fixture(scope="module")
-def verifier_deployer():
-    return boa.load_partial("contracts/testing/dutch_auction/VerifierMock.vy")
+def adapter_deployer():
+    return boa.load_partial("contracts/testing/dutch_auction/AdapterMock.vy")
 
 
 @pytest.fixture
@@ -104,9 +109,9 @@ def registry(role_source):
 
 
 @pytest.fixture
-def adapter_cow(verifier_deployer, registry, owner, relayer):
-    """Adapter whose executor is the CoW vault relayer."""
-    adapter = verifier_deployer.deploy()
+def adapter_cow(adapter_deployer, registry, owner, relayer):
+    """Active adapter whose executor is the CoW vault relayer."""
+    adapter = adapter_deployer.deploy()
     with boa.env.prank(owner):
         registry.set_adapter(adapter, relayer)
         registry.activate_adapter(adapter)
@@ -114,9 +119,9 @@ def adapter_cow(verifier_deployer, registry, owner, relayer):
 
 
 @pytest.fixture
-def adapter_p2a(verifier_deployer, registry, owner, permit2):
+def adapter_p2a(adapter_deployer, registry, owner, permit2):
     """First permit2-family adapter: shares the Permit2 executor."""
-    adapter = verifier_deployer.deploy()
+    adapter = adapter_deployer.deploy()
     with boa.env.prank(owner):
         registry.set_adapter(adapter, permit2)
         registry.activate_adapter(adapter)
@@ -124,22 +129,21 @@ def adapter_p2a(verifier_deployer, registry, owner, permit2):
 
 
 @pytest.fixture
-def adapter_p2b(verifier_deployer, registry, owner, permit2):
+def adapter_p2b(adapter_deployer, registry, owner, permit2):
     """Second permit2-family adapter: shares the Permit2 executor."""
-    adapter = verifier_deployer.deploy()
+    adapter = adapter_deployer.deploy()
     with boa.env.prank(owner):
         registry.set_adapter(adapter, permit2)
         registry.activate_adapter(adapter)
     return adapter
 
 
-@pytest.fixture
-def harness(owner, role_source, want, proceeds_receiver, registry):
+def _deploy_harness(want, proceeds_receiver, registry_address, role_source):
     return boa.load(
         "contracts/testing/dutch_auction/CoreHarness.vy",
         want.address,
         proceeds_receiver,
-        registry.address,
+        registry_address,
         role_source.address,
         START_TOTAL,
         FLOOR_TOTAL,
@@ -149,19 +153,17 @@ def harness(owner, role_source, want, proceeds_receiver, registry):
 
 
 @pytest.fixture
-def enable(owner):
-    def _enable(harness, adapter):
-        with boa.env.prank(owner):
-            harness.enable_adapter(adapter)
-
-    return _enable
+def harness(role_source, want, proceeds_receiver, registry):
+    return _deploy_harness(want, proceeds_receiver, registry.address, role_source)
 
 
 @pytest.fixture
-def disable(owner):
-    def _disable(harness, adapter):
+def disable(registry, owner):
+    """Release an adapter's executor reference through the registry."""
+
+    def _disable(adapter):
         with boa.env.prank(owner):
-            harness.disable_adapter(adapter)
+            registry.disable_adapter(adapter)
 
     return _disable
 
@@ -179,9 +181,18 @@ def stage():
 
 
 def test_stage_grants_nothing_and_sync_grants_referenced_executors_only(
-    harness, enable, stage, keeper, adapter_cow, token_a, relayer, permit2
+    harness,
+    stage,
+    keeper,
+    owner,
+    registry,
+    adapter_deployer,
+    adapter_cow,
+    token_a,
+    token_b,
+    relayer,
+    permit2,
 ):
-    enable(harness, adapter_cow)
     stage(harness, token_a)
     assert token_a.allowance(harness, relayer) == 0
     assert token_a.allowance(harness, permit2) == 0
@@ -193,27 +204,21 @@ def test_stage_grants_nothing_and_sync_grants_referenced_executors_only(
     # Unreferenced executor: the sync is a clearing pass, never a grant.
     assert token_a.allowance(harness, permit2) == 0
 
-
-def test_sync_grants_every_referenced_executor(
-    harness, enable, stage, keeper, adapter_cow, adapter_p2a, token_a, relayer, permit2
-):
-    enable(harness, adapter_cow)
-    enable(harness, adapter_p2a)
-    stage(harness, token_a)
+    # Every referenced executor is granted once its adapter goes live.
+    permit2_adapter = adapter_deployer.deploy()
+    with boa.env.prank(owner):
+        registry.set_adapter(permit2_adapter, permit2)
+        registry.activate_adapter(permit2_adapter)
     with boa.env.prank(keeper):
-        harness.sync_executor_approvals(relayer, [token_a.address])
         harness.sync_executor_approvals(permit2, [token_a.address])
-    assert token_a.allowance(harness, relayer) == MAX_UINT256
     assert token_a.allowance(harness, permit2) == MAX_UINT256
 
-
-def test_stage_without_enabled_adapters_grants_nothing(
-    harness, stage, token_a, relayer, permit2
-):
-    stage(harness, token_a)
-    assert harness.lots(token_a.address)[LOT_INITIAL_AMOUNT] == LOT_AMOUNT
-    assert token_a.allowance(harness, relayer) == 0
-    assert token_a.allowance(harness, permit2) == 0
+    # The sync is the retry path for a never-staged token and is idempotent.
+    for _ in range(2):
+        with boa.env.prank(keeper):
+            harness.sync_executor_approvals(relayer, [token_a.address, token_b.address])
+        assert token_a.allowance(harness, relayer) == MAX_UINT256
+        assert token_b.allowance(harness, relayer) == MAX_UINT256
 
 
 def test_stage_rejects_target_token(harness, want):
@@ -222,95 +227,64 @@ def test_stage_rejects_target_token(harness, want):
         harness.stage(want.address)
 
 
-# Executor refcount lifecycle
+# The registry's executor activity is the only switch the sync follows
 
 
-def test_enable_requires_known_active_registry_entry(
-    harness, registry, owner, verifier_deployer, relayer
+def test_sync_follows_registry_activation(
+    harness, registry, owner, keeper, adapter_deployer, token_a, relayer
 ):
-    unknown = verifier_deployer.deploy()
-    with boa.env.prank(owner), boa.reverts(custom_err("UnknownAdapter()")):
-        harness.enable_adapter(unknown)
-
-    inactive = verifier_deployer.deploy()
+    # Registered but inactive: the executor is unreferenced, the sync clears.
+    adapter = adapter_deployer.deploy()
     with boa.env.prank(owner):
-        registry.set_adapter(inactive, relayer)
-        with boa.reverts(custom_err("InactiveAdapter()")):
-            harness.enable_adapter(inactive)
-        registry.activate_adapter(inactive)
-        harness.enable_adapter(inactive)
-    assert harness.enabled_adapters(inactive)
+        registry.set_adapter(adapter, relayer)
+    assert not registry.is_executor_active(relayer)
+    with boa.env.prank(keeper):
+        harness.sync_executor_approvals(relayer, [token_a.address])
+    assert token_a.allowance(harness, relayer) == 0
 
-
-def test_enable_requires_registry(owner, role_source, want, proceeds_receiver, adapter_cow):
-    no_registry = boa.load(
-        "contracts/testing/dutch_auction/CoreHarness.vy",
-        want.address,
-        proceeds_receiver,
-        ZERO_ADDRESS,
-        role_source.address,
-        START_TOTAL,
-        FLOOR_TOTAL,
-        DECAY_FACTOR_RAY,
-        STEP_DURATION,
-    )
-    with boa.env.prank(owner), boa.reverts(custom_err("NoRegistry()")):
-        no_registry.enable_adapter(adapter_cow)
-
-
-def test_enable_disable_authority_and_double_toggle(
-    harness, owner, emergency_owner, keeper, adapter_cow
-):
-    with boa.env.prank(keeper), boa.reverts(custom_err("OnlyOwner()")):
-        harness.enable_adapter(adapter_cow)
-    with boa.env.prank(emergency_owner), boa.reverts(custom_err("OnlyOwner()")):
-        harness.enable_adapter(adapter_cow)
-
+    # Activation references the executor; nothing happens on the auction until
+    # the sync is run.
     with boa.env.prank(owner):
-        harness.enable_adapter(adapter_cow)
-        with boa.reverts(custom_err("AlreadyEnabled()")):
-            harness.enable_adapter(adapter_cow)
-
-    with boa.env.prank(keeper), boa.reverts(custom_err("OnlyOwnerOrEmergency()")):
-        harness.disable_adapter(adapter_cow)
-    # Emergency can disable but never enable.
-    with boa.env.prank(emergency_owner):
-        harness.disable_adapter(adapter_cow)
-    with boa.env.prank(owner), boa.reverts(custom_err("NotEnabled()")):
-        harness.disable_adapter(adapter_cow)
+        registry.activate_adapter(adapter)
+    assert registry.is_executor_active(relayer)
+    assert token_a.allowance(harness, relayer) == 0
+    with boa.env.prank(keeper):
+        harness.sync_executor_approvals(relayer, [token_a.address])
+    assert token_a.allowance(harness, relayer) == MAX_UINT256
 
 
-def test_shared_executor_refcount(
-    harness, enable, disable, adapter_p2a, adapter_p2b, permit2
+def test_sync_without_registry_always_clears(
+    role_source, want, proceeds_receiver, keeper, token_a, relayer
 ):
-    enable(harness, adapter_p2a)
-    assert harness.executor_refcount(permit2) == 1
-    enable(harness, adapter_p2b)
-    # One shared Permit2, counted per enabled adapter.
-    assert harness.executor_refcount(permit2) == 2
-    disable(harness, adapter_p2a)
-    assert harness.executor_refcount(permit2) == 1
-    disable(harness, adapter_p2b)
-    assert harness.executor_refcount(permit2) == 0
+    # No registry means native settlement only: no executor is ever
+    # referenced, so the sync degrades to a pure clearing pass.
+    no_registry = _deploy_harness(want, proceeds_receiver, ZERO_ADDRESS, role_source)
+    assert no_registry.registry() == ZERO_ADDRESS
+    with boa.env.prank(no_registry.address):
+        token_a.approve(relayer, 1234)
+    with boa.env.prank(keeper):
+        no_registry.sync_executor_approvals(relayer, [token_a.address])
+    assert token_a.allowance(no_registry, relayer) == 0
 
 
 def test_shared_executor_approved_once_and_kept_until_full_release(
-    harness, enable, disable, stage, keeper, adapter_p2a, adapter_p2b, token_a, permit2
+    harness, disable, stage, keeper, adapter_p2a, adapter_p2b, token_a, permit2, registry
 ):
-    enable(harness, adapter_p2a)
-    enable(harness, adapter_p2b)
+    assert registry.is_executor_active(permit2)
     stage(harness, token_a)
     with boa.env.prank(keeper):
         harness.sync_executor_approvals(permit2, [token_a.address])
     assert token_a.allowance(harness, permit2) == MAX_UINT256
 
-    disable(harness, adapter_p2a)
-    # Still referenced: the permissionless sync must keep the grant.
+    disable(adapter_p2a)
+    # Still referenced by the second adapter: the sync must keep the grant.
+    assert registry.is_executor_active(permit2)
     with boa.env.prank(keeper):
         harness.sync_executor_approvals(permit2, [token_a.address])
     assert token_a.allowance(harness, permit2) == MAX_UINT256
 
-    disable(harness, adapter_p2b)
+    disable(adapter_p2b)
+    assert not registry.is_executor_active(permit2)
     with boa.env.prank(keeper):
         harness.sync_executor_approvals(permit2, [token_a.address])
     assert token_a.allowance(harness, permit2) == 0
@@ -319,39 +293,21 @@ def test_shared_executor_approved_once_and_kept_until_full_release(
 # Permissionless sync
 
 
-def test_sync_grants_as_retry_path(
-    harness, enable, stage, keeper, adapter_cow, token_a, token_b, relayer
+def test_sync_revokes_after_emergency_release(
+    harness, registry, emergency_owner, stage, keeper, adapter_cow, token_a, relayer
 ):
-    enable(harness, adapter_cow)
-    stage(harness, token_a)
-    # token_b was never staged; sync tops it up while the executor is live.
-    with boa.env.prank(keeper):
-        harness.sync_executor_approvals(relayer, [token_a.address, token_b.address])
-    assert token_a.allowance(harness, relayer) == MAX_UINT256
-    assert token_b.allowance(harness, relayer) == MAX_UINT256
-
-
-def test_sync_revokes_after_release(
-    harness, enable, disable, stage, keeper, adapter_cow, token_a, relayer
-):
-    enable(harness, adapter_cow)
     stage(harness, token_a)
     with boa.env.prank(keeper):
         harness.sync_executor_approvals(relayer, [token_a.address])
     assert token_a.allowance(harness, relayer) == MAX_UINT256
-    disable(harness, adapter_cow)
+    # The registry disable itself touches no auction allowance; the sync does
+    # the cleanup once the executor is no longer active.
+    with boa.env.prank(emergency_owner):
+        registry.disable_adapter(adapter_cow)
+    assert token_a.allowance(harness, relayer) == MAX_UINT256
     with boa.env.prank(keeper):
         harness.sync_executor_approvals(relayer, [token_a.address])
     assert token_a.allowance(harness, relayer) == 0
-
-
-def test_sync_is_idempotent(harness, enable, stage, keeper, adapter_cow, token_a, relayer):
-    enable(harness, adapter_cow)
-    stage(harness, token_a)
-    for _ in range(2):
-        with boa.env.prank(keeper):
-            harness.sync_executor_approvals(relayer, [token_a.address])
-        assert token_a.allowance(harness, relayer) == MAX_UINT256
 
 
 def test_sync_clears_residual_allowance_of_unreferenced_executor(
@@ -359,7 +315,7 @@ def test_sync_clears_residual_allowance_of_unreferenced_executor(
 ):
     stranger = boa.env.generate_address("stranger_executor")
     problem_token.mint(harness.address, LOT_AMOUNT)
-    # Residual allowance without any enabled adapter referencing the executor.
+    # Residual allowance without any active adapter referencing the executor.
     with boa.env.prank(harness.address):
         problem_token.approve(stranger, 1234)
     with boa.env.prank(keeper):
@@ -372,19 +328,17 @@ def test_sync_rejects_zero_executor(harness, keeper, token_a):
         harness.sync_executor_approvals(ZERO_ADDRESS, [token_a.address])
 
 
-def test_sync_rejects_target_token(harness, enable, keeper, want, token_a, adapter_cow, relayer):
-    enable(harness, adapter_cow)
+def test_sync_rejects_target_token(harness, keeper, want, token_a, adapter_cow, relayer):
     with boa.env.prank(keeper), boa.reverts(custom_err("WantNotSellable()")):
         harness.sync_executor_approvals(relayer, [token_a.address, want.address])
 
 
 def test_sync_clears_want_allowance_of_released_executor(
-    harness, enable, disable, keeper, want, adapter_cow, relayer
+    harness, disable, keeper, want, adapter_cow, relayer
 ):
     """A token promoted to want by a resync may carry a stale settlement
     allowance; only granting refuses want — clearing must stay possible."""
-    enable(harness, adapter_cow)
-    disable(harness, adapter_cow)
+    disable(adapter_cow)
     with boa.env.prank(harness.address):
         want.approve(relayer, 1234)
     with boa.env.prank(keeper):
@@ -396,9 +350,8 @@ def test_sync_clears_want_allowance_of_released_executor(
 
 
 def test_usdt_style_grant_from_zero_allowance(
-    harness, enable, keeper, stage, problem_token, adapter_cow, relayer
+    harness, keeper, stage, problem_token, adapter_cow, relayer
 ):
-    enable(harness, adapter_cow)
     problem_token.set_requires_approval_reset(True)
     with boa.env.prank(keeper):
         harness.sync_executor_approvals(relayer, [problem_token.address])
@@ -406,9 +359,8 @@ def test_usdt_style_grant_from_zero_allowance(
 
 
 def test_nonzero_residual_allowance_left_untouched_while_referenced(
-    harness, enable, keeper, problem_token, adapter_cow, relayer
+    harness, keeper, problem_token, adapter_cow, relayer
 ):
-    enable(harness, adapter_cow)
     with boa.env.prank(harness.address):
         problem_token.approve(relayer, 1234)
     # The guarded helper only writes from zero: a mid-range residual is
@@ -419,11 +371,10 @@ def test_nonzero_residual_allowance_left_untouched_while_referenced(
 
 
 def test_approval_failure_never_blocks_staging(
-    harness, enable, keeper, problem_token, adapter_cow, relayer
+    harness, keeper, problem_token, adapter_cow, relayer
 ):
     # Staging touches no allowances, so a token whose approve fails still
     # stages and trades natively; only the sync leg for it reverts.
-    enable(harness, adapter_cow)
     problem_token.set_fails_nonzero_approval(True)
     problem_token.mint(harness.address, LOT_AMOUNT)
     harness.stage(problem_token.address)
@@ -431,12 +382,3 @@ def test_approval_failure_never_blocks_staging(
     with boa.env.prank(keeper), boa.reverts():
         harness.sync_executor_approvals(relayer, [problem_token.address])
     assert problem_token.allowance(harness, relayer) == 0
-
-
-def test_approve_failure_reverts_sync(
-    harness, enable, keeper, problem_token, adapter_cow, relayer
-):
-    enable(harness, adapter_cow)
-    problem_token.set_fails_nonzero_approval(True)
-    with boa.env.prank(keeper), boa.reverts():
-        harness.sync_executor_approvals(relayer, [problem_token.address])

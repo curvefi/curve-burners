@@ -14,9 +14,6 @@
 """
 
 
-from contracts.utils import constants as c
-
-
 error DivisionByZero:
     pass
 
@@ -105,13 +102,6 @@ def total_price(
         start_total * self.ray_pow(decay_factor_ray, steps) // RAY
     )
     return max(floor_total, decayed_total)
-
-
-@internal
-@pure
-def unit_quote_wad(total_price: uint256, initial_amount: uint256) -> uint256:
-    """@notice Calculate ceil(total_price * WAD / initial_amount)."""
-    return self.mul_div_up(total_price, c.WAD, initial_amount)
 
 
 @internal

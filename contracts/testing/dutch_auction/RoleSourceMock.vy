@@ -1,4 +1,5 @@
 # pragma version 0.5.0b1
+# SPDX-License-Identifier: MIT
 """
 @title RoleSourceMock
 @author Curve Finance

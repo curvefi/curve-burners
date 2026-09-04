@@ -13,20 +13,19 @@
         fee-token lots and sells them along a geometric Dutch curve through
         native takes and registry adapters (CoW among them) reached by the
         prefix-based ERC-1271 signature router.
-@custom:kill FeeCollector kill masks stop all fills. The FeeCollector owner or
-             emergency owner can disable individual adapters and recover
-             inventory — only back to FeeCollector. Native take and
-             push_target stay permissionless while a lot is alive. Disabling
-             an adapter does not clear its executor's allowances: the
-             emergency multisig batches the disable with
-             sync_executor_approvals in one transaction.
+@custom:kill Nothing to kill here: FeeCollector kill masks stop all fills,
+             and the AdapterRegistry disables adapters (routing stops at once
+             for every auction reading it). The owner can recover inventory —
+             only back to FeeCollector. Native take and push_target stay
+             permissionless while a lot is alive. Disabling an adapter does
+             not clear its executor's allowances: batch the registry disable
+             with sync_executor_approvals in one transaction.
 @custom:migration FeeCollector.set_burner only redirects future staging;
                   nothing detaches here. Calm path: let live lots trade out
-                  their window (proceeds still reach FeeCollector), then
-                  disable the adapters, zero executor allowances via
-                  sync_executor_approvals, and return leftovers with
-                  recover() + push_target(). Emergency path: batch recover
-                  with FeeCollector.set_killed to stop fills at once.
+                  their window (proceeds still reach FeeCollector), then run
+                  the emergency runbook (README) and return leftovers with
+                  recover() + push_target(). To stop fills at once, batch
+                  recover with FeeCollector.set_killed.
 @custom:security The configured start total assumes every staged lot is worth no
                  more than that amount. Inventory accounting is balance-based:
                  available = min(initial_amount, balanceOf), so tokens donated
@@ -34,12 +33,11 @@
                  always at or above the curve price and always in favor of
                  FeeCollector; available never exceeds the snapshot.
                  Executor approvals are infinite but only toward executors of
-                 owner-enabled registry adapters while a reference is held,
-                 and only through the permissionless sync.
-                 Signature validation is routed to registry verifiers; every
-                 fill they admit is priced by the core's check_order view.
-                 Tokens with transfer fees, rebases, callbacks, or blacklist
-                 behavior are best-effort integrations.
+                 active registry adapters, and only through the permissionless
+                 sync. Signature validation is routed to registry adapters;
+                 every fill they admit is priced by the core's check_order
+                 view. Tokens with transfer fees, rebases, callbacks, or
+                 blacklist behavior are best-effort integrations.
 """
 
 
@@ -54,14 +52,15 @@ implements: IDutchAuction
 implements: IDutchAuctionBurner
 initializes: roles
 initializes: dutch_auction
-initializes: adapters[roles := roles]
+initializes: adapters
+# Module surfaces are exported method-by-method on purpose: a new external
+# function added to a module never enters the burner ABI unreviewed.
 exports: (
     dutch_auction.current_epoch,
     dutch_auction.want,
     dutch_auction.available,
     dutch_auction.price,
     dutch_auction.getAmountNeeded,
-    dutch_auction.quote,
     dutch_auction.check_order,
     dutch_auction.take,
     dutch_auction.take_with_limits,
@@ -69,23 +68,16 @@ exports: (
     dutch_auction.floor_total,
     dutch_auction.decay_factor_ray,
     dutch_auction.step_duration,
-    dutch_auction.proceeds_receiver,
+    dutch_auction.receiver,
     dutch_auction.lots,
+    dutch_auction.isActive,
+    dutch_auction.auctionLength,
+    dutch_auction.auctions,
     dutch_auction.reconfigured_epoch,
 )
-# Module surfaces are exported method-by-method on purpose: a new external
-# function added to a module never enters the burner ABI unreviewed.
-exports: (
-    roles.role_source,
-    roles.owner,
-    roles.emergency_owner,
-)
+exports: roles.owner
 exports: (
     adapters.registry,
-    adapters.enabled_adapters,
-    adapters.executor_refcount,
-    adapters.enable_adapter,
-    adapters.disable_adapter,
     adapters.sync_executor_approvals,
     adapters.isValidSignature,
 )
@@ -115,17 +107,13 @@ error NotSleepEpoch:
     pass
 
 
-ERC165_INTERFACE_ID: constant(bytes4) = 0x01ffc9a7
-BURNER_INTERFACE_ID: constant(bytes4) = 0xa3b5e311
-ERC1271_INTERFACE_ID: constant(bytes4) = 0x1626ba7e
 VERSION: public(constant(String[20])) = "DutchAuction"
 
 # FeeCollector integration fixed at deployment. The payment token lives in the
-# core as `want`, mirrors fee_collector.target() and follows it only through
-# the owner's resync_target; target()/want() getters stay for existing tooling.
-# Private with an explicit address getter: an interface-typed public getter
-# would not match the address-returning fee_collector() under `implements`.
-collector: immutable(IFeeCollector)
+# core as `want`: it mirrors fee_collector.target() at deploy and follows it
+# only through the owner's resync_target, so the denomination can never switch
+# under a live window.
+fee_collector: public(immutable(IFeeCollector))
 
 
 @deploy
@@ -157,12 +145,42 @@ def __init__(
         _step_duration,
     )
     adapters.__init__(_registry)
+    self.fee_collector = _fee_collector
+    self._validate_curve_fits_frame(
+        _start_total, _floor_total, _decay_factor_ray, _step_duration
+    )
 
+
+# Shared helpers
+
+
+@internal
+@view
+def _target_is_current() -> bool:
+    return staticcall self.fee_collector.target() == dutch_auction.want.address
+
+
+@internal
+@view
+def _exchange_frame(_timestamp: uint256) -> (uint256, uint256):
+    return staticcall self.fee_collector.epoch_time_frame(
+        IFeeCollector.Epoch.EXCHANGE, _timestamp
+    )
+
+
+@internal
+@view
+def _validate_curve_fits_frame(
+    _start_total: uint256,
+    _floor_total: uint256,
+    _decay_factor_ray: uint256,
+    _step_duration: uint256,
+):
+    # The curve must reach the floor within the EXCHANGE frame containing now:
+    # the last active second is end - 1 (windows exclude their end).
     exchange_start: uint256 = 0
     exchange_end: uint256 = 0
-    exchange_start, exchange_end = staticcall _fee_collector.epoch_time_frame(
-        IFeeCollector.Epoch.EXCHANGE, block.timestamp
-    )
+    exchange_start, exchange_end = self._exchange_frame(block.timestamp)
     assert exchange_end > exchange_start, BadExchangeFrame()
     dutch_auction._validate_curve_fits(
         _start_total,
@@ -170,60 +188,6 @@ def __init__(
         _decay_factor_ray,
         _step_duration,
         exchange_end - exchange_start - 1,
-    )
-
-    self.collector = _fee_collector
-
-
-# Shared helpers
-
-
-# Reentrant: echoes deployment configuration only.
-@external
-@view
-@reentrant
-def fee_collector() -> address:
-    """@notice The FeeCollector this burner stages for and pays into."""
-    return self.collector.address
-
-
-# Reentrant like the core's want() getter: only echoes configuration, and
-# take() callbacks need the payment token while the contract-wide lock is held.
-@external
-@view
-@reentrant
-def target() -> address:
-    """@notice FeeCollector-style alias of want() kept for existing tooling."""
-    return dutch_auction.want_token.address
-
-
-# Reentrant like want(): resolves through the immutable FeeCollector's
-# calendar views, reads no burner storage, and take() callbacks compute
-# deadlines from it.
-@external
-@view
-@reentrant
-def epoch_bounds(_epoch: uint256) -> (uint256, uint256):
-    """
-    @notice Active window of an auction epoch.
-    @dev Lots store no time bounds: the calendar lives with this burner, and
-         independent contracts (resolver, keepers) read epoch windows from
-         here.
-    """
-    return self._epoch_bounds(_epoch)
-
-
-@internal
-@view
-def _target_is_current() -> bool:
-    return staticcall self.collector.target() == dutch_auction.want_token.address
-
-
-@internal
-@view
-def _exchange_frame(_timestamp: uint256) -> (uint256, uint256):
-    return staticcall self.collector.epoch_time_frame(
-        IFeeCollector.Epoch.EXCHANGE, _timestamp
     )
 
 
@@ -236,31 +200,27 @@ def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
     @notice Pay the COLLECT incentive, take custody, and snapshot upcoming lots.
     @dev Staging touches no allowances: the keeper follows up with the
          permissionless sync_executor_approvals so the staged tokens become
-         pullable by enabled adapters. Restaging a leftover lot needs no fresh
+         pullable by active adapters. Restaging a leftover lot needs no fresh
          fees: a permissionless FeeCollector.collect during any later COLLECT
          frame re-snapshots the burner's full balance for the upcoming week
          from the top of the curve.
     @param _coins Sorted tokens supplied by FeeCollector.
     @param _receiver Receiver of the FeeCollector COLLECT incentive.
     """
-    assert msg.sender == self.collector.address, OnlyFeeCollector()
+    assert msg.sender == self.fee_collector.address, OnlyFeeCollector()
     assert self._target_is_current(), TargetChanged()
 
-    exchange_start: uint256 = 0
-    exchange_end: uint256 = 0
-    exchange_start, exchange_end = self._exchange_frame(block.timestamp)
-    epoch: uint256 = exchange_start
-
-    fee: uint256 = staticcall self.collector.fee(
+    fee: uint256 = staticcall self.fee_collector.fee(
         IFeeCollector.Epoch.COLLECT, block.timestamp
     )
     fee_payouts: DynArray[IFeeCollector.Transfer, c.MAX_COINS] = []
     custody_transfers: DynArray[IFeeCollector.Transfer, c.MAX_COINS] = []
 
     for coin: IERC20 in _coins:
-        # Fail before any transfer when the target token is among the coins.
+        # _stage_lot re-checks stageability; checking here first fails before
+        # any transfer when the target token is among the coins.
         dutch_auction._check_stageable(coin)
-        collector_balance: uint256 = staticcall coin.balanceOf(self.collector.address)
+        collector_balance: uint256 = staticcall coin.balanceOf(self.fee_collector.address)
         fee_payouts.append(
             IFeeCollector.Transfer(
                 coin=coin.address,
@@ -272,11 +232,11 @@ def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
             IFeeCollector.Transfer(coin=coin.address, to=self, amount=max_value(uint256))
         )
 
-    extcall self.collector.transfer(fee_payouts)
-    extcall self.collector.transfer(custody_transfers)
+    extcall self.fee_collector.transfer(fee_payouts)
+    extcall self.fee_collector.transfer(custody_transfers)
 
     for coin: IERC20 in _coins:
-        dutch_auction._stage_lot(coin, epoch)
+        dutch_auction._stage_lot(coin)
 
 
 # Auction core integration hooks
@@ -309,23 +269,40 @@ def _epoch_bounds(_epoch: uint256) -> (uint256, uint256):
     return self._exchange_frame(_epoch)
 
 
+# Reentrant like want(): resolves through the immutable FeeCollector's
+# calendar views, reads no burner storage, and take() callbacks compute
+# deadlines from it.
+@external
+@view
+@reentrant
+def epoch_bounds(_epoch: uint256) -> (uint256, uint256):
+    """
+    @notice Active window of an auction epoch.
+    @dev Lots store no time bounds: the calendar lives with this burner, and
+         independent contracts (resolver, keepers) read epoch windows from
+         here.
+    """
+    return self._epoch_bounds(_epoch)
+
+
 @override(dutch_auction)
 @view
 def _sellable(_token: address) -> bool:
     # The core already excludes the want token; this adds the FeeCollector
     # target-migration and kill-mask checks.
-    return self._target_is_current() and staticcall self.collector.can_exchange(
+    return self._target_is_current() and staticcall self.fee_collector.can_exchange(
         [_token]
     )
 
 
-# Adapter layer integration hooks
+# Adapter layer integration hook
 
 
 @override(adapters)
 @view
-def _auction_want() -> address:
-    return dutch_auction.want_token.address
+def _pre_approve(_coin: IERC20):
+    # The payment token never gets an executor allowance.
+    dutch_auction._check_stageable(_coin)
 
 
 # Economics resync
@@ -345,11 +322,7 @@ def resync_target(
     @dev The new target is read from the FeeCollector, never passed in, so the
          owner cannot detach the payment denomination from the protocol. The
          full curve is revalidated against the EXCHANGE frame exactly like the
-         constructor. On a target change the core fences out lots of the
-         current epoch once its window has opened — fills resume with the next
-         epoch's staging; a resync before the window opens fences only the
-         previous epoch, so a restage trades the same week. A same-target
-         retune keeps live lots untouched.
+         constructor. A same-target retune keeps live lots untouched.
          Allowed only during the SLEEP phase — before the week's staging, so
          one configuration governs the entire distribution period: staging,
          the trading window, and forwarding. Consequences: the price within a
@@ -364,28 +337,21 @@ def resync_target(
            bind to the wrong denomination — execution must revert instead.
     """
     roles._check_owner()
-    new_target: address = staticcall self.collector.target()
+    new_target: address = staticcall self.fee_collector.target()
     assert new_target != empty(address), BadTarget()
     assert new_target == _expected_target, TargetChanged()
 
     sleep_start: uint256 = 0
     sleep_end: uint256 = 0
-    sleep_start, sleep_end = staticcall self.collector.epoch_time_frame(
+    sleep_start, sleep_end = staticcall self.fee_collector.epoch_time_frame(
         IFeeCollector.Epoch.SLEEP, block.timestamp
     )
     assert sleep_start <= block.timestamp and block.timestamp < sleep_end, (
         NotSleepEpoch()
     )
 
-    exchange_start: uint256 = 0
-    exchange_end: uint256 = 0
-    exchange_start, exchange_end = self._exchange_frame(block.timestamp)
-    dutch_auction._validate_curve_fits(
-        _start_total,
-        _floor_total,
-        _decay_factor_ray,
-        _step_duration,
-        exchange_end - exchange_start - 1,
+    self._validate_curve_fits_frame(
+        _start_total, _floor_total, _decay_factor_ray, _step_duration
     )
     dutch_auction._resync_economics(
         IERC20(new_target),
@@ -393,7 +359,6 @@ def resync_target(
         _floor_total,
         _decay_factor_ray,
         _step_duration,
-        self._auction_epoch(block.timestamp),
     )
 
 
@@ -403,10 +368,10 @@ def resync_target(
 @external
 def push_target() -> uint256:
     """@notice Permissionlessly return target tokens held by this burner."""
-    amount: uint256 = staticcall dutch_auction.want_token.balanceOf(self)
+    amount: uint256 = staticcall dutch_auction.want.balanceOf(self)
     if amount != 0:
-        assert extcall dutch_auction.want_token.transfer(
-            self.collector.address, amount, default_return_value=True
+        assert extcall dutch_auction.want.transfer(
+            self.fee_collector.address, amount, default_return_value=True
         )
     return amount
 
@@ -415,15 +380,17 @@ def push_target() -> uint256:
 def recover(_coins: DynArray[IERC20, c.MAX_COINS]):
     """
     @notice Return ERC-20 or native balances only to FeeCollector.
-    @dev Emptying the balance kills the lot through the balance term of
+    @dev Owner-only: stopping fills is done elsewhere (FeeCollector kill
+         masks, registry adapter disable); this only moves stuck funds.
+         Emptying the balance kills the lot through the balance term of
          available. During the same week's COLLECT frame a permissionless
-         collect can pull the token back and restage it, so an emergency
-         evacuation batches recover with FeeCollector.set_killed.
+         collect can pull the token back and restage it, so an evacuation
+         batches recover with FeeCollector.set_killed.
     """
-    roles._check_owner_or_emergency()
+    roles._check_owner()
 
     for coin: IERC20 in _coins:
-        recovery._recover_coin(coin, self.collector.address)
+        recovery._recover_coin(coin, self.fee_collector.address)
 
 
 # Reentrant: answers from constants only.
@@ -435,4 +402,4 @@ def supportsInterface(_interface_id: bytes4) -> bool:
     @notice Return burner interfaces. ERC-1271 is always claimed: the signature
             router stays live for adapters.
     """
-    return _interface_id in [ERC165_INTERFACE_ID, BURNER_INTERFACE_ID, ERC1271_INTERFACE_ID]
+    return _interface_id in [c.ERC165_INTERFACE_ID, c.BURNER_INTERFACE_ID, c.ERC1271_MAGIC_VALUE]

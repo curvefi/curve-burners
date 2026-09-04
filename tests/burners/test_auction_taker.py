@@ -91,7 +91,7 @@ def auction(want, proceeds_receiver):
 
 @pytest.fixture(scope="module")
 def taker():
-    return boa.load("contracts/AuctionTaker.vy")
+    return boa.load("contracts/burners/auction/periphery/AuctionTaker.vy")
 
 
 @pytest.fixture(scope="module")

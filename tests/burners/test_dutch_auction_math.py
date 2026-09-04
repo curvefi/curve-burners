@@ -1,9 +1,9 @@
-from decimal import Decimal, ROUND_CEILING, localcontext
+from decimal import Decimal, localcontext
 
 import boa
 import pytest
 import vyper
-from hypothesis import given, settings
+from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from .conftest import custom_err
@@ -13,7 +13,7 @@ RAY = 10**27
 WAD = 10**18
 MAX_UINT256 = 2**256 - 1
 # Test domain: typical decay factors and up to a week of one-second steps.
-# The contract no longer bounds either — gas is logarithmic in the exponent.
+# The contract bounds neither: gas is logarithmic in the exponent.
 TYPICAL_MIN_DECAY_FACTOR_RAY = RAY // 2
 MAX_TESTED_PRICE_STEPS = 604_800
 PINNED_VYPER_COMMIT = "577d2534"
@@ -60,12 +60,6 @@ def total_price(
         elapsed,
         step_duration,
     )
-
-
-@external
-@pure
-def unit_quote_wad(total_price: uint256, initial_amount: uint256) -> uint256:
-    return auction_math.unit_quote_wad(total_price, initial_amount)
 
 
 @external
@@ -169,6 +163,9 @@ def test_mul_div_up_reverts_when_product_overflows(auction_math, a, b):
     base_ray=st.integers(min_value=0, max_value=RAY),
     exponent=st.integers(min_value=0, max_value=MAX_TESTED_PRICE_STEPS),
 )
+@example(base_ray=TYPICAL_MIN_DECAY_FACTOR_RAY, exponent=MAX_TESTED_PRICE_STEPS)
+@example(base_ray=RAY - 1, exponent=MAX_TESTED_PRICE_STEPS)
+@example(base_ray=RAY, exponent=MAX_TESTED_PRICE_STEPS)
 @settings(max_examples=100, deadline=None)
 def test_ray_pow_matches_integer_algorithm(auction_math, base_ray, exponent):
     assert auction_math.ray_pow(base_ray, exponent) == ray_pow_model(base_ray, exponent)
@@ -178,6 +175,9 @@ def test_ray_pow_matches_integer_algorithm(auction_math, base_ray, exponent):
     base_ray=st.integers(min_value=TYPICAL_MIN_DECAY_FACTOR_RAY, max_value=RAY),
     exponent=st.integers(min_value=0, max_value=MAX_TESTED_PRICE_STEPS),
 )
+@example(base_ray=TYPICAL_MIN_DECAY_FACTOR_RAY, exponent=MAX_TESTED_PRICE_STEPS)
+@example(base_ray=RAY - 1, exponent=MAX_TESTED_PRICE_STEPS)
+@example(base_ray=RAY, exponent=MAX_TESTED_PRICE_STEPS)
 @settings(max_examples=100, deadline=None)
 def test_ray_pow_stays_close_to_decimal_reference(auction_math, base_ray, exponent):
     actual = auction_math.ray_pow(base_ray, exponent)
@@ -187,24 +187,6 @@ def test_ray_pow_stays_close_to_decimal_reference(auction_math, base_ray, expone
 
     # Nearest rounding per multiplication: the error is dwarfed by execution
     # noise and only its magnitude matters.
-    assert abs(actual - int(exact)) <= 4 * exponent + 2
-
-
-@pytest.mark.parametrize(
-    "base_ray,exponent",
-    [
-        (TYPICAL_MIN_DECAY_FACTOR_RAY, MAX_TESTED_PRICE_STEPS),
-        (RAY - 1, MAX_TESTED_PRICE_STEPS),
-        (RAY, MAX_TESTED_PRICE_STEPS),
-    ],
-)
-def test_ray_pow_domain_boundaries(auction_math, base_ray, exponent):
-    actual = auction_math.ray_pow(base_ray, exponent)
-    assert actual == ray_pow_model(base_ray, exponent)
-
-    with localcontext() as context:
-        context.prec = 220
-        exact = Decimal(RAY) * (Decimal(base_ray) / Decimal(RAY)) ** exponent
     assert abs(actual - int(exact)) <= 4 * exponent + 2
 
 
@@ -408,17 +390,7 @@ def test_quote_helpers_round_up(auction_math, total, amount, initial_amount):
             total * amount, initial_amount
         )
 
-    if total * WAD > MAX_UINT256:
-        with boa.reverts():
-            auction_math.unit_quote_wad(total, initial_amount)
-    else:
-        assert auction_math.unit_quote_wad(total, initial_amount) == ceil_div(
-            total * WAD, initial_amount
-        )
-
 
 def test_quote_helpers_zero_denominator(auction_math):
-    with boa.reverts(custom_err("DivisionByZero()")):
-        auction_math.unit_quote_wad(1, 0)
     with boa.reverts(custom_err("DivisionByZero()")):
         auction_math.proportional_payment(1, 1, 0)

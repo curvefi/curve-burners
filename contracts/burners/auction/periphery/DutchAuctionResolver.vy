@@ -24,9 +24,6 @@
      later fills of the same lot.
 """
 
-from ethereum.ercs import IERC20
-
-from contracts.burners.auction import auction_types
 from contracts.interfaces import IDutchAuctionBurner
 
 
@@ -51,7 +48,7 @@ error NothingAvailable:
 
 
 # The intent payload: the abi-encoding of this struct is what feeds publish.
-# Field set and types follow the adapter-intents specification (§11.3).
+# The field set is this contract's own (ERC-7683 is a Draft; see @dev above).
 struct DutchAuctionIntent:
     chain_id: uint256
     auction: address
@@ -79,10 +76,9 @@ struct CallStep:
 #
 # - sell_payout: sell token paid out by the auction; recipient is
 #   empty(address) because the taker receiver is solver-chosen at fill time.
-# - want_payment: want owed for the fill; recipient is the auction's immutable
-#   proceeds receiver. Paying the auction itself during settlement is equally
-#   valid: it forwards every want it receives to the proceeds receiver, and any
-#   shortfall is pulled from the take() caller.
+# - want_payment: want owed for the fill; take() pulls the full amount from
+#   the caller's want allowance. recipient is informational: the auction's
+#   immutable receiver, where the auction forwards the payment.
 # - quoted_at/valid_from/fill_deadline: amounts are exact at quoted_at; the
 #   fill window is [valid_from, fill_deadline] inclusive.
 # - call_step: minimal take() calldata template. The taker receiver argument
@@ -151,12 +147,12 @@ def resolve(_payload: Bytes[INTENT_PAYLOAD_LEN]) -> ResolvedOrder:
     assert sell_amount > 0, NothingAvailable()
 
     payment: uint256 = staticcall auction.getAmountNeeded(intent.sell_token, sell_amount)
-    want: address = staticcall auction.want()
-    proceeds_receiver: address = staticcall auction.proceeds_receiver()
-    lot: auction_types.Lot = staticcall auction.lots(IERC20(intent.sell_token))
+    want: address = (staticcall auction.want()).address
+    receiver: address = staticcall auction.receiver()
+    # A lot with availability is staged in the current epoch.
     lot_start: uint256 = 0
     lot_end: uint256 = 0
-    lot_start, lot_end = staticcall auction.epoch_bounds(lot.epoch)
+    lot_start, lot_end = staticcall auction.epoch_bounds(epoch)
 
     empty_callback: Bytes[1] = b""
     call_data: Bytes[TAKE_CALLDATA_BOUND] = abi_encode(
@@ -179,7 +175,7 @@ def resolve(_payload: Bytes[INTENT_PAYLOAD_LEN]) -> ResolvedOrder:
         sell_payout=TokenAmount(
             token=intent.sell_token, amount=sell_amount, recipient=empty(address)
         ),
-        want_payment=TokenAmount(token=want, amount=payment, recipient=proceeds_receiver),
+        want_payment=TokenAmount(token=want, amount=payment, recipient=receiver),
         call_step=CallStep(target=intent.auction, value=0, call_data=call_data),
         taker_receiver_offset=TAKER_RECEIVER_OFFSET,
     )

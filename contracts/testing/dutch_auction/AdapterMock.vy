@@ -1,10 +1,10 @@
 # pragma version 0.5.0b1
 # SPDX-License-Identifier: MIT
 """
-@title VerifierMock
+@title AdapterMock
 @author Curve Finance
 @license MIT
-@notice Configurable verifier test double for the ERC-1271 signature router:
+@notice Configurable adapter test double for the ERC-1271 signature router:
         answers with a settable magic value, can revert on demand, and can
         attempt a state write to prove the router's staticcall neutralizes it.
 @dev isValidSignature is deliberately nonpayable (and the contract skips the
@@ -28,7 +28,7 @@ interface DutchAuction:
         _sell_amount: uint256,
         _min_buy_amount: uint256,
         _valid_to: uint256,
-    ) -> String[32]: view
+    ) -> bool: view
 
 
 response: public(bytes4)
@@ -61,7 +61,7 @@ def set_write_state(_write: bool):
 def isValidSignature(
     _hash: bytes32, _signature: Bytes[MAX_SIGNATURE_LEN]
 ) -> bytes4:
-    assert not self.should_revert, "Verifier revert"
+    assert not self.should_revert, "Adapter revert"
     if self.write_state_on_validate:
         self.write_count += 1
     return self.response
@@ -77,8 +77,8 @@ def check_order_via_auction(
     _sell_amount: uint256,
     _min_buy_amount: uint256,
     _valid_to: uint256,
-) -> String[32]:
-    """@notice Exercise the auction's shared economic check like a verifier would."""
+) -> bool:
+    """@notice Exercise the auction's shared economic check like an adapter would."""
     return staticcall DutchAuction(_auction).check_order(
         _sell_token, _buy_token, _receiver, _sell_amount, _min_buy_amount, _valid_to
     )

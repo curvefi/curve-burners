@@ -8,17 +8,15 @@
 @dev The burner `implements` this file, so every declaration is checked
      against the real surface at compile time; peer contracts (CowAdapter's
      publisher helper, the intent resolver) and tooling read the burner
-     through it; the lot record comes from auction_types, so nothing is
+     through it; the lot record is IDutchAuction.Lot, so nothing is
      mirrored. isValidSignature takes the adapter signature template
-     `verifier ++ payload` (adapter_types).
+     `adapter ++ payload` (see the adapters module).
 """
 
 from ethereum.ercs import IERC20
 
-from contracts.burners.auction import auction_types
-from contracts.burners.auction.adapters import adapter_types
-from contracts.interfaces import IAdapterRegistry
-from contracts.utils import constants as c, roles
+from contracts.interfaces import IAdapterRegistry, IDutchAuction
+from contracts.utils import constants as c
 
 
 # Auction core
@@ -32,13 +30,13 @@ def current_epoch() -> uint256:
 
 @external
 @view
-def want() -> address:
+def want() -> IERC20:
     ...
 
 
 @external
 @view
-def proceeds_receiver() -> address:
+def receiver() -> address:
     ...
 
 
@@ -74,13 +72,25 @@ def reconfigured_epoch() -> uint256:
 
 @external
 @view
-def lots(_token: IERC20) -> auction_types.Lot:
+def lots(_token: IERC20) -> IDutchAuction.Lot:
     ...
 
 
 @external
 @view
-def epoch_bounds(_epoch: uint256) -> (uint256, uint256):
+def isActive(_from: address) -> bool:
+    ...
+
+
+@external
+@view
+def auctionLength() -> uint256:
+    ...
+
+
+@external
+@view
+def auctions(_from: address) -> IDutchAuction.AuctionInfo:
     ...
 
 
@@ -98,13 +108,9 @@ def price(_from: address, _ts: uint256 = ...) -> uint256:
 
 @external
 @view
-def getAmountNeeded(_from: address, amountToTake: uint256, _ts: uint256 = ...) -> uint256:
-    ...
-
-
-@external
-@view
-def quote(_token: address, _sell_amount: uint256, _ts: uint256 = ...) -> uint256:
+def getAmountNeeded(
+    _from: address, amountToTake: uint256 = ..., _ts: uint256 = ...
+) -> uint256:
     ...
 
 
@@ -117,16 +123,16 @@ def check_order(
     _sell_amount: uint256,
     _min_buy_amount: uint256,
     _valid_to: uint256,
-) -> String[32]:
+) -> bool:
     ...
 
 
 @external
 def take(
     _from: address,
-    maxAmount: uint256,
-    takerReceiver: address,
-    data: Bytes[...],
+    maxAmount: uint256 = ...,
+    takerReceiver: address = ...,
+    data: Bytes[...] = ...,
 ) -> uint256:
     ...
 
@@ -155,31 +161,7 @@ def registry() -> IAdapterRegistry:
 
 @external
 @view
-def enabled_adapters(_verifier: address) -> bool:
-    ...
-
-
-@external
-@view
-def executor_refcount(_executor: address) -> uint256:
-    ...
-
-
-@external
-@view
-def isValidSignature(
-    _hash: bytes32, _signature: Bytes[adapter_types.MAX_SIGNATURE_LEN]
-) -> bytes4:
-    ...
-
-
-@external
-def enable_adapter(_verifier: address):
-    ...
-
-
-@external
-def disable_adapter(_verifier: address):
+def isValidSignature(_hash: bytes32, _signature: Bytes[...]) -> bytes4:
     ...
 
 
@@ -205,7 +187,7 @@ def fee_collector() -> address:
 
 @external
 @view
-def target() -> address:
+def epoch_bounds(_epoch: uint256) -> (uint256, uint256):
     ...
 
 
@@ -246,17 +228,6 @@ def supportsInterface(_interface_id: bytes4) -> bool:
 
 @external
 @view
-def role_source() -> roles.RoleSource:
-    ...
-
-
-@external
-@view
 def owner() -> address:
     ...
 
-
-@external
-@view
-def emergency_owner() -> address:
-    ...

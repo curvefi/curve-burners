@@ -4,17 +4,17 @@
 @title CoW GPv2 order library
 @author Curve Finance
 @license MIT
-@notice Stateless GPv2 order type, EIP-712 digest, and flag checks plus the
-        CoW-canonical OrderNotValid revert.
+@notice Stateless GPv2 order type, EIP-712 digest, flag checks, and the
+        OrderNotValid revert shared by CoW-facing adapters.
 @dev Pure parametric helpers only: no storage, no external calls, no abstract
      hooks. The digest computation must stay byte-identical to the GPv2
      EIP-712 reference.
 """
 
 
-# CoW-canonical revert ABI (cowprotocol IConditionalOrder): the selector must
-# stay exactly OrderNotValid(string) — CoW tooling classifies ERC-1271 reverts
-# by it.
+# Protocol-level order rejection (selector OrderNotValid(string), as in CoW's
+# IConditionalOrder) so every CoW-facing adapter reports shape and constant
+# failures the same way.
 error OrderNotValid:
     reason: String[32]
 
@@ -34,42 +34,32 @@ struct GPv2Order:
     buyTokenBalance: bytes32
 
 
+# Every field is a static ABI type, so the struct encodes to 12 words.
 ENCODED_ORDER_LEN: constant(uint256) = 12 * 32
 
-# GPv2 constants from cowprotocol/contracts@a10f40788af29467e87de3dbf2196662b0a6b500 GPv2Order.
-GPV2_ORDER_TYPE_HASH: constant(bytes32) = 0xd5a25ba2e97094ad7d83dc28a6572da797d6b3e7fc6663bd93efb789fc17e489
-SELL_KIND: public(constant(bytes32)) = 0xf3b277728b3fee749481eb3e0b3b48980dbbab78658fc419025cb16eee346775
-TOKEN_BALANCE: public(constant(bytes32)) = 0x5a28e9363bb942b639270062aa6bb295f434bcdfc42c97267bf003f272060dc9
-ERC1271_MAGIC_VALUE: public(constant(bytes4)) = 0x1626ba7e
+# GPv2Order constants (cowprotocol/contracts GPv2Order.sol): the EIP-712 type
+# hash and the enum-as-hash flag values.
+GPV2_ORDER_TYPE_HASH: constant(bytes32) = keccak256(
+    "Order(address sellToken,address buyToken,address receiver,uint256 sellAmount,"
+    "uint256 buyAmount,uint32 validTo,bytes32 appData,uint256 feeAmount,string kind,"
+    "bool partiallyFillable,string sellTokenBalance,string buyTokenBalance)"
+)
+SELL_KIND: constant(bytes32) = keccak256("sell")
+TOKEN_BALANCE: constant(bytes32) = keccak256("erc20")
 
 
 @internal
 @pure
 def _order_digest(_order: GPv2Order, _domain_separator: bytes32) -> bytes32:
-    struct_hash: bytes32 = keccak256(
-        abi_encode(
-            GPV2_ORDER_TYPE_HASH,
-            _order.sellToken,
-            _order.buyToken,
-            _order.receiver,
-            _order.sellAmount,
-            _order.buyAmount,
-            _order.validTo,
-            _order.appData,
-            _order.feeAmount,
-            _order.kind,
-            _order.partiallyFillable,
-            _order.sellTokenBalance,
-            _order.buyTokenBalance,
-        )
-    )
+    # All order fields are static types, so abi_encode(struct) is exactly the
+    # word-per-field layout hashStruct expects.
+    struct_hash: bytes32 = keccak256(abi_encode(GPV2_ORDER_TYPE_HASH, _order))
     return keccak256(concat(b"\x19\x01", _domain_separator, struct_hash))
 
 
-# The flag checks are split so callers keep the established CoW-canonical error
-# granularity: BadOrderFlags for fee/kind/partial and BadBalanceMode for
-# balance modes. Both are boolean by design: revert-versus-invalid policy
-# stays with the caller.
+# The flag checks are split so callers can report fee/kind/partial and balance
+# mode violations separately. Both are boolean by design: revert-versus-invalid
+# policy stays with the caller.
 @internal
 @pure
 def _check_order_flags(_order: GPv2Order) -> bool:

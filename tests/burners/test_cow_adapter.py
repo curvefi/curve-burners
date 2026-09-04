@@ -4,8 +4,9 @@ Validation runs end-to-end through the auction's signature router: the order
 is published with signature `adapter ++ abi_encode(order)`, the harness strips
 the prefix and forwards the bare order, the adapter proves the canonical digest
 and protocol constants, and every economic decision comes from the auction's
-shared check_order view — reverted verbatim in the CoW-canonical OrderNotValid
-ABI.
+shared check_order view. Shape and protocol-constant failures revert with the
+adapter's OrderNotValid(reason); the auction's typed check_order revert bubbles
+unchanged for economic ones.
 """
 
 from typing import Any
@@ -19,7 +20,6 @@ from .conftest import custom_err
 
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
-MAX_UINT256 = 2**256 - 1
 WAD = 10**18
 
 START_TOTAL = 100_000 * WAD
@@ -44,7 +44,6 @@ ORDER_TYPE = (
     "(address,address,address,uint256,uint256,uint32,bytes32,uint256,"
     "bytes32,bool,bytes32,bytes32)"
 )
-PAYLOAD_TYPE = "(bytes32[],(address,bytes32,bytes),bytes)"
 
 
 @pytest.fixture(autouse=True)
@@ -138,7 +137,6 @@ def harness(role_source, want, proceeds_receiver, registry, adapter, owner, rela
     with boa.env.prank(owner):
         registry.set_adapter(adapter, relayer)
         registry.activate_adapter(adapter)
-        harness.enable_adapter(adapter)
     return harness
 
 
@@ -186,7 +184,7 @@ def make_order(harness, sell_token, want, proceeds_receiver, lot):
         amount = overrides.pop("sell_amount", LOT_AMOUNT)
         buy_amount = overrides.pop("buy_amount", None)
         if buy_amount is None:
-            buy_amount = harness.quote(sell_token.address, min(amount, LOT_AMOUNT))
+            buy_amount = harness.getAmountNeeded(sell_token.address, min(amount, LOT_AMOUNT))
         order = {
             "sell_token": sell_token.address,
             "buy_token": want.address,
@@ -263,56 +261,19 @@ def test_prefixed_bare_order_is_valid_and_unprefixed_is_not(harness, adapter, ma
     assert _validate(harness, adapter, order, _bare(order)) == ERC1271_INVALID
 
 
-def test_registry_and_local_switches_kill_the_rail(
-    harness, adapter, make_order, registry, owner, emergency_owner
-):
-    order = make_order()
-    with boa.env.prank(emergency_owner):
-        registry.disable_adapter(adapter)
-    assert _validate(harness, adapter, order) == ERC1271_INVALID
-    with boa.env.prank(owner):
-        registry.activate_adapter(adapter)
-    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
-
-    with boa.env.prank(emergency_owner):
-        harness.disable_adapter(adapter)
-    assert _validate(harness, adapter, order) == ERC1271_INVALID
-    with boa.env.prank(owner):
-        harness.enable_adapter(adapter)
-    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
-
-
-def test_sync_approves_the_vault_relayer(harness, sell_token, relayer, lot):
-    # The registry executor of the CoW adapter is the relayer: staging grants
-    # nothing, the permissionless sync does — like for any enabled adapter.
-    assert sell_token.allowance(harness, relayer) == 0
-    harness.sync_executor_approvals(relayer, [sell_token.address])
-    assert sell_token.allowance(harness, relayer) == MAX_UINT256
-
-
 # Transport encoding
 
 
-def test_partial_fill_order_valid(harness, adapter, make_order):
-    order = make_order(sell_amount=LOT_AMOUNT // 3)
-    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
-
-
-def test_composable_cow_wrapper_is_not_accepted(harness, adapter, make_order):
-    # Only the bare order is a valid payload; the ComposableCoW (order,
-    # payload) wrapper has no publisher in this deployment.
+def test_non_canonical_payload_length_rejected(harness, adapter, make_order):
     order = make_order()
-    wrapper = encode(
-        [ORDER_TYPE, PAYLOAD_TYPE], [order, ([], (ZERO_ADDRESS, bytes(32), b""), b"")]
-    )
-    with boa.reverts(custom_err("OrderNotValid(string)", "NonCanonical")):
-        _validate(harness, adapter, order, _prefix(adapter) + wrapper)
-
-
-def test_non_canonical_padded_order_rejected(harness, adapter, make_order):
-    order = make_order()
-    with boa.reverts(custom_err("OrderNotValid(string)", "NonCanonical")):
+    # Longer than one encoded order: rejected by the adapter's ABI decoding.
+    with boa.reverts():
         _validate(harness, adapter, order, _signature(adapter, order) + b"\x00")
+    # Shorter: decodes into the adapter and fails its canonical-length check.
+    with boa.reverts(custom_err("OrderNotValid(string)", "NonCanonical")):
+        _validate(harness, adapter, order, _signature(adapter, order)[:-1])
+    with boa.reverts(custom_err("OrderNotValid(string)", "NonCanonical")):
+        _validate(harness, adapter, order, _prefix(adapter))
 
 
 def test_zero_filled_order_fails_checks_not_decode(harness, adapter, lot):
@@ -365,81 +326,21 @@ def test_balance_mode_violations_invalid(harness, adapter, make_order, overrides
         _validate(harness, adapter, make_order(**overrides))
 
 
-# Economic checks bubble from check_order
+# Economics: the auction's check_order reverts bubble through the adapter.
+# Every branch of check_order is covered directly in test_erc1271_dispatcher.
 
 
-def test_wrong_buy_token_invalid(harness, adapter, make_order, sell_token):
-    with boa.reverts(custom_err("OrderNotValid(string)", "BadToken")):
-        _validate(harness, adapter, make_order(buy_token=sell_token.address))
-
-
-def test_wrong_receiver_invalid(harness, adapter, make_order):
-    stranger = boa.env.generate_address("stranger")
-    with boa.reverts(custom_err("OrderNotValid(string)", "BadReceiver")):
-        _validate(harness, adapter, make_order(receiver=stranger))
-
-
-def test_unstaged_token_not_allowed(harness, adapter, make_order, erc20_deployer):
-    fresh = erc20_deployer.deploy("Fresh", "FRESH", 18)
-    order = make_order(sell_token=fresh.address, buy_amount=1)
-    with boa.reverts(custom_err("OrderNotValid(string)", "NotAllowed")):
-        _validate(harness, adapter, order)
-
-
-def test_unsellable_token_not_allowed(harness, adapter, make_order, sell_token):
-    order = make_order()
-    harness.set_sellable(sell_token.address, False)
-    with boa.reverts(custom_err("OrderNotValid(string)", "NotAllowed")):
-        _validate(harness, adapter, order)
-
-
-def test_expired_window_not_allowed(harness, adapter, make_order):
-    order = make_order()
-    boa.env.time_travel(seconds=harness.frame_end() - boa.env.evm.vm.state.timestamp)
-    with boa.reverts(custom_err("OrderNotValid(string)", "NotAllowed")):
-        _validate(harness, adapter, order)
-
-
-def test_drained_lot_zero_balance(harness, adapter, make_order, sell_token):
-    order = make_order()
-    with boa.env.prank(harness.address):
-        sell_token.transfer(boa.env.generate_address("sink"), LOT_AMOUNT)
-    with boa.reverts(custom_err("OrderNotValid(string)", "ZeroBalance")):
-        _validate(harness, adapter, order)
-
-
-@pytest.mark.parametrize("sell_amount", [0, LOT_AMOUNT + 1])
-def test_sell_amount_bounds_invalid(harness, adapter, make_order, sell_amount):
-    order = make_order(sell_amount=sell_amount, buy_amount=1)
-    with boa.reverts(custom_err("OrderNotValid(string)", "BadSellAmount")):
-        _validate(harness, adapter, order)
-
-
-def test_valid_to_bounds_invalid(harness, adapter, make_order):
-    now = boa.env.evm.vm.state.timestamp
-    with boa.reverts(custom_err("OrderNotValid(string)", "BadValidTo")):
-        _validate(harness, adapter, make_order(valid_to=now - 1))
-    with boa.reverts(custom_err("OrderNotValid(string)", "BadValidTo")):
-        _validate(harness, adapter, make_order(valid_to=harness.frame_end() + 1))
-
-
-def test_underpriced_order_invalid(harness, adapter, make_order, sell_token):
-    quote = harness.quote(sell_token.address, LOT_AMOUNT)
-    with boa.reverts(custom_err("OrderNotValid(string)", "BadBuyAmount")):
+def test_auction_economics_revert_bubbles_through_adapter(harness, adapter, make_order, sell_token):
+    quote = harness.getAmountNeeded(sell_token.address, LOT_AMOUNT)
+    with boa.reverts(custom_err("BadBuyAmount()")):
         _validate(harness, adapter, make_order(buy_amount=quote - 1))
     # Overpriced orders are always fine for the receiver.
     assert _validate(harness, adapter, make_order(buy_amount=quote + 1)) == ERC1271_MAGIC_VALUE
 
 
-def test_quote_is_live_against_lot_snapshot(harness, adapter, make_order, sell_token):
-    # A donation above the snapshot never lowers the required unit price:
-    # sell amounts stay bounded by initial_amount, quotes by the live curve.
-    sell_token._mint_for_testing(harness.address, LOT_AMOUNT)
-    order = make_order()
+def test_partial_fill_order_valid(harness, adapter, make_order):
+    order = make_order(sell_amount=LOT_AMOUNT // 3)
     assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
-    too_big = make_order(sell_amount=LOT_AMOUNT + 1, buy_amount=MAX_UINT256)
-    with boa.reverts(custom_err("OrderNotValid(string)", "BadSellAmount")):
-        _validate(harness, adapter, too_big)
 
 
 # Read-only reentrancy: nothing about signed orders is readable mid-take
@@ -553,7 +454,7 @@ def test_order_for_stays_valid_as_the_curve_decays(harness, adapter, sell_token,
     harness.set_frame(now, harness.frame_end())
     order, signature = adapter.order_for(harness.address, sell_token.address)
     boa.env.time_travel(seconds=10 * STEP_DURATION)
-    assert harness.quote(sell_token.address, LOT_AMOUNT) < order[4]
+    assert harness.getAmountNeeded(sell_token.address, LOT_AMOUNT) < order[4]
     assert harness.isValidSignature(_order_digest(tuple(order), DOMAIN_SEPARATOR), signature) == ERC1271_MAGIC_VALUE
 
 

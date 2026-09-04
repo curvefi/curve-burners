@@ -18,23 +18,24 @@
      curve — always at or above the curve price and always in favor of the
      proceeds receiver; initial_amount pins the unit price and caps available.
      Executor approvals and the ERC-1271 signature router live in the sibling
-     adapters module; settlement verifiers price their orders through the
+     adapters module; settlement adapters price their orders through the
      external check_order view.
 """
 
 
 from ethereum.ercs import IERC20
 
-from contracts.burners.auction import auction_types, dutch_auction_math as auction_math
+from contracts.burners.auction import dutch_auction_math as auction_math
+from contracts.interfaces import IDutchAuction
+from contracts.utils import constants as c
 
 
 error BadWant:
     pass
 
 
-# The payment token never becomes inventory: raised when staging the want
-# token here and by the adapters layer's allowance sync (declared in the core
-# so the settlement plumbing depends on the core, never the other way around).
+# The payment token never becomes inventory; raised when staging it and, via
+# the adapters module's _pre_approve hook, when approving it to an executor.
 error WantNotSellable:
     pass
 
@@ -56,10 +57,6 @@ error BadDecay:
 
 
 error AmountExceedsAvailable:
-    pass
-
-
-error AmountExceedsLot:
     pass
 
 
@@ -87,9 +84,27 @@ error DecayMissesFloor:
     pass
 
 
-# Callback data is unbounded (Bytes[INF]) and forwarded verbatim — the taker
-# picks its own bound; unbounded sequence types require the importing contract
-# to compile with `# pragma experimental-codegen`.
+# Signed-order checks (check_order).
+error BadBuyToken:
+    pass
+
+
+error LotInactive:
+    pass
+
+
+error BadSellAmount:
+    pass
+
+
+error BadValidTo:
+    pass
+
+
+error BadBuyAmount:
+    pass
+
+
 interface AuctionTaker:
     def auctionTakeCallback(
         _from: address,
@@ -133,10 +148,12 @@ event EconomicsResynced:
 # curve snapshot, so a retune reprices live lots immediately; a want change
 # under an open window additionally fences out the current epoch's lots so
 # the payment denomination never switches while fills can run.
-proceeds_receiver: public(immutable(address))
-# Private storage: a public(IERC20) getter would not satisfy the Yearn ABI's
-# address-returning want() under `implements`, so the view is explicit.
-want_token: IERC20
+receiver: public(immutable(address))
+# The want() getter is reentrant on purpose: it only echoes configuration, and
+# take() callbacks (takers sourcing the payment from the received tokens) need
+# the payment token while the contract-wide lock is held. Everything else —
+# quotes, availability, signed-order validation — stays locked during a take.
+want: public(reentrant(IERC20))
 start_total: public(uint256)
 floor_total: public(uint256)
 decay_factor_ray: public(uint256)
@@ -146,13 +163,15 @@ step_duration: public(uint256)
 # in-flight transactions) could be priced in the old denomination. 0 means
 # the want was never changed.
 reconfigured_epoch: public(uint256)
-lots: public(HashMap[IERC20, auction_types.Lot])
+# The lot record is declared in IDutchAuction so peer contracts can read lots()
+# without importing this stateful module.
+lots: public(HashMap[IERC20, IDutchAuction.Lot])
 
 
 @deploy
 def __init__(
     _want: IERC20,
-    _proceeds_receiver: address,
+    _receiver: address,
     _start_total: uint256,
     _floor_total: uint256,
     _decay_factor_ray: uint256,
@@ -164,8 +183,8 @@ def __init__(
          within the frame, step count bounds) stays with the importing
          contract, which owns the auction calendar hooks.
     """
-    assert _proceeds_receiver != empty(address), BadReceiver()
-    self.proceeds_receiver = _proceeds_receiver
+    assert _receiver != empty(address), BadReceiver()
+    self.receiver = _receiver
     self._set_economics(_want, _start_total, _floor_total, _decay_factor_ray, _step_duration)
 
 
@@ -183,7 +202,7 @@ def _set_economics(
     assert 0 < _decay_factor_ray and _decay_factor_ray < auction_math.RAY, BadDecay()
     assert _step_duration > 0, auction_math.ZeroStep()
 
-    self.want_token = _want
+    self.want = _want
     self.start_total = _start_total
     self.floor_total = _floor_total
     self.decay_factor_ray = _decay_factor_ray
@@ -202,6 +221,10 @@ def _validate_curve_fits(
     """
     @notice Validate that the curve decays all the way to the floor within an
             active window.
+    @dev total_price clamps at floor_total from below, so equality at the last
+         active second means "the decayed total has reached (or crossed) the
+         floor" — not a knife-edge match. A curve that never gets there would
+         leave the floor unreachable and the parameter meaningless.
     @param _active_elapsed Largest elapsed time an active lot can reach: the
            window length minus one (windows exclude their end timestamp).
     """
@@ -221,29 +244,24 @@ def _resync_economics(
     _floor_total: uint256,
     _decay_factor_ray: uint256,
     _step_duration: uint256,
-    _current_epoch: uint256,
 ):
     """
     @notice Re-pin the auction economics; authorization stays with the caller.
-    @dev A want change while the current epoch's window is open fences out
-         every lot of that epoch: fills (and takers' in-flight transactions)
-         may already be priced in the old denomination, so it must not switch
-         under a live window — fills resume with the next epoch's staging.
-         Before the window opens nothing has traded yet, so the fence stops at
-         the previous epoch and lots staged this epoch trade against the
-         freshly pinned curve — a resync early in the epoch loses no time.
-         A same-want retune needs no fence and takes effect immediately — the
-         curve is read live, so live lots reprice at once. The old want
-         becomes a regular stageable token.
+    @dev A want change sets the fence (reconfigured_epoch) to the current
+         epoch once its window has opened, and to the previous epoch before
+         that. A same-want retune sets no fence; the curve is read live, so
+         live lots reprice at once. The old want becomes a regular stageable
+         token.
     """
-    if _want != self.want_token:
+    if _want != self.want:
+        current_epoch: uint256 = self._auction_epoch(block.timestamp)
         epoch_start: uint256 = 0
         epoch_end: uint256 = 0
-        epoch_start, epoch_end = self._epoch_bounds(_current_epoch)
+        epoch_start, epoch_end = self._epoch_bounds(current_epoch)
         if block.timestamp >= epoch_start:
-            self.reconfigured_epoch = _current_epoch
+            self.reconfigured_epoch = current_epoch
         else:
-            self.reconfigured_epoch = _current_epoch - 1
+            self.reconfigured_epoch = current_epoch - 1
     self._set_economics(_want, _start_total, _floor_total, _decay_factor_ray, _step_duration)
     log EconomicsResynced(
         want=_want,
@@ -265,47 +283,36 @@ def current_epoch() -> uint256:
     return self._auction_epoch(block.timestamp)
 
 
-# want() is reentrant on purpose: it only echoes configuration, and take()
-# callbacks (takers sourcing the payment from the received tokens) need the
-# payment token while the contract-wide lock is held. Everything else —
-# quotes, availability, signed-order validation — stays locked during a take.
-@external
-@view
-@reentrant
-def want() -> address:
-    """@notice Return the token accepted as payment."""
-    return self.want_token.address
-
-
 # Staging
 
 
 @internal
 @view
 def _check_stageable(_token: IERC20):
-    assert _token != self.want_token, WantNotSellable()
+    assert _token != self.want, WantNotSellable()
 
 
 @internal
-def _stage_lot(_token: IERC20, _epoch: uint256) -> uint256:
+def _stage_lot(_token: IERC20) -> uint256:
     """
-    @notice Snapshot the caller-custodied balance as the upcoming epoch's lot.
+    @notice Snapshot the caller-custodied balance as the current epoch's lot.
     @dev The importing contract must transfer custody first; the full current
          balance becomes initial_amount. The lot's active window is not
-         stored: it is the calendar's _epoch_bounds(_epoch), owned by the
+         stored: it is the calendar's _epoch_bounds(epoch), owned by the
          importing contract. Settlement-rail allowances are not staging's
          concern (see the adapters module's sync_executor_approvals).
     @return The snapshot initial amount.
     """
     self._check_stageable(_token)
+    epoch: uint256 = self._auction_epoch(block.timestamp)
     amount: uint256 = staticcall _token.balanceOf(self)
-    self.lots[_token] = auction_types.Lot(epoch=_epoch, initial_amount=amount)
+    self.lots[_token] = IDutchAuction.Lot(epoch=epoch, initial_amount=amount)
     start: uint256 = 0
     end: uint256 = 0
-    start, end = self._epoch_bounds(_epoch)
+    start, end = self._epoch_bounds(epoch)
     log LotStaged(
         token=_token,
-        epoch=_epoch,
+        epoch=epoch,
         initial_amount=amount,
         start_total=self.start_total,
         floor_total=self.floor_total,
@@ -320,8 +327,8 @@ def _stage_lot(_token: IERC20, _epoch: uint256) -> uint256:
 
 @internal
 @view
-def _is_active(_from: IERC20, _lot: auction_types.Lot, _timestamp: uint256) -> bool:
-    if _from == self.want_token:
+def _is_active(_from: IERC20, _lot: IDutchAuction.Lot, _timestamp: uint256) -> bool:
+    if _from == self.want:
         return False
     if _lot.epoch == 0 or _lot.epoch != self._auction_epoch(_timestamp):
         return False
@@ -339,7 +346,7 @@ def _is_active(_from: IERC20, _lot: auction_types.Lot, _timestamp: uint256) -> b
 
 @internal
 @view
-def _available_unchecked(_from: IERC20, _lot: auction_types.Lot) -> uint256:
+def _available_unchecked(_from: IERC20, _lot: IDutchAuction.Lot) -> uint256:
     balance: uint256 = staticcall _from.balanceOf(self)
     return min(_lot.initial_amount, balance)
 
@@ -347,7 +354,7 @@ def _available_unchecked(_from: IERC20, _lot: auction_types.Lot) -> uint256:
 @internal
 @view
 def _available(_from: IERC20, _timestamp: uint256) -> uint256:
-    lot: auction_types.Lot = self.lots[_from]
+    lot: IDutchAuction.Lot = self.lots[_from]
     if not self._is_active(_from, lot, _timestamp):
         return 0
     return self._available_unchecked(_from, lot)
@@ -355,7 +362,7 @@ def _available(_from: IERC20, _timestamp: uint256) -> uint256:
 
 @internal
 @view
-def _lot_total_price(_lot: auction_types.Lot, _timestamp: uint256) -> uint256:
+def _lot_total_price(_lot: IDutchAuction.Lot, _timestamp: uint256) -> uint256:
     start: uint256 = 0
     end: uint256 = 0
     start, end = self._epoch_bounds(_lot.epoch)
@@ -371,7 +378,7 @@ def _lot_total_price(_lot: auction_types.Lot, _timestamp: uint256) -> uint256:
 @internal
 @view
 def _quote_unchecked(_from: IERC20, _amount: uint256, _timestamp: uint256) -> uint256:
-    lot: auction_types.Lot = self.lots[_from]
+    lot: IDutchAuction.Lot = self.lots[_from]
     return auction_math.proportional_payment(
         self._lot_total_price(lot, _timestamp), _amount, lot.initial_amount
     )
@@ -386,6 +393,7 @@ def available(_from: address, _ts: uint256 = block.timestamp) -> uint256:
          today's balance, so historical answers are approximate.
     @param _from Token offered by the auction.
     @param _ts Timestamp to evaluate at; defaults to now.
+    @return Amount of `_from` available; 0 for an inactive lot.
     """
     return self._available(IERC20(_from), _ts)
 
@@ -394,60 +402,90 @@ def available(_from: address, _ts: uint256 = block.timestamp) -> uint256:
 @view
 def price(_from: address, _ts: uint256 = block.timestamp) -> uint256:
     """
-    @notice Return the WAD-scaled unit price for `_from` at a timestamp.
-    @dev Upward-rounded target payment per 1e18 raw units of `_from` — not
-         Yearn's decimal-normalized price; for sell tokens with non-18
-         decimals the values are incompatible. getAmountNeeded is the
-         canonical quote; do not multiply this price for payments.
+    @notice Return the WAD-precision unit price of `_from` at a timestamp:
+            raw want units per 1e18 raw units of `_from`.
+    @dev Rounded up like every quote; getAmountNeeded is the canonical payment
+         quote. For the Yearn mapping (scaler = 1) see IDutchAuction.
     @param _from Token offered by the auction.
     @param _ts Timestamp to evaluate at; defaults to now.
+    @return Unit price in want per 1e18 raw units; 0 for an inactive lot.
     """
     coin: IERC20 = IERC20(_from)
     if self._available(coin, _ts) == 0:
         return 0
-    lot: auction_types.Lot = self.lots[coin]
-    return auction_math.unit_quote_wad(
-        self._lot_total_price(lot, _ts), lot.initial_amount
-    )
+    return self._quote_unchecked(coin, c.WAD, _ts)
 
 
 @external
 @view
 def getAmountNeeded(
-    _from: address, amountToTake: uint256, _ts: uint256 = block.timestamp
+    _from: address,
+    amountToTake: uint256 = max_value(uint256),
+    _ts: uint256 = block.timestamp,
 ) -> uint256:
     """
     @notice Return the exact target-token payment required for an amount.
     @param _from Token offered by the auction.
     @param amountToTake Amount of `_from` to quote; must not exceed available.
+           max_value(uint256) quotes everything available, reproducing Yearn's
+           single-argument overload.
     @param _ts Timestamp to evaluate at; defaults to now.
+    @return Want payment for `amountToTake`; 0 for an inactive lot.
     """
     coin: IERC20 = IERC20(_from)
     available_amount: uint256 = self._available(coin, _ts)
     if available_amount == 0:
         return 0
-    assert amountToTake <= available_amount, AmountExceedsAvailable()
-    return self._quote_unchecked(coin, amountToTake, _ts)
+    amount: uint256 = amountToTake
+    if amount == max_value(uint256):
+        amount = available_amount
+    assert amount <= available_amount, AmountExceedsAvailable()
+    return self._quote_unchecked(coin, amount, _ts)
+
+
+# Yearn-compatible views
 
 
 @external
 @view
-def quote(_token: address, _sell_amount: uint256, _ts: uint256 = block.timestamp) -> uint256:
+def isActive(_from: address) -> bool:
+    """@notice Whether `_from` can be taken right now (Yearn ABI)."""
+    return self._available(IERC20(_from), block.timestamp) > 0
+
+
+@external
+@view
+def auctionLength() -> uint256:
     """
-    @notice Quote a sell amount against the signed lot total.
-    @dev Unlike getAmountNeeded, the bound is the lot's initial_amount, not the
-         live availability: persistent partially fillable orders keep quoting
-         their signed total after partial fills. Returns 0 while inactive.
-    @param _token Token offered by the auction.
-    @param _sell_amount Amount of `_token` to quote.
-    @param _ts Timestamp to evaluate at; defaults to now.
+    @notice Length of an auction window (Yearn ABI). A constant in Yearn; here
+            the current epoch's calendar window.
     """
-    coin: IERC20 = IERC20(_token)
-    lot: auction_types.Lot = self.lots[coin]
-    if not self._is_active(coin, lot, _ts):
-        return 0
-    assert _sell_amount <= lot.initial_amount, AmountExceedsLot()
-    return self._quote_unchecked(coin, _sell_amount, _ts)
+    start: uint256 = 0
+    end: uint256 = 0
+    start, end = self._epoch_bounds(self._auction_epoch(block.timestamp))
+    return end - start
+
+
+@external
+@view
+def auctions(_from: address) -> IDutchAuction.AuctionInfo:
+    """
+    @notice The lot in Yearn's record shape (Yearn ABI): kicked is the lot
+            window's start, initialAvailable the snapshot. Zeroed for a
+            never-staged token, like Yearn's unenabled auction.
+    @dev scaler is 1 and kicked may lie in the future; see IDutchAuction.
+    """
+    lot: IDutchAuction.Lot = self.lots[IERC20(_from)]
+    if lot.epoch == 0:
+        return empty(IDutchAuction.AuctionInfo)
+    start: uint256 = 0
+    end: uint256 = 0
+    start, end = self._epoch_bounds(lot.epoch)
+    return IDutchAuction.AuctionInfo(
+        kicked=convert(start, uint64),
+        scaler=1,
+        initialAvailable=convert(lot.initial_amount, uint128),
+    )
 
 
 # Native settlement
@@ -465,7 +503,7 @@ def _take(
     amount_taken: uint256 = min(_max_amount, available_amount)
     assert amount_taken > 0, NothingAvailable()
 
-    lot: auction_types.Lot = self.lots[_from]
+    lot: IDutchAuction.Lot = self.lots[_from]
     payment: uint256 = self._quote_unchecked(_from, amount_taken, block.timestamp)
 
     assert extcall _from.transfer(_receiver, amount_taken, default_return_value=True)
@@ -482,17 +520,14 @@ def _take(
     # Crediting balance deltas at the proceeds receiver instead would let a
     # callback route unrelated third-party inflows (any permissionless push
     # toward the receiver) into its own bill.
-    assert extcall self.want_token.transferFrom(
+    assert extcall self.want.transferFrom(
         msg.sender,
-        self.proceeds_receiver,
+        self.receiver,
         payment,
         default_return_value=True,
     )
 
-    remaining: uint256 = min(
-        lot.initial_amount,
-        staticcall _from.balanceOf(self),
-    )
+    remaining: uint256 = self._available_unchecked(_from, lot)
     log Taken(
         token=_from,
         epoch=lot.epoch,
@@ -508,18 +543,20 @@ def _take(
 @external
 def take(
     _from: address,
-    maxAmount: uint256,
-    takerReceiver: address,
-    data: Bytes[INF],
+    maxAmount: uint256 = max_value(uint256),
+    takerReceiver: address = msg.sender,
+    data: Bytes[INF] = b"",
 ) -> uint256:
     """
     @notice Take up to `maxAmount` of an auctioned token.
     @dev The full quoted payment is pulled from the caller's want allowance
          after the optional callback; the callback lets the taker source the
-         funds from the received tokens first.
+         funds from the received tokens first. The defaults reproduce Yearn's
+         shortened take overloads: everything available, to the caller, with
+         no callback.
     @param _from Token offered by the auction.
-    @param maxAmount Maximum amount of `_from` to take.
-    @param takerReceiver Receiver of the auctioned token.
+    @param maxAmount Maximum amount of `_from` to take; defaults to all.
+    @param takerReceiver Receiver of the auctioned token; defaults to the caller.
     @param data Optional data forwarded to the receiver's auction callback.
     @return Amount of `_from` taken.
     """
@@ -544,6 +581,14 @@ def take_with_limits(
     @dev A deadline before the next epoch's window also pins the epoch: at any
          timestamp exactly one epoch is active, so no separate epoch limit is
          needed to protect against filling a restaged lot's fresh curve.
+    @param _from Token offered by the auction.
+    @param _max_amount Maximum amount of `_from` to take.
+    @param _min_amount Minimum amount of `_from` taken; reverts below it.
+    @param _max_payment Maximum want payment; reverts above it.
+    @param _receiver Receiver of the auctioned token.
+    @param _deadline Last timestamp (inclusive) at which the take may execute.
+    @param _data Optional data forwarded to the receiver's auction callback.
+    @return Amount of `_from` taken and the want payment pulled.
     """
     assert block.timestamp <= _deadline, Deadline()
 
@@ -558,10 +603,6 @@ def take_with_limits(
 # Signed-order economics
 
 
-# The returned reason strings are a FROZEN cross-contract ABI: CowAdapter
-# reverts them verbatim as OrderNotValid(reason) and CoW tooling classifies
-# orders by them. Renaming one is a silent breaking change no
-# compiler will catch — never edit an existing reason, only add new ones.
 @external
 @view
 def check_order(
@@ -571,54 +612,46 @@ def check_order(
     _sell_amount: uint256,
     _min_buy_amount: uint256,
     _valid_to: uint256,
-) -> String[32]:
+) -> bool:
     """
     @notice The shared economic order check every settlement adapter runs: lot
             activity, receiver, amounts, window, and the live curve quote.
-    @dev Verifiers prove that their protocol's digest matches these fields and
+    @dev Adapters prove that their protocol's digest matches these fields and
          delegate the economics here, so pricing rules exist in exactly one
-         place. Returns an empty string for a fillable order and a
-         CoW-canonical reason otherwise, letting CoW-facing adapters revert
-         OrderNotValid(reason) verbatim. Partial-fill totals are
-         compared against the signed lot's initial_amount, not the live
-         remainder: a persistent partially fillable order keeps its original
-         total after partial fills. Replay needs no commitment beyond these
-         checks: nothing signs on the auction's behalf, so any payload
-         passing them settles at or above the live curve price. Locked like
-         every other quote view: a view only reads the contract-wide lock, so
-         the verifier's staticcall back from isValidSignature passes, while a
-         read during a native take callback is rejected.
+         place. Reverts with a typed error for an unfillable order and
+         returns True for a fillable one, so an eth_call classifies any order
+         by the error selector. Partial-fill totals are compared against the
+         signed lot's initial_amount, not the live remainder. Locked like
+         every other quote view.
+    @return True for a fillable order (unfillable orders revert).
     """
     token: IERC20 = IERC20(_sell_token)
-    lot: auction_types.Lot = self.lots[token]
+    lot: IDutchAuction.Lot = self.lots[token]
     # sell != buy is implied: the buy token must equal want and _is_active
     # rejects want as a lot token.
-    if _buy_token != self.want_token.address:
-        return "BadToken"
-    if _receiver != self.proceeds_receiver:
-        return "BadReceiver"
-    if not self._is_active(token, lot, block.timestamp):
-        return "NotAllowed"
+    assert _buy_token == self.want.address, BadBuyToken()
+    assert _receiver == self.receiver, BadReceiver()
+    assert self._is_active(token, lot, block.timestamp), LotInactive()
     # The availability term also establishes initial_amount > 0 before the
     # quote divides by it.
-    if self._available_unchecked(token, lot) == 0:
-        return "ZeroBalance"
-    if _sell_amount == 0 or _sell_amount > lot.initial_amount:
-        return "BadSellAmount"
+    assert self._available_unchecked(token, lot) > 0, NothingAvailable()
+    assert 0 < _sell_amount and _sell_amount <= lot.initial_amount, BadSellAmount()
     lot_start: uint256 = 0
     lot_end: uint256 = 0
     lot_start, lot_end = self._epoch_bounds(lot.epoch)
-    if block.timestamp > _valid_to or _valid_to > lot_end:
-        return "BadValidTo"
-    if _min_buy_amount < self._quote_unchecked(token, _sell_amount, block.timestamp):
-        return "BadBuyAmount"
-    return ""
+    assert block.timestamp <= _valid_to and _valid_to <= lot_end, BadValidTo()
+    assert _min_buy_amount >= self._quote_unchecked(token, _sell_amount, block.timestamp), (
+        BadBuyAmount()
+    )
+    return True
 
 
 # Compile-time integration hooks implemented by the importing contract.
-# The cadence hook: maps a timestamp onto a monotone nonzero epoch number.
-# The importing contract owns the schedule (weekly, daily, custom frames);
-# the core only compares epochs for staleness and staging identity.
+# The cadence hook: maps a timestamp onto a nonzero epoch id. Ids must be
+# strictly increasing integers over time: the want fence names the previous
+# epoch as `current_epoch - 1`. The importing contract owns the schedule
+# (weekly, daily, custom frames); the core only compares epochs for
+# staleness and staging identity.
 @internal
 @view
 @abstract
@@ -634,6 +667,8 @@ def _auction_epoch(_timestamp: uint256) -> uint256: ...
 def _epoch_bounds(_epoch: uint256) -> (uint256, uint256): ...
 
 
+# The policy hook: whether a token may be sold right now (kill switches,
+# target migration). The core already excludes the want token.
 @internal
 @view
 @abstract

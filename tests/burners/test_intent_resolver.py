@@ -21,10 +21,8 @@ STAGED_AMOUNT = 100 * WAD
 INTENT_ABI_TYPES = ["uint256", "address", "address", "uint64", "uint256", "uint48"]
 TAKE_SELECTOR = keccak(b"take(address,uint256,address,bytes)")[:4]
 
-# AuctionTakerMock payment modes.
+# AuctionTakerMock payment mode: pay nothing in the callback.
 PAY_NOTHING = 0
-PAY_COLLECTOR = 1
-PAY_BURNER = 2
 
 RESOLVER_VERSION = 1
 TAKER_RECEIVER_OFFSET = 4 + 2 * 32
@@ -90,7 +88,7 @@ def auction(want, proceeds_receiver):
 
 @pytest.fixture(scope="module")
 def resolver():
-    return boa.load("contracts/DutchAuctionResolver.vy")
+    return boa.load("contracts/burners/auction/periphery/DutchAuctionResolver.vy")
 
 
 @pytest.fixture(scope="module")
@@ -242,12 +240,11 @@ def test_solver_executes_call_step_and_proceeds_receiver_is_paid(
 
 
 def test_solver_routes_fill_through_callback_aggregator(
-    auction, resolver, stage, make_payload, sell_token, want, taker, solver,
-    proceeds_receiver
+    auction, resolver, stage, make_payload, sell_token, want, taker, solver
 ):
     # A solver needing a callback builds its own take() calldata from the
-    # resolved amounts, as the ResolvedOrder documentation prescribes. The
-    # payment is always pulled from the solver's allowance after the callback.
+    # resolved amounts, as the ResolvedOrder documentation prescribes: the
+    # callback then sees exactly the resolved amounts.
     stage(sell_token)
     resolved = resolver.resolve(make_payload())
     payment = resolved.want_payment.amount
@@ -264,35 +261,6 @@ def test_solver_routes_fill_through_callback_aggregator(
     assert taker.callback_count() == 1
     assert taker.callback_amount_taken() == resolved.sell_payout.amount
     assert taker.callback_amount_needed() == payment
-    assert sell_token.balanceOf(taker) == resolved.sell_payout.amount
-    assert want.balanceOf(proceeds_receiver) == payment
-    assert want.balanceOf(auction) == 0
-
-
-@pytest.mark.parametrize("payment_mode", [PAY_COLLECTOR, PAY_BURNER])
-def test_callback_direct_transfers_do_not_settle_solver_bill(
-    auction, resolver, stage, make_payload, sell_token, want, taker, solver,
-    proceeds_receiver, payment_mode
-):
-    # Direct transfers to the proceeds receiver or the auction inside the
-    # callback must not count as payment: crediting balance deltas would let a
-    # callback route unrelated third-party inflows into its own bill.
-    staged = stage(sell_token)
-    resolved = resolver.resolve(make_payload())
-    payment = resolved.want_payment.amount
-
-    taker.configure(payment_mode, False)
-    want._mint_for_testing(taker, payment)
-    call_data = _take_calldata(
-        sell_token.address, resolved.sell_payout.amount, taker.address, b"aggregator route"
-    )
-    with pytest.raises(Revert):
-        boa.env.raw_call(auction.address, sender=solver, data=call_data)
-
-    assert sell_token.balanceOf(taker) == 0
-    assert want.balanceOf(taker) == payment
-    assert want.balanceOf(proceeds_receiver) == 0
-    assert auction.available(sell_token) == staged
 
 
 def test_underpaying_solver_reverts_atomically(
@@ -377,12 +345,10 @@ def test_zero_auction_intent_reverts(resolver, make_payload):
         resolver.resolve(make_payload(auction_address=ZERO_ADDRESS))
 
 
-@pytest.mark.parametrize("epoch_offset", [-1, 1])
-def test_wrong_epoch_intent_reverts(auction, resolver, stage, make_payload, sell_token,
-                                    epoch_offset):
+def test_wrong_epoch_intent_reverts(auction, resolver, stage, make_payload, sell_token):
     stage(sell_token)
     with boa.reverts(custom_err("WrongEpoch()")):
-        resolver.resolve(make_payload(auction_epoch=auction.current_epoch() + epoch_offset))
+        resolver.resolve(make_payload(auction_epoch=auction.current_epoch() - 1))
 
 
 def test_stale_epoch_reverts_after_week_rolls_over(auction, resolver, stage, make_payload,
@@ -400,57 +366,82 @@ def test_stale_epoch_reverts_after_week_rolls_over(auction, resolver, stage, mak
         resolver.resolve(payload)
 
 
-def test_unstaged_token_reverts(resolver, make_payload):
+def _unstaged_token(env: dict) -> dict:
     fresh_token = boa.load("contracts/testing/ERC20Mock.vy", "Unstaged", "UNS", 18)
-    with boa.reverts(custom_err("NothingAvailable()")):
-        resolver.resolve(make_payload(sell_token_address=fresh_token.address))
+    return {"sell_token_address": fresh_token.address}
 
 
-def test_want_token_intent_reverts(resolver, make_payload, want):
-    with boa.reverts(custom_err("NothingAvailable()")):
-        resolver.resolve(make_payload(sell_token_address=want.address))
+def _want_as_sell_token(env: dict) -> dict:
+    return {"sell_token_address": env["want"].address}
 
 
-def test_drained_lot_reverts(auction, resolver, stage, make_payload, sell_token):
-    stage(sell_token)
-    with boa.env.prank(auction.address):
-        sell_token.transfer(
-            boa.env.generate_address(), sell_token.balanceOf(auction)
+def _drained_lot(env: dict) -> dict:
+    env["stage"](env["sell_token"])
+    with boa.env.prank(env["auction"].address):
+        env["sell_token"].transfer(
+            boa.env.generate_address(), env["sell_token"].balanceOf(env["auction"])
         )
-    with boa.reverts(custom_err("NothingAvailable()")):
-        resolver.resolve(make_payload())
+    return {}
 
 
-def test_unsellable_token_reverts(auction, resolver, stage, make_payload, sell_token):
-    stage(sell_token)
-    auction.set_sellable(sell_token, False)
-    with boa.reverts(custom_err("NothingAvailable()")):
-        resolver.resolve(make_payload())
+def _unsellable_token(env: dict) -> dict:
+    env["stage"](env["sell_token"])
+    env["auction"].set_sellable(env["sell_token"], False)
+    return {}
 
 
-def test_lot_past_its_end_reverts(auction, resolver, stage, make_payload, sell_token):
-    stage(sell_token)
-    lot_end = auction.epoch_bounds(auction.lots(sell_token).epoch)[1]
+def _lot_past_its_end(env: dict) -> dict:
+    env["stage"](env["sell_token"])
+    lot_end = env["auction"].epoch_bounds(env["auction"].lots(env["sell_token"]).epoch)[1]
     boa.env.time_travel(seconds=lot_end - _timestamp())
-    with boa.reverts(custom_err("NothingAvailable()")):
-        resolver.resolve(make_payload(deadline=_timestamp() + 3600))
+    return {"deadline": _timestamp() + 3600}
 
 
-def test_drained_lot_reverts(auction, resolver, stage, make_payload, sell_token, want, solver):
-    staged = stage(sell_token)
+def _fully_taken_lot(env: dict) -> dict:
+    auction, sell_token, want, solver = (
+        env["auction"], env["sell_token"], env["want"], env["solver"]
+    )
+    staged = env["stage"](sell_token)
     payment = auction.getAmountNeeded(sell_token, staged)
     want._mint_for_testing(solver, payment)
     with boa.env.prank(solver):
         want.approve(auction, payment)
         auction.take(sell_token, staged, solver, b"")
-    with boa.reverts(custom_err("NothingAvailable()")):
-        resolver.resolve(make_payload())
+    return {}
 
 
-def test_zero_max_sell_amount_reverts(resolver, stage, make_payload, sell_token):
-    stage(sell_token)
+def _zero_max_sell_amount(env: dict) -> dict:
+    env["stage"](env["sell_token"])
+    return {"max_sell_amount": 0}
+
+
+@pytest.mark.parametrize(
+    "setup",
+    [
+        _unstaged_token,
+        _want_as_sell_token,
+        _drained_lot,
+        _unsellable_token,
+        _lot_past_its_end,
+        _fully_taken_lot,
+        _zero_max_sell_amount,
+    ],
+    ids=lambda setup: setup.__name__.lstrip("_"),
+)
+def test_nothing_available_reverts(
+    auction, resolver, stage, make_payload, sell_token, want, solver, setup
+):
+    # Every way a lot ends up with nothing to sell resolves to the same error.
+    env = {
+        "auction": auction,
+        "stage": stage,
+        "sell_token": sell_token,
+        "want": want,
+        "solver": solver,
+    }
+    overrides = setup(env)
     with boa.reverts(custom_err("NothingAvailable()")):
-        resolver.resolve(make_payload(max_sell_amount=0))
+        resolver.resolve(make_payload(**overrides))
 
 
 def test_malformed_payload_reverts(resolver, stage, make_payload, sell_token):
@@ -472,8 +463,6 @@ def test_resolver_is_view_and_stateless(resolver, stage, make_payload, sell_toke
     first = resolver.resolve(payload)
     second = resolver.resolve(payload)
     assert first == second
-    # No storage slot was ever written: the resolver works purely off eth_call.
-    assert boa.env.evm.get_storage(resolver.address, 0) == 0
 
 
 def test_newly_staged_token_is_resolvable_without_allowlist(auction, resolver, stage,

@@ -1,4 +1,5 @@
-# pragma version 0.4.3
+# pragma version 0.5.0b1
+# SPDX-License-Identifier: MIT
 """
 @title Configurable problem ERC-20 test double
 @author Curve Finance

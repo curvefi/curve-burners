@@ -19,15 +19,15 @@ NETWORK = f"https://rpc.gnosischain.com"  # ALTER
 EMPTY_COMPENSATION = (0, (0, 0, 0), 0, 0, False)
 EMPTY_HOOK_INPUT = (0, 0, b"")
 
-MIN_EXCHANGE_AMOUNT = 5 * 10 ** 18  # ALTER: 1 crvUSD
+MIN_EXCHANGE_AMOUNT = 5 * 10 ** 18  # ALTER: 5 crvUSD
 MIN_BRIDGE_AMOUNT = 100 * 10 ** 18  # ALTER: 100 crvUSD
 ETHEREUM_FEE_DESTINATION = "0xa2Bcd1a4Efbd04B63cd03f5aFf2561106ebCCE00"  # FeeCollector on Ethereum
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
-# DutchAuctionBurner dependencies (verify against the target chain before deploy)
-COW_SETTLEMENT = "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"  # ALTER: GPv2Settlement
-COMPOSABLE_COW = "0xfdaFc9d1902f4e0b84f65F49f244b32b31013b74"  # ALTER: ComposableCow
+# CoW dependencies (verify against the target chain before deploy)
+COW_SETTLEMENT = "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"  # ALTER: GPv2Settlement (DutchAuctionBurner: CowAdapter reads the relayer from it)
+COMPOSABLE_COW = "0xfdaFc9d1902f4e0b84f65F49f244b32b31013b74"  # ALTER: ComposableCow (CowSwapBurner only)
 COW_VAULT_RELAYER = "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"  # ALTER: VaultRelayer (CowSwapBurner only)
 
 
@@ -72,6 +72,9 @@ def deploy_burner(fee_collector):
                           fee_collector,
                           100_000 * 10 ** 18,  # ALTER: start_total
                           MIN_EXCHANGE_AMOUNT,  # ALTER: floor_total
+                          # The decay factor is derived from start_total, floor_total and the
+                          # EXCHANGE frame length: re-derive it (re-run the preflight) after any
+                          # ALTER above or below, or the constructor reverts DecayMissesFloor.
                           996_566_004_328_933_169_904_721_721,  # ALTER: 30s decay over 2879 active steps
                           30,  # ALTER: step_duration
                           registry.address,
@@ -80,10 +83,7 @@ def deploy_burner(fee_collector):
 
         cow_enabled = True  # ALTER: False on chains without CoW
         if cow_enabled:
-            # CoW is a regular registry adapter: orders are published to the CoW
-            # orderbook (signing scheme eip1271) with signature
-            # `cow_adapter ++ abi.encode(order)`; keepers grant the vault relayer via
-            # burner.sync_executor_approvals(relayer, tokens) after each collect.
+            # Registry-managed; keepers run sync_executor_approvals(relayer, tokens) after collect.
             cow_adapter = boa.load("contracts/burners/cow/CowAdapter.vy",
                                    COW_SETTLEMENT,
                                    bytes.fromhex("058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"),  # ALTER: appData
@@ -92,7 +92,6 @@ def deploy_burner(fee_collector):
             print(f"CowAdapter: {cow_adapter.address}")
             registry.set_adapter(cow_adapter.address, cow_adapter.vault_relayer())
             registry.activate_adapter(cow_adapter.address)
-            burner.enable_adapter(cow_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 
@@ -141,7 +140,7 @@ if __name__ == "__main__":
     if '--fork' in sys.argv[1:]:
         boa.fork(NETWORK)
 
-        boa.env.eoa = '0x71F718D3e4d1449D1502A6A7595eb84eBcCB1683'
+        boa.env.eoa = ADMIN
     else:
         boa.set_network_env(NETWORK)
         boa.env.add_account(account_load('curve'))  # ALTER: account to use

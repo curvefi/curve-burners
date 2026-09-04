@@ -1,15 +1,14 @@
 """Standalone tests for the stateless gpv2 module.
 
 Covers GPv2 order construction/hashing against an independent EIP-712
-reference, flag and balance-mode checks, and the CoW-canonical revert ABI. The
-cow_adapter module built on top is tested in test_cow_adapter.py.
+reference and the flag and balance-mode checks. The CowAdapter built on top
+(and its typed-error reverts) is tested in test_cow_adapter.py.
 """
 
 from copy import deepcopy
 
 import boa
 import pytest
-from boa import BoaError
 from eth_abi import encode
 from eth_hash.auto import keccak
 from eth_utils import to_checksum_address
@@ -62,24 +61,7 @@ def check_order_flags(_order: gpv2.GPv2Order) -> bool:
 @pure
 def check_balance_modes(_order: gpv2.GPv2Order) -> bool:
     return gpv2._check_balance_modes(_order)
-
-
-@external
-@pure
-def order_not_valid(_reason: String[32]):
-    raise gpv2.OrderNotValid(reason=_reason)
-
-
-@external
-@pure
-def encode_bare_order(_order: gpv2.GPv2Order) -> Bytes[gpv2.ENCODED_ORDER_LEN]:
-    return abi_encode(_order)
-
 """
-
-
-def selector(signature: str) -> bytes:
-    return keccak(signature.encode())[:4]
 
 
 def order_digest_reference(order, domain_separator: bytes = DOMAIN_SEPARATOR) -> bytes:
@@ -90,10 +72,6 @@ def order_digest_reference(order, domain_separator: bytes = DOMAIN_SEPARATOR) ->
 
 def address_from_int(value: int) -> str:
     return to_checksum_address(value.to_bytes(20, "big"))
-
-
-def revert_data(error: BoaError) -> bytes:
-    return bytes(error.args[0].output)
 
 
 @pytest.fixture(scope="module")
@@ -222,7 +200,7 @@ def test_check_order_flags_rejects_each_violation(harness, canonical_order, inde
     order = deepcopy(canonical_order)
     order[index] = value
     assert not harness.check_order_flags(order)
-    # Balance modes are a separate check so the watchtower keeps its
+    # Balance modes are a separate check so the CowAdapter keeps its
     # BadOrderFlags-versus-BadBalanceMode error granularity.
     assert harness.check_balance_modes(order)
 
@@ -251,30 +229,3 @@ def test_check_order_flags_ignores_economic_fields(harness, canonical_order):
     order[5] = 0
     assert harness.check_order_flags(order)
     assert harness.check_balance_modes(order)
-
-
-# CoW-canonical revert ABI
-
-
-def test_order_not_valid_revert_data(harness):
-    with pytest.raises(BoaError) as error:
-        harness.order_not_valid("BadStaticInput")
-    assert revert_data(error.value) == selector("OrderNotValid(string)") + encode(
-        ["string"], ["BadStaticInput"]
-    )
-
-
-# Signature shape invariants for the router
-
-
-def test_bare_order_payload_never_aliases_a_verifier_prefix(harness, canonical_order):
-    # The bare CoW encoding starts with the ABI zero padding of the sellToken
-    # address head: its first 12 bytes are zero, so an unprefixed order can
-    # never be mistaken for a 20-byte verifier prefix by the router — and a
-    # publisher always prepends the CowAdapter address explicitly.
-    worst_case_order = deepcopy(canonical_order)
-    worst_case_order[0] = to_checksum_address(b"\xff" * 20)
-    for order in (canonical_order, worst_case_order):
-        bare = bytes(harness.encode_bare_order(order))
-        assert len(bare) == 12 * 32
-        assert bare[:12] == bytes(12)

@@ -8,14 +8,12 @@ from typing import Any
 import boa
 import pytest
 from dotenv import load_dotenv
-from eth_abi import encode
-from eth_utils import keccak
 
-from ..conftest import ZERO_ADDRESS, Epoch, WEEK
+from ..conftest import ZERO_ADDRESS, Epoch
+from .conftest import custom_err
 from .test_dutch_auction_v2 import (
     APP_DATA,
     BURNER_INTERFACE,
-    CONDITIONAL_ORDER_INTERFACE,
     DECAY_FACTOR_RAY,
     ERC20_BALANCE,
     ERC1271_MAGIC_VALUE,
@@ -39,7 +37,10 @@ from .test_dutch_auction_v2 import (
     START_TOTAL,
     STEP_DURATION,
     WAD,
-    ZERO_BYTES32,
+    _encode_erc1271_signature,
+    _gpv2_order_digest,
+    _move_to_epoch,
+    _move_to_timestamp,
 )
 
 
@@ -96,65 +97,6 @@ def _fork(rpc_url: str) -> None:
         boa.fork(rpc_url)
     else:
         boa.env.fork(rpc_url, block_identifier="latest")
-
-
-def _timestamp() -> int:
-    return boa.env.evm.vm.state.timestamp
-
-
-def _move_to_epoch(fee_collector: Any, epoch: Epoch) -> None:
-    start, end = fee_collector.epoch_time_frame(epoch)
-    target = (start + end) // 2
-    while target <= _timestamp():
-        target += WEEK
-    boa.env.time_travel(seconds=target - _timestamp())
-
-
-def _move_to_timestamp(timestamp: int) -> None:
-    boa.env.time_travel(seconds=timestamp - _timestamp())
-
-
-def _cow_signature(adapter: Any, order: Any) -> bytes:
-    """eip1271 signature bytes a publisher posts: adapter prefix ++ bare order."""
-    normalized = (str(order[0]), str(order[1]), str(order[2]), *order[3:])
-    return bytes.fromhex(str(adapter.address)[2:]) + encode(
-        [
-            "(address,address,address,uint256,uint256,uint32,bytes32,uint256,"
-            "bytes32,bool,bytes32,bytes32)"
-        ],
-        [normalized],
-    )
-
-
-def _gpv2_order_digest(order: Any, domain_separator: bytes) -> bytes:
-    order_type_hash = keccak(
-        text=(
-            "Order(address sellToken,address buyToken,address receiver,uint256 sellAmount,"
-            "uint256 buyAmount,uint32 validTo,bytes32 appData,uint256 feeAmount,string kind,"
-            "bool partiallyFillable,string sellTokenBalance,string buyTokenBalance)"
-        )
-    )
-    struct_hash = keccak(
-        encode(
-            [
-                "bytes32",
-                "address",
-                "address",
-                "address",
-                "uint256",
-                "uint256",
-                "uint32",
-                "bytes32",
-                "uint256",
-                "bytes32",
-                "bool",
-                "bytes32",
-                "bytes32",
-            ],
-            [order_type_hash, *order],
-        )
-    )
-    return keccak(b"\x19\x01" + bytes(domain_separator) + struct_hash)
 
 
 def _abi_contract(abi: list[dict[str, Any]], name: str, address: str) -> Any:
@@ -222,17 +164,17 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
         with boa.env.prank(owner):
             fee_collector.set_burner(burner)
             fee_collector.set_killed([(ZERO_ADDRESS, 0)])
+            # The registry is the single management point: the burner holds no
+            # adapter state and routes iff the adapter is active here.
             registry.set_adapter(cow_adapter, cow_adapter.vault_relayer())
             registry.activate_adapter(cow_adapter)
-            burner.enable_adapter(cow_adapter)
+        assert registry.is_executor_active(GPV2_VAULT_RELAYER)
 
         # The relayer and domain separator are read from the real settlement.
         assert cow_adapter.vault_relayer() == GPV2_VAULT_RELAYER
         assert bytes(cow_adapter.domain_separator()) == bytes(settlement.domainSeparator())
         assert burner.supportsInterface(BURNER_INTERFACE)
         assert burner.supportsInterface(ERC1271_MAGIC_VALUE)
-        # No watchtower: the burner never claims the conditional-order generator.
-        assert not burner.supportsInterface(CONDITIONAL_ORDER_INTERFACE)
 
         _move_to_epoch(fee_collector, Epoch.COLLECT)
         amount = 1_000 * WAD
@@ -246,7 +188,7 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
         lot = (*lot, *burner.epoch_bounds(lot[0]))
         assert lot[LOT_INITIAL_AMOUNT] > 0
         # Staging grants nothing; the keeper's permissionless sync gives the
-        # real vault relayer (the enabled adapter's executor) its allowance.
+        # real vault relayer (the active registry adapter's executor) its allowance.
         assert sell_token.allowance(burner, GPV2_VAULT_RELAYER) == 0
         with boa.env.prank(keeper):
             burner.sync_executor_approvals(GPV2_VAULT_RELAYER, [sell_token.address])
@@ -260,7 +202,7 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
         order, signature = cow_adapter.order_for(burner.address, sell_token.address)
         order = tuple(order)
         signature = bytes(signature)
-        assert signature == _cow_signature(cow_adapter, order)
+        assert signature == _encode_erc1271_signature(order, cow_adapter)
 
         assert order[ORDER_SELL_TOKEN] == sell_token.address
         assert order[ORDER_BUY_TOKEN] == target.address
@@ -269,7 +211,7 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
         assert order[ORDER_BUY_AMOUNT] == burner.getAmountNeeded(
             sell_token, order[ORDER_SELL_AMOUNT]
         )
-        assert order[ORDER_VALID_TO] <= lot[LOT_END]
+        assert order[ORDER_VALID_TO] == lot[LOT_END]
         assert order[ORDER_FEE_AMOUNT] == 0
         assert order[ORDER_KIND] == SELL_KIND
         assert order[ORDER_PARTIALLY_FILLABLE]
@@ -326,7 +268,9 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
         invalid_order[ORDER_BUY_AMOUNT] = order[ORDER_BUY_AMOUNT] - 1
         invalid_digest = _gpv2_order_digest(invalid_order, settlement.domainSeparator())
         with boa.env.prank(GPV2_SETTLEMENT):
-            with boa.reverts():
+            with boa.reverts(custom_err("OrderNotValid(string)", "InvalidHash")):
                 burner.isValidSignature(invalid_digest, signature)
-            with boa.reverts():
-                burner.isValidSignature(invalid_digest, _cow_signature(cow_adapter, invalid_order))
+            with boa.reverts(custom_err("BadBuyAmount()")):
+                burner.isValidSignature(
+                    invalid_digest, _encode_erc1271_signature(invalid_order, cow_adapter)
+                )

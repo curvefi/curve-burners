@@ -9,36 +9,23 @@
         validates ERC-1271 signatures forwarded by an auction's prefix router
         against the canonical GPv2 digest and the auction's shared economic
         order check, and builds publishable orders for keepers.
-@dev Signature template (adapter_types): a CoW order is posted to the
-     orderbook with signing scheme eip1271, `from` = the auction, and
-     signature `this_adapter ++ abi_encode(GPv2Order)`; GPv2Settlement strips
-     the owner, the auction strips the adapter prefix and forwards the bare
-     order here. order_for() builds exactly that pair for a lot. This
-     contract proves only that the digest is the canonical GPv2 hash of the
-     decoded order and that the protocol constants match; all pricing runs
-     through the calling auction's check_order view (msg.sender is the
-     auction), whose reasons are reverted verbatim in the CoW-canonical
-     OrderNotValid ABI. Publication is permissionless: anyone may post an
-     order for the auction, and only orders at or above the live curve at
-     settlement time validate. Registry conventions: verifier = this
-     contract, executor = the vault relayer read from the settlement at
-     deploy.
+@dev Registry conventions: adapter = this contract, executor = the vault
+     relayer read from the settlement at deploy. Signature template: orders
+     are posted with signing scheme eip1271, `from` = the auction, and
+     signature `this_adapter ++ abi_encode(GPv2Order)` (see order_for and
+     isValidSignature).
 @custom:kill Stateless and immutable: nothing to pause here. Routing through
-             this adapter stops immediately when the registry disables it or
-             an auction disables it locally; both paths leave native take()
-             untouched.
+             this adapter stops immediately when the registry disables it
+             (owner or emergency owner); native take() stays untouched.
 @custom:security Holds no funds and receives no allowances (the executor —
                  the vault relayer — does). Auction-agnostic: every economic
                  decision is delegated to msg.sender's check_order, so calling
                  this contract directly proves nothing about any auction.
 """
 
-from ethereum.ercs import IERC20
-
-from contracts.burners.auction import auction_types
-from contracts.burners.auction.adapters import adapter_types
 from contracts.burners.cow import gpv2
 from contracts.interfaces import IDutchAuctionBurner
+from contracts.utils import constants as c
 
 
 error BadSettlement:
@@ -63,8 +50,9 @@ interface Settlement:
 
 
 ADAPTER_VERSION: public(constant(String[20])) = "CowAdapter"
-# `this_adapter ++ abi_encode(GPv2Order)`
-SIGNATURE_LEN: constant(uint256) = adapter_types.ADAPTER_PREFIX_LEN + gpv2.ENCODED_ORDER_LEN
+# `this_adapter ++ abi_encode(GPv2Order)`: the 20-byte adapter address the
+# auction's router strips, then the bare order this contract validates.
+SIGNATURE_LEN: constant(uint256) = 20 + gpv2.ENCODED_ORDER_LEN
 
 # GPv2 wiring pinned at deploy: the domain separator is immutable in the
 # settlement, so a settlement upgrade means a fresh adapter deployment and a
@@ -120,17 +108,19 @@ def order_for(
     if sell_amount == 0:
         sell_amount = staticcall _auction.available(_token)
     assert sell_amount > 0, NothingToSell()
-    lot: auction_types.Lot = staticcall _auction.lots(IERC20(_token))
+    # A lot with availability is staged in the current epoch.
     lot_start: uint256 = 0
     lot_end: uint256 = 0
-    lot_start, lot_end = staticcall _auction.epoch_bounds(lot.epoch)
+    lot_start, lot_end = staticcall _auction.epoch_bounds(staticcall _auction.current_epoch())
 
     order: gpv2.GPv2Order = gpv2.GPv2Order(
         sellToken=_token,
-        buyToken=staticcall _auction.want(),
-        receiver=staticcall _auction.proceeds_receiver(),
+        buyToken=(staticcall _auction.want()).address,
+        receiver=staticcall _auction.receiver(),
         sellAmount=sell_amount,
         buyAmount=staticcall _auction.getAmountNeeded(_token, sell_amount),
+        # validTo is inclusive on the CoW side; check_order rejects at lot_end
+        # anyway (LotInactive), so nothing settles past the window.
         validTo=convert(lot_end, uint32),
         appData=self.app_data,
         feeAmount=0,
@@ -148,33 +138,33 @@ def order_for(
 @external
 @view
 def isValidSignature(
-    _hash: bytes32, _signature: Bytes[adapter_types.MAX_SIGNATURE_LEN]
+    _hash: bytes32, _signature: Bytes[gpv2.ENCODED_ORDER_LEN]
 ) -> bytes4:
     """
     @notice Validate a GPv2 digest against the calling auction's live lot
             economics.
     @dev The payload is the bare abi-encoded GPv2Order (the router already
-         stripped the adapter prefix). Reverts with the CoW-canonical
-         OrderNotValid(reason); the calling router lets the revert bubble.
+         stripped the adapter prefix). Protocol checks revert with
+         gpv2.OrderNotValid(reason); the economic check is the auction's
+         check_order, whose typed reverts pass through untouched. The calling
+         router lets every revert bubble. A payload longer than one encoded
+         order fails ABI decoding before any check runs and bubbles up the
+         same way.
     """
-    if len(_signature) != gpv2.ENCODED_ORDER_LEN:
-        raise gpv2.OrderNotValid(reason="NonCanonical")
+    assert len(_signature) == gpv2.ENCODED_ORDER_LEN, gpv2.OrderNotValid(reason="NonCanonical")
     order: gpv2.GPv2Order = abi_decode(_signature, gpv2.GPv2Order)
-    if abi_encode(order) != _signature:
-        raise gpv2.OrderNotValid(reason="NonCanonical")
+    assert abi_encode(order) == _signature, gpv2.OrderNotValid(reason="NonCanonical")
 
-    if gpv2._order_digest(order, self.domain_separator) != _hash:
-        raise gpv2.OrderNotValid(reason="InvalidHash")
-    if order.appData != self.app_data:
-        raise gpv2.OrderNotValid(reason="BadAppData")
-    if not gpv2._check_order_flags(order):
-        raise gpv2.OrderNotValid(reason="BadOrderFlags")
-    if not gpv2._check_balance_modes(order):
-        raise gpv2.OrderNotValid(reason="BadBalanceMode")
+    assert gpv2._order_digest(order, self.domain_separator) == _hash, (
+        gpv2.OrderNotValid(reason="InvalidHash")
+    )
+    assert order.appData == self.app_data, gpv2.OrderNotValid(reason="BadAppData")
+    assert gpv2._check_order_flags(order), gpv2.OrderNotValid(reason="BadOrderFlags")
+    assert gpv2._check_balance_modes(order), gpv2.OrderNotValid(reason="BadBalanceMode")
 
     # The shared economic check: the calling auction prices the fill against
-    # its live curve and answers with a canonical reason on failure.
-    reason: String[32] = staticcall IDutchAuctionBurner(msg.sender).check_order(
+    # its live curve and reverts with its own typed error on failure.
+    assert staticcall IDutchAuctionBurner(msg.sender).check_order(
         order.sellToken,
         order.buyToken,
         order.receiver,
@@ -182,6 +172,4 @@ def isValidSignature(
         order.buyAmount,
         convert(order.validTo, uint256),
     )
-    if len(reason) != 0:
-        raise gpv2.OrderNotValid(reason=reason)
-    return gpv2.ERC1271_MAGIC_VALUE
+    return c.ERC1271_MAGIC_VALUE

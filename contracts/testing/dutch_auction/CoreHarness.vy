@@ -21,7 +21,9 @@ from contracts.utils import roles
 
 initializes: roles
 initializes: dutch_auction
-initializes: adapters[roles := roles]
+initializes: adapters
+# The harness exports role_source/emergency_owner for tests; the burner
+# exports only owner.
 exports: (
     roles.role_source,
     roles.owner,
@@ -33,7 +35,6 @@ exports: (
     dutch_auction.available,
     dutch_auction.price,
     dutch_auction.getAmountNeeded,
-    dutch_auction.quote,
     dutch_auction.check_order,
     dutch_auction.take,
     dutch_auction.take_with_limits,
@@ -41,16 +42,15 @@ exports: (
     dutch_auction.floor_total,
     dutch_auction.decay_factor_ray,
     dutch_auction.step_duration,
-    dutch_auction.proceeds_receiver,
+    dutch_auction.receiver,
     dutch_auction.lots,
+    dutch_auction.isActive,
+    dutch_auction.auctionLength,
+    dutch_auction.auctions,
     dutch_auction.reconfigured_epoch,
 )
 exports: (
     adapters.registry,
-    adapters.enabled_adapters,
-    adapters.executor_refcount,
-    adapters.enable_adapter,
-    adapters.disable_adapter,
     adapters.sync_executor_approvals,
     adapters.isValidSignature,
 )
@@ -66,7 +66,7 @@ not_sellable: public(HashMap[address, bool])
 @deploy
 def __init__(
     _want: address,
-    _proceeds_receiver: address,
+    _receiver: address,
     _registry: address,
     _role_source: address,
     _start_total: uint256,
@@ -77,7 +77,7 @@ def __init__(
     roles.__init__(roles.RoleSource(_role_source))
     dutch_auction.__init__(
         IERC20(_want),
-        _proceeds_receiver,
+        _receiver,
         _start_total,
         _floor_total,
         _decay_factor_ray,
@@ -108,9 +108,7 @@ def set_sellable(_token: address, _sellable: bool):
 
 @external
 def stage(_token: address) -> uint256:
-    return dutch_auction._stage_lot(
-        IERC20(_token), self.frame_start // WEEK
-    )
+    return dutch_auction._stage_lot(IERC20(_token))
 
 
 @external
@@ -142,10 +140,12 @@ def _sellable(_token: address) -> bool:
     return not self.not_sellable[_token]
 
 
-# Adapter layer hook overrides
+# Adapter layer hook override
 
 
 @override(adapters)
 @view
-def _auction_want() -> address:
-    return dutch_auction.want_token.address
+def _pre_approve(_coin: IERC20):
+    # The payment token never gets an executor allowance.
+    dutch_auction._check_stageable(_coin)
+

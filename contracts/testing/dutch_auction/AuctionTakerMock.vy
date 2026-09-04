@@ -1,4 +1,5 @@
 # pragma version 0.4.3
+# SPDX-License-Identifier: MIT
 """
 @title Dutch auction callback taker test double
 @author Curve Finance

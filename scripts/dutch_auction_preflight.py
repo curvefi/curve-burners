@@ -2,25 +2,24 @@
 
 This utility never sends a transaction. It validates one chain configuration
 against JSON-RPC and emits the mutable lifecycle calls in their required
-order: ``burner.enable_adapter`` per adapter (the CowAdapter is one of them).
-Emergency calldata covers ``burner.disable_adapter``; allowance maintenance is
-the permissionless ``sync_executor_approvals`` (the target allowance is derived
-on-chain from the executor refcount, so the calldata is safe for anyone to
-send).
+order. Adapter calldata targets the registry (``set_adapter`` then
+``activate_adapter`` per adapter; ``disable_adapter`` for emergencies);
+``sync_executor_approvals`` targets the burner and is permissionless.
 
 The JSON object follows the implementation-requirements manifest fields:
 ``chainId``, ``feeCollector``, ``target``, ``targetDecimals``, ``cowEnabled``,
 ``settlement``, ``vaultRelayer``, ``cowAdapter``, and ``appData``. The CoW
-adapter must also appear in ``adapters`` (verifier = cowAdapter, executor =
-vaultRelayer): the generic adapter checks cover its registry entry, local
-enablement, and executor refcount. Curve calibration checks run when ``defaultX``, ``floor``,
-``decayFactorRay``, and ``stepDuration`` are all present. ``owner``,
-``emergencyOwner``, ``burner``, ``cowOrderValidity``, and
-``expectedCodeHashes`` enable stricter post-deploy checks without requiring a
-repository-wide chain manifest. ``registry`` and ``adapters``
-(``[{"verifier", "executor", "verifierCodeHash"?}]``) pin the adapter
-surface: each entry is checked against the registry config, the burner's
-enabled set, the live verifier code hash, and its executor refcount.
+adapter must also appear in ``adapters`` (adapter = cowAdapter, executor =
+vaultRelayer): the generic adapter checks cover its registry entry, activation
+flag, and executor activity. Curve calibration checks run when ``start_total``,
+``floor_total``, ``decay_factor_ray``, and ``step_duration`` are all present.
+``owner``, ``emergencyOwner``, ``burner``, and ``expectedCodeHashes`` (keyed
+by contract name or address) enable stricter post-deploy checks without
+requiring a repository-wide chain manifest. ``registry`` and ``adapters``
+(``[{"adapter", "executor"}]``) pin the adapter surface: each entry is checked
+against the registry listing (``get_adapters``) and config (executor and
+active flag), its code (hash pinned through ``expectedCodeHashes``), and the
+registry's ``is_executor_active`` answer for its executor.
 """
 
 from __future__ import annotations
@@ -41,7 +40,6 @@ from eth_utils import is_address, keccak, to_checksum_address
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ERC165_INTERFACE_ID = bytes.fromhex("01ffc9a7")
 BURNER_INTERFACE_ID = bytes.fromhex("a3b5e311")
-CONDITIONAL_ORDER_INTERFACE_ID = bytes.fromhex("b8296fc4")
 ERC1271_INTERFACE_ID = bytes.fromhex("1626ba7e")
 RAY = 10**27
 
@@ -142,15 +140,6 @@ def _bytes32(value: Any, name: str) -> bytes:
         raise ValueError(f"{name} must be hex encoded") from exc
 
 
-def _bytes4(value: Any, name: str) -> bytes:
-    if not isinstance(value, str) or not value.startswith("0x") or len(value) != 10:
-        raise ValueError(f"{name} must be a 4-byte hex value")
-    try:
-        return bytes.fromhex(value[2:])
-    except ValueError as exc:
-        raise ValueError(f"{name} must be hex encoded") from exc
-
-
 def _integer(value: Any, name: str) -> int:
     try:
         parsed = int(value, 0) if isinstance(value, str) else int(value)
@@ -194,10 +183,6 @@ def _read_address(rpc: RpcClient, address: str, signature: str) -> str:
 
 def _read_uint(rpc: RpcClient, address: str, signature: str) -> int:
     return _read(rpc, address, signature, ["uint256"])[0]
-
-
-def _read_bool(rpc: RpcClient, address: str, signature: str) -> bool:
-    return _read(rpc, address, signature, ["bool"])[0]
 
 
 def _read_bytes32(rpc: RpcClient, address: str, signature: str) -> str:
@@ -278,29 +263,27 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized["appData"] = "0x" + _bytes32(config["appData"], "appData").hex()
 
     for name in (
-        "defaultX",
-        "floor",
-        "decayFactorRay",
-        "stepDuration",
-        "cowOrderValidity",
+        "start_total",
+        "floor_total",
+        "decay_factor_ray",
+        "step_duration",
     ):
         if name in config:
             normalized[name] = _integer(config[name], name)
 
-    if "defaultX" in normalized and normalized["defaultX"] == 0:
-        raise ValueError("defaultX must be positive")
-    if "floor" in normalized:
-        if normalized["floor"] == 0:
-            raise ValueError("floor must be positive")
-        if "defaultX" in normalized and normalized["floor"] > normalized["defaultX"]:
-            raise ValueError("floor must not exceed defaultX")
-    if "decayFactorRay" in normalized and not (
-        0 < normalized["decayFactorRay"] < RAY
+    if "start_total" in normalized and normalized["start_total"] == 0:
+        raise ValueError("start_total must be positive")
+    if "floor_total" in normalized:
+        if normalized["floor_total"] == 0:
+            raise ValueError("floor_total must be positive")
+        if "start_total" in normalized and normalized["floor_total"] > normalized["start_total"]:
+            raise ValueError("floor_total must not exceed start_total")
+    if "decay_factor_ray" in normalized and not (
+        0 < normalized["decay_factor_ray"] < RAY
     ):
-        raise ValueError("decayFactorRay must be positive and below RAY")
-    for name in ("stepDuration", "cowOrderValidity"):
-        if name in normalized and normalized[name] == 0:
-            raise ValueError(f"{name} must be positive")
+        raise ValueError("decay_factor_ray must be positive and below RAY")
+    if "step_duration" in normalized and normalized["step_duration"] == 0:
+        raise ValueError("step_duration must be positive")
 
     for name in ("owner", "emergencyOwner", "burner", "registry"):
         if config.get(name):
@@ -314,20 +297,16 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(adapter, dict):
             raise ValueError(f"adapters[{index}] must be an object")
         entry = {
-            "verifier": _address(
-                adapter.get("verifier"), f"adapters[{index}].verifier"
+            "adapter": _address(
+                adapter.get("adapter"), f"adapters[{index}].adapter"
             ),
             "executor": _address(
                 adapter.get("executor"), f"adapters[{index}].executor"
             ),
         }
-        if adapter.get("verifierCodeHash"):
-            entry["verifierCodeHash"] = "0x" + _bytes32(
-                adapter["verifierCodeHash"], f"adapters[{index}].verifierCodeHash"
-            ).hex()
         normalized_adapters.append(entry)
-    if len({entry["verifier"] for entry in normalized_adapters}) != len(normalized_adapters):
-        raise ValueError("adapters must have unique verifiers")
+    if len({entry["adapter"] for entry in normalized_adapters}) != len(normalized_adapters):
+        raise ValueError("adapters must have unique adapter addresses")
     if normalized_adapters and not normalized.get("registry"):
         raise ValueError("adapters require registry")
     normalized["adapters"] = normalized_adapters
@@ -336,7 +315,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     if normalized["cowEnabled"]:
         for name in cow_names:
             normalized[name] = _address(config[name], name)
-        if normalized["cowAdapter"] not in {a["verifier"] for a in normalized_adapters}:
+        if normalized["cowAdapter"] not in {a["adapter"] for a in normalized_adapters}:
             raise ValueError("cowAdapter must be listed in adapters")
     else:
         for name in cow_names:
@@ -368,7 +347,7 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
     if config.get("registry"):
         required_contracts["registry"] = config["registry"]
     for index, adapter in enumerate(config["adapters"]):
-        required_contracts[f"adapters[{index}].verifier"] = adapter["verifier"]
+        required_contracts[f"adapters[{index}].adapter"] = adapter["adapter"]
 
     for name, address in required_contracts.items():
         try:
@@ -427,7 +406,7 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
     except (PreflightError, requests.RequestException) as exc:
         report.errors.append(f"target interface: {exc}")
 
-    curve_fields = {"defaultX", "floor", "decayFactorRay", "stepDuration"}
+    curve_fields = {"start_total", "floor_total", "decay_factor_ray", "step_duration"}
     if curve_fields <= config.keys():
         try:
             timestamp = rpc.latest_timestamp()
@@ -439,23 +418,18 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
                 ["uint256", "uint256"],
                 [4, timestamp],
             )
-            report.require(
-                "curve.exchangeFrame",
-                exchange_end > exchange_start,
-                "empty or reversed EXCHANGE frame",
-            )
             if exchange_end <= exchange_start:
                 raise PreflightError("empty or reversed EXCHANGE frame")
             active_elapsed = exchange_end - exchange_start - 1
-            active_steps = active_elapsed // config["stepDuration"]
+            active_steps = active_elapsed // config["step_duration"]
             report.checks["curve.activeSteps"] = active_steps
             end_price = _total_price_at_step(
-                config["defaultX"],
-                config["floor"],
-                config["decayFactorRay"],
+                config["start_total"],
+                config["floor_total"],
+                config["decay_factor_ray"],
                 active_steps,
             )
-            report.require_equal("curve.activeEndPrice", end_price, config["floor"])
+            report.require_equal("curve.activeEndPrice", end_price, config["floor_total"])
         except (PreflightError, requests.RequestException) as exc:
             report.errors.append(f"curve calibration: {exc}")
 
@@ -513,16 +487,18 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
                 _read_address(rpc, burner, "fee_collector()"),
                 fee_collector,
             )
+            # The payment token lives in the core as `want`; it mirrors the
+            # FeeCollector target only through the owner's resync_target.
             report.require_equal(
-                "burner.target",
-                _read_address(rpc, burner, "target()"),
+                "burner.want",
+                _read_address(rpc, burner, "want()"),
                 target,
             )
             getter_config = {
-                "defaultX": "start_total()",
-                "floor": "floor_total()",
-                "decayFactorRay": "decay_factor_ray()",
-                "stepDuration": "step_duration()",
+                "start_total": "start_total()",
+                "floor_total": "floor_total()",
+                "decay_factor_ray": "decay_factor_ray()",
+                "step_duration": "step_duration()",
             }
             for config_name, getter in getter_config.items():
                 if config_name in config:
@@ -531,14 +507,7 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
                         _read_uint(rpc, burner, getter),
                         config[config_name],
                     )
-            # The burner is not a ComposableCoW handler: it never claims the
-            # conditional-order generator interface.
-            report.require_equal(
-                "burner.interface.conditionalOrder",
-                _supports_interface(rpc, burner, CONDITIONAL_ORDER_INTERFACE_ID),
-                False,
-            )
-            # The ERC-1271 dispatcher is the settlement entry for every adapter.
+            # The ERC-1271 router is the settlement entry for every adapter.
             report.require(
                 "burner.interface.erc1271",
                 _supports_interface(rpc, burner, ERC1271_INTERFACE_ID),
@@ -552,106 +521,125 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
         except (PreflightError, requests.RequestException) as exc:
             report.errors.append(f"DutchAuctionBurner interface: {exc}")
 
-    if config["adapters"] and not burner:
-        report.warnings.append("adapters configured without burner; adapter checks skipped")
-    if burner:
-        for adapter in config["adapters"]:
-            label = f"adapter.{adapter['verifier']}"
-            try:
-                report.require(
-                    f"{label}.enabled",
-                    _read(
-                        rpc,
-                        burner,
-                        "enabled_adapters(address)",
-                        ["bool"],
-                        ["address"],
-                        [adapter["verifier"]],
-                    )[0],
-                    "adapter not enabled on the burner",
-                )
-                adapter_config = _read(
-                    rpc,
-                    config["registry"],
-                    "get_adapter(address)",
-                    ["address", "bool"],
-                    ["address"],
-                    [adapter["verifier"]],
-                )
-                executor = to_checksum_address(adapter_config[0])
-                report.require_equal(f"{label}.executor", executor, adapter["executor"])
-                report.require(
-                    f"{label}.active",
-                    adapter_config[1],
-                    "adapter not active in the registry",
-                )
-                live_codehash = "0x" + keccak(rpc.code(adapter["verifier"])).hex()
-                if adapter.get("verifierCodeHash"):
-                    report.require_equal(
-                        f"{label}.pinnedCodeHash",
-                        live_codehash,
-                        adapter["verifierCodeHash"],
-                    )
-                refcount = _read(
-                    rpc,
-                    burner,
-                    "executor_refcount(address)",
-                    ["uint256"],
-                    ["address"],
-                    [executor],
+    # Adapter state is registry-only: the burner routes an adapter iff
+    # registry.get_adapter(adapter).active and approves an executor iff
+    # registry.is_executor_active(executor). validate_config guarantees a
+    # registry whenever adapters are configured.
+    registry = config.get("registry")
+    registered: set[str] | None = None
+    if config["adapters"]:
+        try:
+            listed = [
+                to_checksum_address(address)
+                for address in _read(
+                    rpc, registry, "get_adapters()", ["address[]"]
                 )[0]
-                report.checks[f"{label}.executorRefcount"] = refcount
+            ]
+            report.checks["registry.adapters"] = listed
+            registered = set(listed)
+            configured = {adapter["adapter"] for adapter in config["adapters"]}
+            for address in listed:
+                if address not in configured:
+                    report.warnings.append(
+                        f"registry lists adapter {address} not in configuration"
+                    )
+        except (PreflightError, requests.RequestException) as exc:
+            report.errors.append(f"registry.adapters: {exc}")
+    for adapter in config["adapters"]:
+        label = f"adapter.{adapter['adapter']}"
+        try:
+            if registered is not None:
                 report.require(
-                    f"{label}.executorRefcount.positive",
-                    refcount >= 1,
-                    "enabled adapter's executor holds no refcount",
+                    f"{label}.registered",
+                    adapter["adapter"] in registered,
+                    "adapter missing from registry.get_adapters()",
                 )
-            except (PreflightError, requests.RequestException) as exc:
-                report.errors.append(f"{label}: {exc}")
+            adapter_config = _read(
+                rpc,
+                registry,
+                "get_adapter(address)",
+                ["address", "bool"],
+                ["address"],
+                [adapter["adapter"]],
+            )
+            executor = to_checksum_address(adapter_config[0])
+            report.require_equal(f"{label}.executor", executor, adapter["executor"])
+            report.require(
+                f"{label}.active",
+                adapter_config[1],
+                "adapter not active in the registry",
+            )
+            executor_active = _read(
+                rpc,
+                registry,
+                "is_executor_active(address)",
+                ["bool"],
+                ["address"],
+                [executor],
+            )[0]
+            report.require(
+                f"{label}.executorActive",
+                executor_active,
+                "active adapter's executor is not active in the registry",
+            )
+        except (PreflightError, requests.RequestException) as exc:
+            report.errors.append(f"{label}: {exc}")
 
     return report
 
 
 def lifecycle_calldata(
     config: dict[str, Any],
-    burner: str,
+    burner: str | None,
     executor: str | None,
     tokens: list[str],
 ) -> dict[str, Any]:
     config = validate_config(config)
-    burner = _address(burner, "burner")
     calls: dict[str, list[dict[str, str]]] = {
         "configuration": [],
         "emergency": [],
         "permissionless": [],
     }
 
-    def _enable(verifier: str) -> dict[str, str]:
-        return {
-            "to": burner,
-            "function": "enable_adapter(address)",
-            "data": encode_call("enable_adapter(address)", ["address"], [verifier]),
-        }
+    # Governance calldata targets the registry: the burner holds no adapter
+    # state. Entries are registered with set_adapter (repointable while
+    # inactive) and go live in a separate activate_adapter step. An emergency disable is batched with the burner's
+    # sync_executor_approvals below, since the registry never touches
+    # allowances.
+    registry = config.get("registry")
 
-    def _disable(verifier: str) -> dict[str, str]:
+    def _registry_call(function: str, types: list[str], arguments: list[Any]) -> dict[str, str]:
+        signature = f"{function}({','.join(types)})"
         return {
-            "to": burner,
-            "function": "disable_adapter(address)",
-            "data": encode_call("disable_adapter(address)", ["address"], [verifier]),
+            "to": registry,
+            "function": signature,
+            "data": encode_call(signature, types, arguments),
         }
 
     for adapter in config["adapters"]:
-        calls["configuration"].append(_enable(adapter["verifier"]))
-        calls["emergency"].append(_disable(adapter["verifier"]))
+        calls["configuration"].append(
+            _registry_call(
+                "set_adapter", ["address", "address"], [adapter["adapter"], adapter["executor"]]
+            )
+        )
+        calls["configuration"].append(
+            _registry_call("activate_adapter", ["address"], [adapter["adapter"]])
+        )
+        calls["emergency"].append(
+            _registry_call("disable_adapter", ["address"], [adapter["adapter"]])
+        )
 
-    if executor or tokens:
-        if not executor or not tokens:
-            raise ValueError("--executor and at least one --token are required together")
+    if burner or executor or tokens:
+        if not burner or not executor or not tokens:
+            raise ValueError(
+                "--burner, --executor and at least one --token are required together"
+            )
+        burner = _address(burner, "burner")
         executor_address = _address(executor, "executor")
         normalized_tokens = [_address(token, "token") for token in tokens]
-        # The target allowance (0 or max) is derived from the on-chain
-        # executor refcount, so this call carries no privilege and needs no
-        # gating.
+        # The target allowance (0 or max) is derived from the registry's
+        # on-chain is_executor_active answer, so this call carries no
+        # privilege and needs no gating.
         calls["permissionless"].append(
             {
                 "to": burner,
@@ -684,7 +672,7 @@ def _parser() -> argparse.ArgumentParser:
     preflight.add_argument("--timeout", type=float, default=20.0)
 
     calldata = subparsers.add_parser("calldata", help="emit lifecycle and emergency calldata")
-    calldata.add_argument("--burner", required=True)
+    calldata.add_argument("--burner", help="target of permissionless sync_executor_approvals")
     calldata.add_argument("--executor", help="executor for permissionless sync_executor_approvals")
     calldata.add_argument("--token", action="append", default=[])
     return parser
