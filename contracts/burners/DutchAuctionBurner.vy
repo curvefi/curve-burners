@@ -43,38 +43,41 @@
 
 from ethereum.ercs import IERC20
 
-from contracts.interfaces import IBurner, IDutchAuction, IDutchAuctionBurner, IFeeCollector
+from contracts.interfaces import IBurner, IDutchAuction, IFeeCollector, IYearnAuction
 from contracts.utils import constants as c, recovery, roles
-from contracts.burners.auction import dutch_auction
+from contracts.burners.auction import dutch_auction, yearn_auction
 from contracts.burners.auction.adapters import adapters
 
 implements: IBurner
 implements: IDutchAuction
-implements: IDutchAuctionBurner
+implements: IYearnAuction
 initializes: roles
 initializes: dutch_auction
+initializes: yearn_auction[dutch_auction := dutch_auction]
 initializes: adapters
 # Module surfaces are exported method-by-method on purpose: a new external
 # function added to a module never enters the burner ABI unreviewed.
 exports: (
-    dutch_auction.current_epoch,
+    dutch_auction.auction_length,
     dutch_auction.want,
+    dutch_auction.receiver,
+    dutch_auction.start_total,
+    dutch_auction.floor_total,
+    dutch_auction.step_duration,
+    dutch_auction.lots,
+    dutch_auction.window,
     dutch_auction.available,
     dutch_auction.price,
     dutch_auction.getAmountNeeded,
-    dutch_auction.check_order,
     dutch_auction.take,
     dutch_auction.take_with_limits,
-    dutch_auction.start_total,
-    dutch_auction.floor_total,
-    dutch_auction.decay_factor_ray,
-    dutch_auction.step_duration,
-    dutch_auction.receiver,
-    dutch_auction.lots,
-    dutch_auction.isActive,
-    dutch_auction.auctionLength,
-    dutch_auction.auctions,
-    dutch_auction.reconfigured_epoch,
+    dutch_auction.check_order,
+)
+# Yearn-only views; drop this export (and the import) to shed them.
+exports: (
+    yearn_auction.isActive,
+    yearn_auction.auctionLength,
+    yearn_auction.auctions,
 )
 exports: roles.owner
 exports: (
@@ -122,34 +125,35 @@ def __init__(
     _fee_collector: IFeeCollector,
     _start_total: uint256,
     _floor_total: uint256,
-    _decay_factor_ray: uint256,
     _step_duration: uint256,
     _registry: address,
 ):
     """
-    @notice Configure immutable weekly-auction economics.
-    @dev Curve parameters are validated by the core module; the calendar-
-         dependent check (decay fitting the EXCHANGE frame) stays here because
-         only the burner knows the FeeCollector calendar.
+    @notice Configure the weekly-auction economics.
+    @dev Every lot trades for one EXCHANGE frame: its length becomes the
+         core's auction_length and the curve decays exponentially from
+         start_total to floor_total over it, so no calibration constant is
+         deployed.
     """
     assert _fee_collector.address != empty(address), BadFeeCollector()
     configured_target: address = staticcall _fee_collector.target()
     assert configured_target != empty(address), BadTarget()
 
     roles.__init__(roles.RoleSource(_fee_collector.address))
+    self.fee_collector = _fee_collector
+    exchange_start: uint256 = 0
+    exchange_end: uint256 = 0
+    exchange_start, exchange_end = self._exchange_frame(block.timestamp)
+    assert exchange_end > exchange_start, BadExchangeFrame()
     dutch_auction.__init__(
         IERC20(configured_target),
         _fee_collector.address,
         _start_total,
         _floor_total,
-        _decay_factor_ray,
         _step_duration,
+        exchange_end - exchange_start,
     )
     adapters.__init__(_registry)
-    self.fee_collector = _fee_collector
-    self._validate_curve_fits_frame(
-        _start_total, _floor_total, _decay_factor_ray, _step_duration
-    )
 
 
 # Shared helpers
@@ -166,29 +170,6 @@ def _target_is_current() -> bool:
 def _exchange_frame(_timestamp: uint256) -> (uint256, uint256):
     return staticcall self.fee_collector.epoch_time_frame(
         IFeeCollector.Epoch.EXCHANGE, _timestamp
-    )
-
-
-@internal
-@view
-def _validate_curve_fits_frame(
-    _start_total: uint256,
-    _floor_total: uint256,
-    _decay_factor_ray: uint256,
-    _step_duration: uint256,
-):
-    # The curve must reach the floor within the EXCHANGE frame containing now:
-    # the last active second is end - 1 (windows exclude their end).
-    exchange_start: uint256 = 0
-    exchange_end: uint256 = 0
-    exchange_start, exchange_end = self._exchange_frame(block.timestamp)
-    assert exchange_end > exchange_start, BadExchangeFrame()
-    dutch_auction._validate_curve_fits(
-        _start_total,
-        _floor_total,
-        _decay_factor_ray,
-        _step_duration,
-        exchange_end - exchange_start - 1,
     )
 
 
@@ -245,45 +226,16 @@ def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
 
 @override(dutch_auction)
 @view
-def _auction_epoch(_timestamp: uint256) -> uint256:
-    # The cadence decision lives here, not in the core: one auction per
-    # FeeCollector distribution period, identified by its EXCHANGE window's
-    # start timestamp. A timestamp id needs no calendar constant — it stays
-    # monotone and unique under any (even changed) period, and is always
-    # nonzero on a live chain.
+def _lot_start(_token: IERC20, _staged_at: uint256) -> uint256:
+    # The calendar decision lives here, not in the core: a lot staged during
+    # a distribution period (its COLLECT frame) trades in that period's
+    # EXCHANGE frame, read from the FeeCollector so the calendar is defined
+    # in one place. Every token shares the frame; a per-token slot inside it
+    # would be this hook's decision alone.
     exchange_start: uint256 = 0
     exchange_end: uint256 = 0
-    exchange_start, exchange_end = self._exchange_frame(_timestamp)
+    exchange_start, exchange_end = self._exchange_frame(_staged_at)
     return exchange_start
-
-
-@override(dutch_auction)
-@view
-def _epoch_bounds(_epoch: uint256) -> (uint256, uint256):
-    # An epoch is its own window's start timestamp, so the frame containing it
-    # IS its window — exact by construction, with the calendar defined in one
-    # place (the FeeCollector). Epoch 0 is the never-staged sentinel and
-    # predates the FeeCollector calendar (whose frame lookup would revert):
-    # the empty window keeps every check inactive.
-    if _epoch == 0:
-        return 0, 0
-    return self._exchange_frame(_epoch)
-
-
-# Reentrant like want(): resolves through the immutable FeeCollector's
-# calendar views, reads no burner storage, and take() callbacks compute
-# deadlines from it.
-@external
-@view
-@reentrant
-def epoch_bounds(_epoch: uint256) -> (uint256, uint256):
-    """
-    @notice Active window of an auction epoch.
-    @dev Lots store no time bounds: the calendar lives with this burner, and
-         independent contracts (resolver, keepers) read epoch windows from
-         here.
-    """
-    return self._epoch_bounds(_epoch)
 
 
 @override(dutch_auction)
@@ -314,7 +266,6 @@ def resync_target(
     _expected_target: address,
     _start_total: uint256,
     _floor_total: uint256,
-    _decay_factor_ray: uint256,
     _step_duration: uint256,
 ):
     """
@@ -322,14 +273,15 @@ def resync_target(
             a curve retuned for it. Also serves as a same-target curve retune.
     @dev The new target is read from the FeeCollector, never passed in, so the
          owner cannot detach the payment denomination from the protocol. The
-         full curve is revalidated against the EXCHANGE frame exactly like the
-         constructor. A same-target retune keeps live lots untouched.
+         curve is solved over auction_length exactly like the constructor.
+         Every resync, a same-target retune included, stales
+         every lot staged up to its block (the core's resync fence).
          Allowed only during the SLEEP phase — before the week's staging, so
          one configuration governs the entire distribution period: staging,
          the trading window, and forwarding. Consequences: the price within a
          window can never change (staging is confined to COLLECT), so the
-         plain Yearn-style take() needs no payment ceiling; the want fence
-         always stops at the previous epoch and no week is lost; and pairing
+         plain Yearn-style take() needs no payment ceiling; the fence only
+         ever stales previous weeks' lots and no week is lost; and pairing
          FeeCollector.set_target with the resync inside one SLEEP phase never
          halts collection (burn() rejects a diverged target only in COLLECT).
     @param _expected_target The target the curve parameters were tuned for.
@@ -351,14 +303,10 @@ def resync_target(
         NotSleepEpoch()
     )
 
-    self._validate_curve_fits_frame(
-        _start_total, _floor_total, _decay_factor_ray, _step_duration
-    )
     dutch_auction._resync_economics(
         IERC20(new_target),
         _start_total,
         _floor_total,
-        _decay_factor_ray,
         _step_duration,
     )
 

@@ -11,8 +11,11 @@ The JSON object follows the implementation-requirements manifest fields:
 ``settlement``, ``vaultRelayer``, ``cowAdapter``, and ``appData``. The CoW
 adapter must also appear in ``adapters`` (adapter = cowAdapter, executor =
 vaultRelayer): the generic adapter checks cover its registry entry, activation
-flag, and executor activity. Curve calibration checks run when ``start_total``,
-``floor_total``, ``decay_factor_ray``, and ``step_duration`` are all present.
+flag, and executor activity. Curve checks run when ``start_total``,
+``floor_total``, and ``step_duration`` are all present: the curve the burner
+prepares on-chain from them and the FeeCollector EXCHANGE frame
+is recomputed with the bit-exact mirror in ``dutch_auction_curve.py`` and
+the burner's ``auction_length`` is checked against the frame.
 ``owner``, ``emergencyOwner``, ``burner``, and ``expectedCodeHashes`` (keyed
 by contract name or address) enable stricter post-deploy checks without
 requiring a repository-wide chain manifest. ``registry`` and ``adapters``
@@ -36,12 +39,17 @@ from dotenv import load_dotenv
 from eth_abi import decode, encode
 from eth_utils import is_address, keccak, to_checksum_address
 
+try:  # run as a script from scripts/ or imported as scripts.dutch_auction_preflight
+    from scripts import dutch_auction_curve as curve
+except ImportError:  # pragma: no cover
+    import dutch_auction_curve as curve
+
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ERC165_INTERFACE_ID = bytes.fromhex("01ffc9a7")
 BURNER_INTERFACE_ID = bytes.fromhex("a3b5e311")
 ERC1271_INTERFACE_ID = bytes.fromhex("1626ba7e")
-RAY = 10**27
+WAD = 10**18
 
 # Creation code writes 42 to transient storage, reads it back, copies the word
 # with MCOPY, and returns it. Unsupported Cancun opcodes make the eth_call fail;
@@ -200,27 +208,6 @@ def _supports_interface(rpc: RpcClient, address: str, interface_id: bytes) -> bo
     )[0]
 
 
-def _ray_mul(a: int, b: int) -> int:
-    return (a * b + RAY // 2) // RAY
-
-
-def _ray_pow(base_ray: int, exponent: int) -> int:
-    result = RAY
-    factor = base_ray
-    while exponent:
-        if exponent & 1:
-            result = _ray_mul(result, factor)
-        exponent >>= 1
-        if exponent:
-            factor = _ray_mul(factor, factor)
-    return result
-
-
-def _total_price_at_step(start_total: int, floor_total: int, factor: int, steps: int) -> int:
-    decayed = start_total * _ray_pow(factor, steps) // RAY
-    return max(floor_total, decayed)
-
-
 def _expected_code_hash(config: dict[str, Any], name: str, address: str) -> str | None:
     expected = config.get("expectedCodeHashes", {})
     value = expected.get(name, expected.get(address, expected.get(address.lower())))
@@ -265,7 +252,6 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     for name in (
         "start_total",
         "floor_total",
-        "decay_factor_ray",
         "step_duration",
     ):
         if name in config:
@@ -278,10 +264,6 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("floor_total must be positive")
         if "start_total" in normalized and normalized["floor_total"] > normalized["start_total"]:
             raise ValueError("floor_total must not exceed start_total")
-    if "decay_factor_ray" in normalized and not (
-        0 < normalized["decay_factor_ray"] < RAY
-    ):
-        raise ValueError("decay_factor_ray must be positive and below RAY")
     if "step_duration" in normalized and normalized["step_duration"] == 0:
         raise ValueError("step_duration must be positive")
 
@@ -406,7 +388,7 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
     except (PreflightError, requests.RequestException) as exc:
         report.errors.append(f"target interface: {exc}")
 
-    curve_fields = {"start_total", "floor_total", "decay_factor_ray", "step_duration"}
+    curve_fields = {"start_total", "floor_total", "step_duration"}
     if curve_fields <= config.keys():
         try:
             timestamp = rpc.latest_timestamp()
@@ -420,14 +402,33 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
             )
             if exchange_end <= exchange_start:
                 raise PreflightError("empty or reversed EXCHANGE frame")
-            active_elapsed = exchange_end - exchange_start - 1
-            active_steps = active_elapsed // config["step_duration"]
-            report.checks["curve.activeSteps"] = active_steps
-            end_price = _total_price_at_step(
+            auction_length = exchange_end - exchange_start
+            steps = curve.decay_steps(auction_length, config["step_duration"])
+            if steps == 0:
+                raise PreflightError("step_duration exceeds the EXCHANGE frame")
+            log_start, log_drop = curve.curve_logs(
+                config["start_total"], config["floor_total"]
+            )
+            report.checks["curve.decaySteps"] = steps
+            report.checks["curve.logStart"] = log_start
+            report.checks["curve.logDrop"] = log_drop
+            if config.get("burner"):
+                # The burner derives the same curve from these parameters and
+                # its auction_length (the EXCHANGE frame length at deploy).
+                report.require_equal(
+                    "burner.auction_length",
+                    _read_uint(rpc, config["burner"], "auction_length()"),
+                    auction_length,
+                )
+            # Sanity: the curve sits at the floor by the last active second.
+            end_price = curve.total_price(
                 config["start_total"],
                 config["floor_total"],
-                config["decay_factor_ray"],
-                active_steps,
+                log_start,
+                log_drop,
+                steps,
+                auction_length - 1,
+                config["step_duration"],
             )
             report.require_equal("curve.activeEndPrice", end_price, config["floor_total"])
         except (PreflightError, requests.RequestException) as exc:
@@ -497,7 +498,6 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
             getter_config = {
                 "start_total": "start_total()",
                 "floor_total": "floor_total()",
-                "decay_factor_ray": "decay_factor_ray()",
                 "step_duration": "step_duration()",
             }
             for config_name, getter in getter_config.items():

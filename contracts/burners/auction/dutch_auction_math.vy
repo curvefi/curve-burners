@@ -4,14 +4,24 @@
 @title Dutch auction math
 @author Curve Finance
 @license MIT
-@notice Step-geometric auction pricing helpers.
-@dev Rounding follows the Maker/Yearn rpow convention: RAY multiplications
-     round to nearest, the decayed total rounds down, and only the payment
-     quotes round up in favor of the receiver — the residual error is dwarfed
-     by execution noise. Products are computed in checked uint256 arithmetic:
-     quotes revert if a * b overflows; auction totals, amounts, and RAY
-     factors stay far below that domain by deployment policy.
+@notice Exponential (geometric) auction curve and payment rounding.
+@dev The total price of the full lot decays from start_total to floor_total
+     along P(u) = start_total^(1-u) * floor_total^u, u being the fraction of
+     the decay steps elapsed: equal time buys the same percentage drop. The
+     curve is evaluated as exp(ln(start) - u * ln(start / floor)) in WAD
+     fixed point through snekmate's wad_ln/wad_exp (the dependency pinned
+     in requirements.in), with the logarithms prepared once per configuration
+     (curve_logs) so quotes cost one exp. The endpoints are exact by
+     explicit branches and the result is clamped into
+     [floor_total, start_total], so the approximation error of ln/exp (see
+     tests/burners/test_wad_math.py) never leaves the price range. Only the payment
+     quotes round, and they round up in favor of the receiver. Products are
+     computed in checked uint256 arithmetic: quotes revert if a * b
+     overflows; auction totals and amounts stay far below that domain by
+     deployment policy.
 """
+
+from snekmate.utils import math as wad_math
 
 
 error DivisionByZero:
@@ -26,11 +36,13 @@ error FloorAboveStart:
     pass
 
 
-error GrowthFactor:
+error StartTotalTooLarge:
     pass
 
 
-RAY: constant(uint256) = 10**27
+# wad_ln(0) answers 0 instead of reverting; the curve needs a real floor.
+error ZeroFloor:
+    pass
 
 
 @internal
@@ -49,35 +61,21 @@ def mul_div_up(a: uint256, b: uint256, denominator: uint256) -> uint256:
 
 @internal
 @pure
-def ray_mul(a: uint256, b: uint256) -> uint256:
-    """@notice Calculate a * b / RAY rounded to nearest (Maker rpow convention)."""
-    return (a * b + RAY // 2) // RAY
-
-
-@internal
-@pure
-def ray_pow(base_ray: uint256, exponent: uint256) -> uint256:
+def curve_logs(start_total: uint256, floor_total: uint256) -> (int256, uint256):
     """
-    @notice Calculate a RAY fixed-point power by square-and-multiply.
-    @dev Each multiplication rounds to nearest, matching the Maker/Yearn rpow
-         convention. The loop has one iteration per exponent bit and is
-         therefore bounded by the uint256 width. Results which do not fit
-         uint256 revert.
+    @notice Prepare the curve: ln(start_total) and the total log drop
+            ln(start_total) - ln(floor_total), both WAD.
+    @dev Reverts for floor_total > start_total, floor_total == 0 (ln
+         undefined) and start_total above int256. The drop is kept whole:
+         dividing it by the step count ahead of time would lose precision,
+         so total_price multiplies first and divides last.
     """
-    result: uint256 = RAY
-    factor: uint256 = base_ray
-    remaining_exponent: uint256 = exponent
-
-    for _i: uint256 in range(256):
-        if remaining_exponent == 0:
-            return result
-        if remaining_exponent & 1 != 0:
-            result = self.ray_mul(result, factor)
-        remaining_exponent >>= 1
-        if remaining_exponent != 0:
-            factor = self.ray_mul(factor, factor)
-
-    return result
+    assert start_total <= convert(max_value(int256), uint256), StartTotalTooLarge()
+    assert floor_total <= start_total, FloorAboveStart()
+    assert floor_total != 0, ZeroFloor()
+    log_start: int256 = wad_math._wad_ln(convert(start_total, int256))
+    log_floor: int256 = wad_math._wad_ln(convert(floor_total, int256))
+    return log_start, convert(log_start - log_floor, uint256)
 
 
 @internal
@@ -85,23 +83,35 @@ def ray_pow(base_ray: uint256, exponent: uint256) -> uint256:
 def total_price(
     start_total: uint256,
     floor_total: uint256,
-    decay_factor_ray: uint256,
+    log_start: int256,
+    log_drop: uint256,
+    decay_steps: uint256,
     elapsed: uint256,
     step_duration: uint256,
 ) -> uint256:
     """
     @notice Quote the full lot at a discrete elapsed-time step.
-    @dev Returns max(floor_total, start_total * decay**steps rounded down).
+    @dev Constant within a step. Exactly start_total during the first step
+         and exactly floor_total from step decay_steps on; in between,
+         exp(log_start - log_drop * step / decay_steps) clamped into the
+         price range. Non-strict decrease between steps: two adjacent steps
+         may quote the same integer.
     """
     assert step_duration != 0, ZeroStep()
-    assert floor_total <= start_total, FloorAboveStart()
-    assert decay_factor_ray <= RAY, GrowthFactor()
+    step: uint256 = elapsed // step_duration
 
-    steps: uint256 = elapsed // step_duration
-    decayed_total: uint256 = (
-        start_total * self.ray_pow(decay_factor_ray, steps) // RAY
+    if step == 0:
+        return start_total
+    if step >= decay_steps:
+        return floor_total
+    if start_total == floor_total:
+        return start_total
+
+    log_offset: uint256 = log_drop * step // decay_steps
+    price: uint256 = convert(
+        wad_math._wad_exp(log_start - convert(log_offset, int256)), uint256
     )
-    return max(floor_total, decayed_total)
+    return min(start_total, max(floor_total, price))
 
 
 @internal

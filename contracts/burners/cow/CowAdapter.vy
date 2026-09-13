@@ -24,7 +24,7 @@
 """
 
 from contracts.burners.cow import gpv2
-from contracts.interfaces import IDutchAuctionBurner
+from contracts.interfaces import IDutchAuction
 from contracts.utils import constants as c
 
 
@@ -89,7 +89,7 @@ def __init__(_settlement: address, _app_data: bytes32):
 @external
 @view
 def order_for(
-    _auction: IDutchAuctionBurner, _token: address, _sell_amount: uint256 = 0
+    _auction: IDutchAuction, _token: address, _sell_amount: uint256 = 0
 ) -> (gpv2.GPv2Order, Bytes[SIGNATURE_LEN]):
     """
     @notice Build the order a publisher posts to the CoW orderbook for a live
@@ -108,10 +108,9 @@ def order_for(
     if sell_amount == 0:
         sell_amount = staticcall _auction.available(_token)
     assert sell_amount > 0, NothingToSell()
-    # A lot with availability is staged in the current epoch.
     lot_start: uint256 = 0
     lot_end: uint256 = 0
-    lot_start, lot_end = staticcall _auction.epoch_bounds(staticcall _auction.current_epoch())
+    lot_start, lot_end = staticcall _auction.window(_token)
 
     order: gpv2.GPv2Order = gpv2.GPv2Order(
         sellToken=_token,
@@ -153,18 +152,17 @@ def isValidSignature(
     """
     assert len(_signature) == gpv2.ENCODED_ORDER_LEN, gpv2.OrderNotValid(reason="NonCanonical")
     order: gpv2.GPv2Order = abi_decode(_signature, gpv2.GPv2Order)
-    assert abi_encode(order) == _signature, gpv2.OrderNotValid(reason="NonCanonical")
 
     assert gpv2._order_digest(order, self.domain_separator) == _hash, (
         gpv2.OrderNotValid(reason="InvalidHash")
     )
     assert order.appData == self.app_data, gpv2.OrderNotValid(reason="BadAppData")
-    assert gpv2._check_order_flags(order), gpv2.OrderNotValid(reason="BadOrderFlags")
-    assert gpv2._check_balance_modes(order), gpv2.OrderNotValid(reason="BadBalanceMode")
+    assert order.feeAmount == 0 and order.kind == gpv2.SELL_KIND and order.partiallyFillable, gpv2.OrderNotValid(reason="BadOrderFlags")
+    assert order.sellTokenBalance == gpv2.TOKEN_BALANCE and order.buyTokenBalance == gpv2.TOKEN_BALANCE, gpv2.OrderNotValid(reason="BadBalanceMode")
 
     # The shared economic check: the calling auction prices the fill against
     # its live curve and reverts with its own typed error on failure.
-    assert staticcall IDutchAuctionBurner(msg.sender).check_order(
+    assert staticcall IDutchAuction(msg.sender).check_order(
         order.sellToken,
         order.buyToken,
         order.receiver,

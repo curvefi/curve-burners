@@ -94,8 +94,10 @@ class FakeRpc:
             return encode(["uint256"], [1])
         if selector == preflight._selector("floor_total()"):
             return encode(["uint256"], [1])
-        if selector == preflight._selector("decay_factor_ray()"):
-            return encode(["uint256"], [preflight.RAY - 1])
+        if selector == preflight._selector("auction_length()"):
+            # The mocked EXCHANGE frame is [0, 2).
+            assert address == BURNER
+            return encode(["uint256"], [2])
         if selector == preflight._selector("step_duration()"):
             return encode(["uint256"], [1])
         if selector == preflight._selector("vault_relayer()"):
@@ -140,7 +142,6 @@ def _full_config() -> dict[str, Any]:
         "appData": APP_DATA,
         "start_total": 1,
         "floor_total": 1,
-        "decay_factor_ray": preflight.RAY - 1,
         "step_duration": 1,
         "owner": OWNER,
         "emergencyOwner": EMERGENCY_OWNER,
@@ -219,7 +220,10 @@ def test_full_preflight_check_keys_are_pinned():
         "feeCollector.owner",
         "feeCollector.emergencyOwner",
         "target.decimals",
-        "curve.activeSteps",
+        "curve.decaySteps",
+        "curve.logStart",
+        "curve.logDrop",
+        "burner.auction_length",
         "curve.activeEndPrice",
         "cowAdapter.settlement",
         "cowAdapter.vaultRelayer",
@@ -232,7 +236,6 @@ def test_full_preflight_check_keys_are_pinned():
         "burner.want",
         "burner.start_total",
         "burner.floor_total",
-        "burner.decay_factor_ray",
         "burner.step_duration",
         "burner.interface.erc1271",
         "burner.registry",

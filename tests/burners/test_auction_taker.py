@@ -13,8 +13,8 @@ WEEK = 7 * 24 * 60 * 60
 START_TOTAL = 100_000 * WAD
 FLOOR_TOTAL = WAD
 STEP_DURATION = 60
-# Reviewed decay bound reused from the dutch auction test suite.
-DECAY_FACTOR_RAY = 992031276831159793484252056
+# Floor reached by the last active second of a day: 1439 sixty-second steps.
+AUCTION_LENGTH = 24 * 60 * 60
 
 STAGED_AMOUNT = 100 * WAD
 
@@ -84,8 +84,8 @@ def auction(want, proceeds_receiver):
         role_source.address,
         START_TOTAL,
         FLOOR_TOTAL,
-        DECAY_FACTOR_RAY,
         STEP_DURATION,
+        AUCTION_LENGTH,
     )
 
 

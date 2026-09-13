@@ -122,11 +122,9 @@ def test_admin(fee_collector, admin, emergency_admin, arve, burner, hooker, targ
     # Both admins
     with boa.env.anchor():
         with boa.env.prank(admin):
-            fee_collector.recover([], arve)
             fee_collector.set_killed(killed)
     with boa.env.anchor():
         with boa.env.prank(emergency_admin):
-            fee_collector.recover([], arve)
             fee_collector.set_killed(killed)
 
     # Only ownership admin
@@ -141,6 +139,8 @@ def test_admin(fee_collector, admin, emergency_admin, arve, burner, hooker, targ
             fee_collector.set_emergency_owner(arve)
             fee_collector.set_owner(arve)
     with boa.env.prank(emergency_admin):
+        with boa.reverts("Only owner"):
+            fee_collector.recover([], arve)
         with boa.reverts("Only owner"):
             fee_collector.set_max_fee(2, 5 * 10 ** (18 - 2))
         with boa.reverts("Only owner"):

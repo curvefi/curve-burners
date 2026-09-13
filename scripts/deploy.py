@@ -72,10 +72,9 @@ def deploy_burner(fee_collector):
                           fee_collector,
                           100_000 * 10 ** 18,  # ALTER: start_total
                           MIN_EXCHANGE_AMOUNT,  # ALTER: floor_total
-                          # The decay factor is derived from start_total, floor_total and the
-                          # EXCHANGE frame length: re-derive it (re-run the preflight) after any
-                          # ALTER above or below, or the constructor reverts DecayMissesFloor.
-                          996_566_004_328_933_169_904_721_721,  # ALTER: 30s decay over 2879 active steps
+                          # The decay factor is solved on-chain from start_total, floor_total,
+                          # step_duration and the EXCHANGE frame (floor reached at its last
+                          # active second); the preflight recomputes and checks it.
                           30,  # ALTER: step_duration
                           registry.address,
                           )

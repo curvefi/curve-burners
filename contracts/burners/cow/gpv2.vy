@@ -43,9 +43,9 @@ GPV2_ORDER_TYPE_HASH: constant(bytes32) = keccak256(
     "Order(address sellToken,address buyToken,address receiver,uint256 sellAmount,"
     "uint256 buyAmount,uint32 validTo,bytes32 appData,uint256 feeAmount,string kind,"
     "bool partiallyFillable,string sellTokenBalance,string buyTokenBalance)"
-)
-SELL_KIND: constant(bytes32) = keccak256("sell")
-TOKEN_BALANCE: constant(bytes32) = keccak256("erc20")
+)  # 0xd5a25ba2e97094ad7d83dc28a6572da797d6b3e7fc6663bd93efb789fc17e489
+SELL_KIND: constant(bytes32) = keccak256("sell")  # 0xf3b277728b3fee749481eb3e0b3b48980dbbab78658fc419025cb16eee346775
+TOKEN_BALANCE: constant(bytes32) = keccak256("erc20")  # 0x5a28e9363bb942b639270062aa6bb295f434bcdfc42c97267bf003f272060dc9
 
 
 @internal
@@ -55,20 +55,3 @@ def _order_digest(_order: GPv2Order, _domain_separator: bytes32) -> bytes32:
     # word-per-field layout hashStruct expects.
     struct_hash: bytes32 = keccak256(abi_encode(GPV2_ORDER_TYPE_HASH, _order))
     return keccak256(concat(b"\x19\x01", _domain_separator, struct_hash))
-
-
-# The flag checks are split so callers can report fee/kind/partial and balance
-# mode violations separately. Both are boolean by design: revert-versus-invalid
-# policy stays with the caller.
-@internal
-@pure
-def _check_order_flags(_order: GPv2Order) -> bool:
-    """@notice Return whether an order is a zero-fee partially fillable sell order."""
-    return _order.feeAmount == 0 and _order.kind == SELL_KIND and _order.partiallyFillable
-
-
-@internal
-@pure
-def _check_balance_modes(_order: GPv2Order) -> bool:
-    """@notice Return whether both balance modes are plain ERC-20."""
-    return _order.sellTokenBalance == TOKEN_BALANCE and _order.buyTokenBalance == TOKEN_BALANCE

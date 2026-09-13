@@ -2,8 +2,7 @@
 @title IFeeCollector
 @author Curve Finance
 @license MIT
-@notice The FeeCollector ABI surface shared by burners: epoch flag, transfer
-        struct, and the views/actions burners integrate with.
+@notice The FeeCollector ABI surface.
 @dev Batch/scale constants live in contracts/utils/constants.vy: .vyi
      constants are not exposed to importers.
 """
@@ -12,10 +11,10 @@ from contracts.utils import constants as c
 
 
 flag Epoch:
-    SLEEP
-    COLLECT
-    EXCHANGE
-    FORWARD
+    SLEEP  # 1
+    COLLECT  # 2
+    EXCHANGE  # 4
+    FORWARD  # 8
 
 
 struct Transfer:

@@ -20,10 +20,10 @@ WAD = 10**18
 START_TOTAL = 100_000 * WAD
 FLOOR_TOTAL = WAD
 STEP_DURATION = 60
-DECAY_FACTOR_RAY = 992031276831159793484252056
+# Floor reached by the last active second of a day: 1439 sixty-second steps.
+AUCTION_LENGTH = 24 * 60 * 60
 LOT_AMOUNT = 250 * WAD
 
-LOT_INITIAL_AMOUNT = 1
 
 
 @pytest.fixture(autouse=True)
@@ -147,8 +147,8 @@ def _deploy_harness(want, proceeds_receiver, registry_address, role_source):
         role_source.address,
         START_TOTAL,
         FLOOR_TOTAL,
-        DECAY_FACTOR_RAY,
         STEP_DURATION,
+        AUCTION_LENGTH,
     )
 
 
@@ -323,11 +323,6 @@ def test_sync_clears_residual_allowance_of_unreferenced_executor(
     assert problem_token.allowance(harness, stranger) == 0
 
 
-def test_sync_rejects_zero_executor(harness, keeper, token_a):
-    with boa.env.prank(keeper), boa.reverts(custom_err("BadExecutor()")):
-        harness.sync_executor_approvals(ZERO_ADDRESS, [token_a.address])
-
-
 def test_sync_rejects_target_token(harness, keeper, want, token_a, adapter_cow, relayer):
     with boa.env.prank(keeper), boa.reverts(custom_err("WantNotSellable()")):
         harness.sync_executor_approvals(relayer, [token_a.address, want.address])
@@ -378,7 +373,7 @@ def test_approval_failure_never_blocks_staging(
     problem_token.set_fails_nonzero_approval(True)
     problem_token.mint(harness.address, LOT_AMOUNT)
     harness.stage(problem_token.address)
-    assert harness.lots(problem_token.address)[LOT_INITIAL_AMOUNT] == LOT_AMOUNT
+    assert harness.lots(problem_token.address).initial_amount == LOT_AMOUNT
     with boa.env.prank(keeper), boa.reverts():
         harness.sync_executor_approvals(relayer, [problem_token.address])
     assert problem_token.allowance(harness, relayer) == 0

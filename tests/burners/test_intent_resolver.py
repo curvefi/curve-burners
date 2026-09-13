@@ -14,8 +14,8 @@ WEEK = 7 * 24 * 60 * 60
 START_TOTAL = 100_000 * WAD
 FLOOR_TOTAL = WAD
 STEP_DURATION = 60
-# Reviewed decay bound reused from the dutch auction test suite.
-DECAY_FACTOR_RAY = 992031276831159793484252056
+# Floor reached by the last active second of a day: 1439 sixty-second steps.
+AUCTION_LENGTH = 24 * 60 * 60
 
 STAGED_AMOUNT = 100 * WAD
 INTENT_ABI_TYPES = ["uint256", "address", "address", "uint64", "uint256", "uint48"]
@@ -81,8 +81,8 @@ def auction(want, proceeds_receiver):
         role_source.address,
         START_TOTAL,
         FLOOR_TOTAL,
-        DECAY_FACTOR_RAY,
         STEP_DURATION,
+        AUCTION_LENGTH,
     )
 
 
@@ -110,13 +110,18 @@ def stage(auction):
     return _stage
 
 
+def _lot_window(auction, token) -> tuple[int, int]:
+    """(start, end) of the token's current lot."""
+    return tuple(auction.window(token))
+
+
 @pytest.fixture(scope="module")
 def make_payload(auction, sell_token):
     def _make_payload(
         chain_id: int = None,
         auction_address: str = None,
         sell_token_address: str = None,
-        auction_epoch: int = None,
+        lot_start: int = None,
         max_sell_amount: int = 2**256 - 1,
         deadline: int = None,
     ) -> bytes:
@@ -126,13 +131,13 @@ def make_payload(auction, sell_token):
             auction_address = auction.address
         if sell_token_address is None:
             sell_token_address = sell_token.address
-        if auction_epoch is None:
-            auction_epoch = auction.current_epoch()
+        if lot_start is None:
+            lot_start = _lot_window(auction, sell_token)[0]
         if deadline is None:
             deadline = _timestamp() + 3600
         return encode(
             INTENT_ABI_TYPES,
-            [chain_id, auction_address, sell_token_address, auction_epoch,
+            [chain_id, auction_address, sell_token_address, lot_start,
              max_sell_amount, deadline],
         )
 
@@ -162,7 +167,6 @@ def test_resolve_matches_take_quote_in_same_block(auction, resolver, stage, make
     assert resolved.resolver_version == RESOLVER_VERSION
     assert resolved.chain_id == _chain_id()
     assert resolved.auction == auction.address
-    assert resolved.auction_epoch == auction.current_epoch()
     assert resolved.quoted_at == _timestamp()
 
     assert resolved.sell_payout.token == sell_token.address
@@ -186,8 +190,7 @@ def test_resolve_respects_max_sell_amount(auction, resolver, stage, make_payload
 
 def test_resolve_timing_bounds(auction, resolver, stage, make_payload, sell_token):
     stage(sell_token)
-    lot = auction.lots(sell_token)
-    lot_start, lot_end = auction.epoch_bounds(lot.epoch)
+    lot_start, lot_end = _lot_window(auction, sell_token)
 
     # A far deadline is clamped to the last active second of the lot.
     resolved = resolver.resolve(make_payload(deadline=lot_end + WEEK))
@@ -302,8 +305,7 @@ def test_fill_at_published_deadline_boundary_succeeds(
     # The published fill_deadline (lot.end - 1 for a far intent deadline) must
     # itself be fillable: resolve and execute at that exact second.
     stage(sell_token)
-    lot = auction.lots(sell_token)
-    lot_end = auction.epoch_bounds(lot.epoch)[1]
+    lot_end = _lot_window(auction, sell_token)[1]
     payload = make_payload(deadline=lot_end + WEEK)
     boa.env.time_travel(seconds=lot_end - 1 - _timestamp())
 
@@ -345,24 +347,29 @@ def test_zero_auction_intent_reverts(resolver, make_payload):
         resolver.resolve(make_payload(auction_address=ZERO_ADDRESS))
 
 
-def test_wrong_epoch_intent_reverts(auction, resolver, stage, make_payload, sell_token):
+def test_wrong_lot_intent_reverts(auction, resolver, stage, make_payload, sell_token):
     stage(sell_token)
-    with boa.reverts(custom_err("WrongEpoch()")):
-        resolver.resolve(make_payload(auction_epoch=auction.current_epoch() - 1))
+    with boa.reverts(custom_err("WrongLot()")):
+        resolver.resolve(make_payload(lot_start=_lot_window(auction, sell_token)[0] - 1))
 
 
-def test_stale_epoch_reverts_after_week_rolls_over(auction, resolver, stage, make_payload,
-                                                   sell_token):
+def test_stale_lot_reverts_after_week_rolls_over(auction, resolver, stage, make_payload,
+                                                 sell_token):
     stage(sell_token)
-    signed_epoch = auction.current_epoch()
-    payload = make_payload(auction_epoch=signed_epoch, deadline=_timestamp() + 2 * WEEK)
+    signed_start = _lot_window(auction, sell_token)[0]
+    payload = make_payload(lot_start=signed_start, deadline=_timestamp() + 2 * WEEK)
 
-    frame_start, frame_end = auction.frame_start(), auction.frame_end()
-    auction.set_frame(frame_start + WEEK, frame_end + WEEK)
+    auction.set_frame(auction.frame_start() + WEEK)
     boa.env.time_travel(seconds=WEEK)
 
-    assert auction.current_epoch() == signed_epoch + 1
-    with boa.reverts(custom_err("WrongEpoch()")):
+    # The old lot is simply gone: nothing is available until a restage.
+    with boa.reverts(custom_err("NothingAvailable()")):
+        resolver.resolve(payload)
+    # A restage opens a live lot with a fresh curve in the new window; the
+    # intent pinned to the old window must not resolve against it.
+    stage(sell_token)
+    assert _lot_window(auction, sell_token)[0] == signed_start + WEEK
+    with boa.reverts(custom_err("WrongLot()")):
         resolver.resolve(payload)
 
 
@@ -392,7 +399,7 @@ def _unsellable_token(env: dict) -> dict:
 
 def _lot_past_its_end(env: dict) -> dict:
     env["stage"](env["sell_token"])
-    lot_end = env["auction"].epoch_bounds(env["auction"].lots(env["sell_token"]).epoch)[1]
+    lot_end = _lot_window(env["auction"], env["sell_token"])[1]
     boa.env.time_travel(seconds=lot_end - _timestamp())
     return {"deadline": _timestamp() + 3600}
 
@@ -417,9 +424,23 @@ def _zero_max_sell_amount(env: dict) -> dict:
 
 @pytest.mark.parametrize(
     "setup",
+    [_unstaged_token, _want_as_sell_token],
+    ids=lambda setup: setup.__name__.lstrip("_"),
+)
+def test_never_staged_token_has_nothing_available(
+    auction, resolver, stage, make_payload, sell_token, want, solver, setup
+):
+    # A token without a lot record has nothing available; the lot identity
+    # check only runs for a live lot.
+    env = {"auction": auction, "stage": stage, "sell_token": sell_token, "want": want}
+    overrides = setup(env)
+    with boa.reverts(custom_err("NothingAvailable()")):
+        resolver.resolve(make_payload(**overrides))
+
+
+@pytest.mark.parametrize(
+    "setup",
     [
-        _unstaged_token,
-        _want_as_sell_token,
         _drained_lot,
         _unsellable_token,
         _lot_past_its_end,
@@ -470,7 +491,7 @@ def test_newly_staged_token_is_resolvable_without_allowlist(auction, resolver, s
     # Intent discovery needs no DAO allowlist and no resolver registration:
     # a token staged a moment ago resolves immediately.
     fresh_token = boa.load("contracts/testing/ERC20Mock.vy", "Fresh Fee Token", "FRESH", 18)
-    payload = make_payload(sell_token_address=fresh_token.address)
+    payload = make_payload(sell_token_address=fresh_token.address, lot_start=auction.frame_start())
     with boa.reverts(custom_err("NothingAvailable()")):
         resolver.resolve(payload)
 

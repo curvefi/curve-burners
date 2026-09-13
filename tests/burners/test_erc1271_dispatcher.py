@@ -24,7 +24,8 @@ WEEK = 7 * 24 * 60 * 60
 START_TOTAL = 100_000 * WAD
 FLOOR_TOTAL = WAD
 STEP_DURATION = 60
-DECAY_FACTOR_RAY = 992031276831159793484252056
+# Floor reached by the last active second of a day: 1439 sixty-second steps.
+AUCTION_LENGTH = 24 * 60 * 60
 LOT_AMOUNT = 250 * WAD
 
 ERC1271_MAGIC_VALUE = bytes.fromhex("1626ba7e")
@@ -107,8 +108,8 @@ def _deploy_harness(want, proceeds_receiver, registry_address, role_source):
         role_source.address,
         START_TOTAL,
         FLOOR_TOTAL,
-        DECAY_FACTOR_RAY,
         STEP_DURATION,
+        AUCTION_LENGTH,
     )
 
 
@@ -341,7 +342,7 @@ def test_check_order_expired_window_inactive(harness, sell_token, lot):
 
 
 def test_check_order_epoch_rollover_inactive(harness, sell_token, lot):
-    harness.set_frame(harness.frame_start() + WEEK, harness.frame_end() + WEEK)
+    harness.set_frame(harness.frame_start() + WEEK)
     boa.env.time_travel(seconds=WEEK)
     with boa.reverts(custom_err("LotInactive()")):
         _check(harness, sell_token, valid_to=harness.frame_end())

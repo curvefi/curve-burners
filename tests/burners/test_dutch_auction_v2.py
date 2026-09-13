@@ -12,13 +12,14 @@ from eth_utils import keccak
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
+from scripts import dutch_auction_curve as curve
+
 from ..conftest import ETH_ADDRESS, ZERO_ADDRESS, Epoch, WEEK
 
 from .conftest import custom_err
 
 
 WAD = 10**18
-RAY = 10**27
 START_TOTAL = 100_000 * WAD
 FLOOR_TOTAL = WAD
 STEP_DURATION = 60
@@ -38,12 +39,10 @@ BURNER_INTERFACE = bytes.fromhex("a3b5e311")
 CONFIG_EXECUTOR = 0
 CONFIG_ACTIVE = 1
 
-# IDutchAuction.Lot is (epoch, initial_amount); LOT_START/LOT_END index the
-# epoch window that _lot_with_bounds appends to the record.
-LOT_EPOCH = 0
-LOT_INITIAL_AMOUNT = 1
-LOT_START = 2
-LOT_END = 3
+# _lot_with_bounds tuple: window(lots(token).staged_at) plus the snapshot.
+LOT_START = 0
+LOT_END = 1
+LOT_INITIAL_AMOUNT = 2
 
 # GPv2Order.Data tuple fields.
 ORDER_SELL_TOKEN = 0
@@ -60,8 +59,9 @@ ORDER_SELL_BALANCE = 10
 ORDER_BUY_BALANCE = 11
 
 EXCHANGE_DURATION = 24 * 60 * 60
-# Reviewed upper bound for rounded-up RAY pow: active step 1439 reaches the floor.
-DECAY_FACTOR_RAY = 992031276831159793484252056
+# The curve decays over the EXCHANGE frame's last active second in whole
+# steps: 1439 sixty-second steps for a one-day frame.
+DECAY_STEPS = curve.decay_steps(EXCHANGE_DURATION, STEP_DURATION)
 
 
 @dataclass(frozen=True)
@@ -106,11 +106,19 @@ def _move_to_timestamp(timestamp: int) -> None:
 
 
 def _lot_with_bounds(deployment: Any, token: Any) -> tuple:
-    """Lot record extended with its epoch window: the contract stores no time
-    bounds, so LOT_START/LOT_END index into epoch_bounds(lot.epoch) here."""
-    lot = deployment.burner.lots(token)
-    start, end = deployment.burner.epoch_bounds(lot[LOT_EPOCH])
-    return (*lot, start, end)
+    """(start, end, initial_amount): the lot's window plus its snapshot;
+    all zeros for a never-staged token."""
+    start, end = deployment.burner.window(token)
+    return (start, end, deployment.burner.lots(token).initial_amount)
+
+
+def _exchange_start(deployment: Any, timestamp: int | None = None) -> int:
+    """Start of the EXCHANGE frame of the week containing `timestamp` (now by
+    default): the window a lot staged at that time trades in."""
+    start, _ = deployment.fee_collector.epoch_time_frame(
+        Epoch.EXCHANGE, _timestamp() if timestamp is None else timestamp
+    )
+    return start
 
 
 def _address_bytes(address: Any) -> bytes:
@@ -192,28 +200,20 @@ def _gpv2_order_digest(order: Any, domain_separator: bytes) -> bytes:
     return keccak(b"\x19\x01" + bytes(domain_separator) + struct_hash)
 
 
-def _ray_mul(a: int, b: int) -> int:
-    return (a * b + RAY // 2) // RAY
-
-
-def _ray_pow(base_ray: int, exponent: int) -> int:
-    result = RAY
-    factor = base_ray
-    while exponent:
-        if exponent & 1:
-            result = _ray_mul(result, factor)
-        exponent >>= 1
-        if exponent:
-            factor = _ray_mul(factor, factor)
-    return result
-
-
-# Bit-for-bit mirror of auction_math.total_price.
+# Bit-for-bit mirror of auction_math.total_price (scripts/dutch_auction_curve).
 def _reference_total(
     lot: Any, timestamp: int, start_total: int = START_TOTAL, floor_total: int = FLOOR_TOTAL
 ) -> int:
-    steps = (timestamp - lot[LOT_START]) // STEP_DURATION
-    return max(floor_total, start_total * _ray_pow(DECAY_FACTOR_RAY, steps) // RAY)
+    log_start, log_drop = curve.curve_logs(start_total, floor_total)
+    return curve.total_price(
+        start_total,
+        floor_total,
+        log_start,
+        log_drop,
+        DECAY_STEPS,
+        timestamp - lot[LOT_START],
+        STEP_DURATION,
+    )
 
 
 def _quote_from_total(total: int, amount: int, initial_amount: int) -> int:
@@ -320,7 +320,6 @@ def deployment(burner_deployer: Any) -> AuctionDeployment:
         fee_collector,
         START_TOTAL,
         FLOOR_TOTAL,
-        DECAY_FACTOR_RAY,
         STEP_DURATION,
         registry,
     )
@@ -385,15 +384,18 @@ def test_constructor_and_fixed_interfaces(deployment: AuctionDeployment):
         "check_order(address,address,address,uint256,uint256,uint256)",
         "sync_executor_approvals(address,address[])",
         "registry()",
-        "current_epoch()",
-        "epoch_bounds(uint256)",
+        "lots(address)",
+        "window(address)",
+        "window(address,uint256)",
+        "auction_length()",
+        "receiver()",
         "recover(address[])",
         "push_target()",
     } <= signatures
 
 
 def test_yearn_auction_abi_is_exact(deployment: AuctionDeployment):
-    """ABI-conformance for the Yearn-compatible surface (IDutchAuction.vyi).
+    """ABI-conformance for the Yearn-compatible surface (IYearnAuction.vyi).
 
     Vyper default arguments export every Yearn overload: the timestamped
     quote views, the single-argument getAmountNeeded, and the shortened take
@@ -461,16 +463,15 @@ def test_yearn_auction_abi_is_exact(deployment: AuctionDeployment):
 
 
 @pytest.mark.parametrize(
-    "start_total,floor_total,decay_factor,step_duration,error",
+    "start_total,floor_total,step_duration,error",
     [
-        (0, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION, "ZeroStartTotal()"),
-        (START_TOTAL, 0, DECAY_FACTOR_RAY, STEP_DURATION, "BadFloor()"),
-        (START_TOTAL, START_TOTAL + 1, DECAY_FACTOR_RAY, STEP_DURATION, "BadFloor()"),
-        (START_TOTAL, FLOOR_TOTAL, 0, STEP_DURATION, "BadDecay()"),
-        # Barely-decaying curve misses the floor within the frame.
-        (START_TOTAL, FLOOR_TOTAL, RAY - 1, STEP_DURATION, "DecayMissesFloor()"),
-        (START_TOTAL, FLOOR_TOTAL, RAY + 1, STEP_DURATION, "BadDecay()"),
-        (START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, 0, "ZeroStep()"),
+        (0, FLOOR_TOTAL, STEP_DURATION, "BadStartTotal()"),
+        (2**255, FLOOR_TOTAL, STEP_DURATION, "BadStartTotal()"),
+        (START_TOTAL, 0, STEP_DURATION, "BadFloor()"),
+        (START_TOTAL, START_TOTAL + 1, STEP_DURATION, "BadFloor()"),
+        (START_TOTAL, FLOOR_TOTAL, 0, "ZeroStep()"),
+        # A step longer than the EXCHANGE frame leaves no step to decay on.
+        (START_TOTAL, FLOOR_TOTAL, EXCHANGE_DURATION, "StepExceedsAuction()"),
     ],
 )
 def test_constructor_rejects_invalid_curve_parameters(
@@ -478,7 +479,6 @@ def test_constructor_rejects_invalid_curve_parameters(
     deployment: AuctionDeployment,
     start_total: int,
     floor_total: int,
-    decay_factor: int,
     step_duration: int,
     error: str,
 ):
@@ -487,10 +487,39 @@ def test_constructor_rejects_invalid_curve_parameters(
             deployment.fee_collector,
             start_total,
             floor_total,
-            decay_factor,
             step_duration,
             deployment.registry,
         )
+
+
+def test_window_defaults_to_the_current_lot(deployment: AuctionDeployment):
+    burner = deployment.burner
+    assert tuple(burner.window(deployment.sell_token)) == (0, 0)
+    lot, _ = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
+    staged_at = burner.lots(deployment.sell_token).staged_at
+    assert tuple(burner.window(deployment.sell_token)) == (lot[LOT_START], lot[LOT_END])
+    assert tuple(burner.window(deployment.sell_token, staged_at)) == (lot[LOT_START], lot[LOT_END])
+    # A hypothetical staging a week later lands in the next window.
+    assert tuple(burner.window(deployment.sell_token, staged_at + WEEK)) == (
+        lot[LOT_START] + WEEK,
+        lot[LOT_END] + WEEK,
+    )
+
+
+def test_constructor_prepares_curve_for_exchange_frame(deployment: AuctionDeployment):
+    """The curve is fully determined by start, floor, step, and the EXCHANGE
+    frame (the public parameters reproduce every quote off-chain), and the
+    lot sits exactly at the floor from the frame's last active step."""
+    burner = deployment.burner
+    assert burner.auction_length() == EXCHANGE_DURATION
+
+    lot, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
+    assert burner.getAmountNeeded(deployment.sell_token, staged, lot[LOT_START]) == START_TOTAL
+    floor_from = lot[LOT_START] + DECAY_STEPS * STEP_DURATION
+    assert burner.getAmountNeeded(deployment.sell_token, staged, floor_from - STEP_DURATION) > FLOOR_TOTAL
+    assert burner.getAmountNeeded(deployment.sell_token, staged, floor_from) == FLOOR_TOTAL
+    assert burner.getAmountNeeded(deployment.sell_token, staged, lot[LOT_END] - 1) == FLOOR_TOTAL
+    assert burner.getAmountNeeded(deployment.sell_token, staged, lot[LOT_END]) == 0
 
 
 def test_only_fee_collector_can_burn_and_target_is_rejected(deployment: AuctionDeployment):
@@ -526,12 +555,13 @@ def test_collect_pays_fee_moves_custody_and_snapshots_lot(deployment: AuctionDep
     # COLLECT tags the lot with the SAME week's upcoming window — the frame
     # lookup anchors to the week containing the timestamp, so at staging time
     # the epoch is a strictly future timestamp.
-    assert lot[LOT_EPOCH] == lot[LOT_START]
+    assert lot[LOT_START] == _exchange_start(deployment)
     assert _timestamp() < lot[LOT_START]
 
     assert lot_synced.address == deployment.burner.address
     assert lot_synced.token == deployment.sell_token.address
-    assert lot_synced.epoch == lot[LOT_EPOCH]
+    assert lot_synced.start == lot[LOT_START]
+    assert lot_synced.end == lot[LOT_END]
     assert lot_synced.initial_amount == lot[LOT_INITIAL_AMOUNT]
     assert lot_synced.start_total == START_TOTAL
     assert lot_synced.floor_total == FLOOR_TOTAL
@@ -555,7 +585,6 @@ def test_repeated_collect_updates_snapshot_without_charging_old_inventory(
     second_lot = _lot_with_bounds(deployment, deployment.sell_token)
     assert deployment.sell_token.balanceOf(deployment.keeper) == first_fee + second_fee
     assert second_lot[LOT_INITIAL_AMOUNT] == first_staged + second_amount - second_fee
-    assert second_lot[LOT_EPOCH] == first_lot[LOT_EPOCH]
     assert second_lot[LOT_START] == first_lot[LOT_START]
 
 
@@ -591,7 +620,7 @@ def test_weekly_rollover_resnapshots_unsold_inventory_and_new_receipts(
     new_staged, _ = _stage(deployment, deployment.sell_token, 200 * WAD)
     second_lot = _lot_with_bounds(deployment, deployment.sell_token)
 
-    assert second_lot[LOT_EPOCH] == first_lot[LOT_EPOCH] + WEEK
+    assert second_lot[LOT_START] == first_lot[LOT_START] + WEEK
     assert second_lot[LOT_INITIAL_AMOUNT] == unsold + new_staged
 
 
@@ -756,11 +785,9 @@ def test_yearn_views_mirror_the_lot(deployment: AuctionDeployment):
     assert tuple(burner.auctions(token)) == (lot[LOT_START], scaler, staged)
 
     _move_to_timestamp(lot[LOT_START])
-    start, end = burner.epoch_bounds(burner.current_epoch())
-    assert start == lot[LOT_START]
-    assert burner.auctionLength() == end - start
+    assert burner.auctionLength() == lot[LOT_END] - lot[LOT_START]
     assert burner.isActive(token)
-    assert tuple(burner.auctions(token)) == (start, scaler, staged)
+    assert tuple(burner.auctions(token)) == (lot[LOT_START], scaler, staged)
 
     payment = burner.getAmountNeeded(token)
     deployment.target._mint_for_testing(deployment.buyer, payment)
@@ -769,12 +796,12 @@ def test_yearn_views_mirror_the_lot(deployment: AuctionDeployment):
         burner.take(token)
     # Drained: inactive like Yearn, while the record keeps the snapshot.
     assert not burner.isActive(token)
-    assert tuple(burner.auctions(token)) == (start, scaler, staged)
+    assert tuple(burner.auctions(token)) == (lot[LOT_START], scaler, staged)
 
     # Yearn's auctions() tuple decodes as three static words.
     selector = keccak(text="auctions(address)")[:4]
     raw = boa.env.raw_call(burner.address, data=selector + encode(["address"], [token.address]))
-    assert raw.output == encode(["uint64", "uint64", "uint128"], [start, scaler, staged])
+    assert raw.output == encode(["uint64", "uint64", "uint128"], [lot[LOT_START], scaler, staged])
 
 
 def test_timestamped_quote_overloads_match_time_travel(deployment: AuctionDeployment):
@@ -1039,7 +1066,7 @@ def test_active_exact_quote_rejects_amount_above_available_and_take_zero(
         )
 
     current_lot = _lot_with_bounds(deployment, deployment.sell_token)
-    assert current_lot[LOT_EPOCH] == lot[LOT_EPOCH]
+    assert current_lot[LOT_START] == lot[LOT_START]
     assert deployment.burner.available(deployment.sell_token) == staged
     assert deployment.sell_token.balanceOf(deployment.taker_receiver) == 0
     assert deployment.target.balanceOf(deployment.buyer) == buyer_target_before
@@ -1063,7 +1090,7 @@ def test_partial_fill_keeps_unit_price_while_quote_is_bounded_by_availability(
 
     remaining = staged - amount
     assert deployment.burner.available(deployment.sell_token) == remaining
-    assert deployment.burner.lots(deployment.sell_token)[LOT_INITIAL_AMOUNT] == staged
+    assert deployment.burner.lots(deployment.sell_token).initial_amount == staged
     assert deployment.burner.price(deployment.sell_token) == unit_price
     assert deployment.burner.getAmountNeeded(deployment.sell_token, remaining) == (
         _quote_from_total(deployment.burner.start_total(), remaining, staged)
@@ -1126,10 +1153,10 @@ def test_take_with_limits_enforces_deadline_amount_and_payment(
 def test_deadline_capped_at_lot_end_rejects_execution_after_rollover(
     deployment: AuctionDeployment,
 ):
-    """A deadline before the next epoch's window replaces the removed
-    expected-epoch limit: exactly one epoch is active per timestamp, so the
-    signed epoch's end caps inclusion and a restaged lot's fresh curve can
-    never fill an old transaction."""
+    """A deadline within the lot window replaces any lot identifier: exactly
+    one window is active per timestamp, so the signed lot's end caps
+    inclusion and a restaged lot's fresh curve can never fill an old
+    transaction."""
     first_lot, _ = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
     deadline = first_lot[LOT_END] - 1
 
@@ -1167,7 +1194,6 @@ def test_taken_event_captures_accounting_result(deployment: AuctionDeployment):
     taken = next(log for log in deployment.burner.get_logs() if _event_name(log) == "Taken")
     assert taken.address == deployment.burner.address
     assert taken.token == deployment.sell_token.address
-    assert taken.epoch == lot[LOT_EPOCH]
     assert taken.caller == deployment.buyer
     assert taken.receiver == deployment.taker_receiver
     assert taken.amount_out == amount
@@ -1236,10 +1262,6 @@ def test_permissionless_sync_executor_approvals_follows_derived_state(
     relayer = deployment.relayer
     assert deployment.sell_token.allowance(deployment.burner, relayer) == MAX_UINT256
 
-    with boa.env.prank(deployment.keeper), boa.reverts(custom_err("BadExecutor()")):
-        deployment.burner.sync_executor_approvals(
-            ZERO_ADDRESS, [deployment.sell_token.address]
-        )
     with boa.env.prank(deployment.keeper), boa.reverts(custom_err("WantNotSellable()")):
         deployment.burner.sync_executor_approvals(relayer, [deployment.target.address])
 
@@ -1574,7 +1596,7 @@ def test_erc1271_valid_payload_magic_and_invalid_payloads(
     # an unknown prefix both answer the invalid magic.
     assert deployment.burner.isValidSignature(order_hash, signature[20:]) == ERC1271_INVALID
     assert deployment.burner.isValidSignature(order_hash, bytes(20) + signature[20:]) == ERC1271_INVALID
-    assert lot[LOT_EPOCH] != 0
+    assert lot[LOT_START] != 0
 
 
 def test_no_return_token_can_be_staged_and_taken(deployment: AuctionDeployment):
@@ -1687,7 +1709,7 @@ def test_recover_empties_lot_and_set_killed_fences_donation_revival(
 
     # No cancellation state: the drained balance alone kills the lot.
     emptied_lot = _lot_with_bounds(deployment, deployment.sell_token)
-    assert emptied_lot[LOT_EPOCH] == lot[LOT_EPOCH]
+    assert emptied_lot[LOT_START] == lot[LOT_START]
     assert emptied_lot[LOT_INITIAL_AMOUNT] == staged
     assert deployment.sell_token.balanceOf(deployment.burner) == 0
     assert deployment.sell_token.balanceOf(deployment.fee_collector) == staged
@@ -1740,7 +1762,7 @@ def test_recover_empties_lot_and_set_killed_fences_donation_revival(
 
     refreshed_lot = _lot_with_bounds(deployment, deployment.sell_token)
     expected_snapshot = donation + collector_balance - collect_fee
-    assert refreshed_lot[LOT_EPOCH] == lot[LOT_EPOCH] + WEEK
+    assert refreshed_lot[LOT_START] == lot[LOT_START] + WEEK
     assert refreshed_lot[LOT_INITIAL_AMOUNT] == expected_snapshot
     assert (
         deployment.sell_token.allowance(deployment.burner, deployment.relayer)
@@ -1766,8 +1788,8 @@ def test_recover_during_collect_frame_recollect_restages_unless_killed(
     )
 
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
-    recovery_epoch = deployment.burner.current_epoch()
-    assert recovery_epoch == first_lot[LOT_EPOCH] + WEEK
+    recovery_window = _exchange_start(deployment)
+    assert recovery_window == first_lot[LOT_START] + WEEK
     # An emergency evacuation batches recover with a COLLECT kill: recover
     # alone leaves the permissionless re-collect open in the same frame.
     with boa.env.prank(deployment.owner):
@@ -1809,7 +1831,7 @@ def test_recover_during_collect_frame_recollect_restages_unless_killed(
 
     refreshed_lot = _lot_with_bounds(deployment, deployment.sell_token)
     expected_snapshot = collector_before - fee
-    assert refreshed_lot[LOT_EPOCH] == recovery_epoch
+    assert refreshed_lot[LOT_START] == recovery_window
     assert refreshed_lot[LOT_INITIAL_AMOUNT] == expected_snapshot
     assert deployment.sell_token.balanceOf(deployment.fee_collector) == 0
     assert deployment.sell_token.balanceOf(deployment.burner) == expected_snapshot
@@ -1830,7 +1852,7 @@ def test_recover_before_first_staging_leaves_no_state_and_collect_restages(
 ):
     _configure_and_enable_cow(deployment)
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
-    recovery_epoch = deployment.burner.current_epoch()
+    recovery_window = _exchange_start(deployment)
     recovered_amount = 10 * WAD
     deployment.sell_token._mint_for_testing(
         deployment.burner, recovered_amount
@@ -1839,7 +1861,7 @@ def test_recover_before_first_staging_leaves_no_state_and_collect_restages(
     with boa.env.prank(deployment.owner):
         deployment.burner.recover([deployment.sell_token.address])
 
-    assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_EPOCH] == 0
+    assert _lot_with_bounds(deployment, deployment.sell_token) == (0, 0, 0)
     assert deployment.sell_token.balanceOf(deployment.burner) == 0
     assert (
         deployment.sell_token.balanceOf(deployment.fee_collector)
@@ -1865,7 +1887,7 @@ def test_recover_before_first_staging_leaves_no_state_and_collect_restages(
 
     refreshed_lot = _lot_with_bounds(deployment, deployment.sell_token)
     expected_snapshot = recovered_amount - fee
-    assert refreshed_lot[LOT_EPOCH] == recovery_epoch
+    assert refreshed_lot[LOT_START] == recovery_window
     assert refreshed_lot[LOT_INITIAL_AMOUNT] == expected_snapshot
     assert deployment.sell_token.balanceOf(deployment.keeper) == keeper_before + fee
     assert (
@@ -1968,7 +1990,7 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
 ):
     """Target migration: divergence freezes every rail, resync re-pins the
     denomination from the FeeCollector during the next SLEEP phase — before
-    that week's staging — so the fence stops at the previous epoch and a
+    that week's staging — so the fence only stales the previous week and a
     restage in the same week's COLLECT trades the same week (no week is
     lost), including the old target as regular sellable inventory."""
     _, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
@@ -1999,19 +2021,19 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
         custom_err("NotSleepEpoch()")
     ):
         deployment.burner.resync_target(
-            new_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
         )
     _move_to_epoch(deployment.fee_collector, Epoch.SLEEP)
 
     with boa.env.prank(deployment.keeper), boa.reverts(custom_err("OnlyOwner()")):
         deployment.burner.resync_target(
-            new_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
         )
     with boa.env.prank(deployment.owner), boa.reverts(
-        custom_err("DecayMissesFloor()")
+        custom_err("StepExceedsAuction()")
     ):
         deployment.burner.resync_target(
-            new_target, START_TOTAL, FLOOR_TOTAL, RAY - 1, STEP_DURATION
+            new_target, START_TOTAL, FLOOR_TOTAL, EXCHANGE_DURATION
         )
     # Delayed-execution guard: params tuned for the old denomination must not
     # bind to the new one.
@@ -2019,12 +2041,12 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
         custom_err("TargetChanged()")
     ):
         deployment.burner.resync_target(
-            old_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            old_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
         )
 
     with boa.env.prank(deployment.owner):
         deployment.burner.resync_target(
-            new_target, 2 * START_TOTAL, 2 * FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            new_target, 2 * START_TOTAL, 2 * FLOOR_TOTAL, STEP_DURATION
         )
     resynced = next(
         log
@@ -2036,12 +2058,9 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
     assert deployment.burner.want() == new_target.address
     assert deployment.burner.start_total() == 2 * START_TOTAL
 
-    # The resync landed in SLEEP, before this epoch's staging and window: the
-    # fence stops at the previous epoch, so only the stale lot stays dead.
-    fence = deployment.burner.reconfigured_epoch()
-    assert fence == deployment.burner.current_epoch() - 1
-    assert resynced.reconfigured_epoch == fence
-    assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_EPOCH] <= fence
+    # The resync landed in SLEEP, before this week's staging and window: the
+    # fence stops at the previous week, so only the stale lot stays dead.
+    assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_START] < _exchange_start(deployment)
     assert deployment.burner.available(deployment.sell_token) == 0
     with boa.env.prank(deployment.buyer), boa.reverts():
         deployment.burner.take(
@@ -2060,9 +2079,9 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
         deployment.fee_collector.collect([old_target.address], deployment.keeper)
 
     lot = _lot_with_bounds(deployment, deployment.sell_token)
-    assert lot[LOT_EPOCH] > fence
+    assert lot[LOT_START] == _exchange_start(deployment)
     assert deployment.burner.start_total() == 2 * START_TOTAL
-    assert _lot_with_bounds(deployment, old_target)[LOT_EPOCH] == lot[LOT_EPOCH]
+    assert _lot_with_bounds(deployment, old_target)[LOT_START] == lot[LOT_START]
     _move_to_timestamp(lot[LOT_START])
 
     assert deployment.burner.available(deployment.sell_token) == staged
@@ -2082,7 +2101,7 @@ def test_resync_only_in_sleep_fences_previous_lots(
 ):
     """Resyncs are confined to SLEEP — before the week's staging — so a want
     change can never land under a staged lot: EXCHANGE and FORWARD attempts
-    revert, and the SLEEP resync fences every previous epoch, killing the old
+    revert, and the SLEEP resync stales every earlier staging, killing the old
     week's lot and its published CoW order."""
     _configure_and_enable_cow(deployment)
     lot, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
@@ -2100,7 +2119,7 @@ def test_resync_only_in_sleep_fences_previous_lots(
         # The window is open: any resync must wait for the next SLEEP.
         with boa.reverts(custom_err("NotSleepEpoch()")):
             deployment.burner.resync_target(
-                new_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+                new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
             )
 
     # FORWARD — the window closed, but still not SLEEP.
@@ -2109,18 +2128,18 @@ def test_resync_only_in_sleep_fences_previous_lots(
         custom_err("NotSleepEpoch()")
     ):
         deployment.burner.resync_target(
-            new_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
         )
 
     _move_to_epoch(deployment.fee_collector, Epoch.SLEEP)
     with boa.env.prank(deployment.owner):
         deployment.burner.resync_target(
-            new_target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
         )
 
-    fence = deployment.burner.reconfigured_epoch()
-    assert fence == deployment.burner.current_epoch() - 1
-    assert lot[LOT_EPOCH] <= fence
+    # The fence stops at the previous week: the lot staged then is dead while
+    # the week now in SLEEP stays stageable.
+    assert lot[LOT_START] < _exchange_start(deployment)
     assert deployment.burner.available(deployment.sell_token) == 0
     with boa.env.prank(deployment.buyer), boa.reverts(custom_err("NothingAvailable()")):
         deployment.burner.take(
@@ -2142,21 +2161,20 @@ def test_resync_only_in_sleep_fences_previous_lots(
 def test_resync_same_target_retune_in_sleep_repins_curve(
     deployment: AuctionDeployment,
 ):
-    """A same-target retune executed during SLEEP re-pins the curve without a
-    fence; the week staged right after trades the retuned curve from the
-    window open. Outside SLEEP every resync reverts, so the price a taker
-    sees can only decay — plain take() needs no payment bound."""
+    """A same-target retune executed during SLEEP re-pins the curve behind the
+    same fence as a target change (only earlier stagings, so no week is lost);
+    the week staged right after trades the retuned curve from the window
+    open. Outside SLEEP every resync reverts, so the price a taker sees can
+    only decay — plain take() needs no payment bound."""
     _move_to_epoch(deployment.fee_collector, Epoch.SLEEP)
     with boa.env.prank(deployment.owner):
         deployment.burner.resync_target(
             deployment.target,
             2 * START_TOTAL,
             2 * FLOOR_TOTAL,
-            DECAY_FACTOR_RAY,
             STEP_DURATION,
         )
 
-    assert deployment.burner.reconfigured_epoch() == 0
     assert deployment.burner.want() == deployment.target.address
     assert deployment.burner.start_total() == 2 * START_TOTAL
 
@@ -2166,7 +2184,7 @@ def test_resync_same_target_retune_in_sleep_repins_curve(
         custom_err("NotSleepEpoch()")
     ):
         deployment.burner.resync_target(
-            deployment.target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            deployment.target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
         )
 
     lot = _lot_with_bounds(deployment, deployment.sell_token)
@@ -2182,7 +2200,7 @@ def test_resync_same_target_retune_in_sleep_repins_curve(
         custom_err("NotSleepEpoch()")
     ):
         deployment.burner.resync_target(
-            deployment.target, START_TOTAL, FLOOR_TOTAL, DECAY_FACTOR_RAY, STEP_DURATION
+            deployment.target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
         )
 
     # A fill mid-window pays along the retuned curve.

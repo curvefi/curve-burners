@@ -15,12 +15,13 @@
 
 from ethereum.ercs import IERC20
 
-from contracts.burners.auction import dutch_auction
+from contracts.burners.auction import dutch_auction, yearn_auction
 from contracts.burners.auction.adapters import adapters
 from contracts.utils import roles
 
 initializes: roles
 initializes: dutch_auction
+initializes: yearn_auction[dutch_auction := dutch_auction]
 initializes: adapters
 # The harness exports role_source/emergency_owner for tests; the burner
 # exports only owner.
@@ -30,24 +31,25 @@ exports: (
     roles.emergency_owner,
 )
 exports: (
-    dutch_auction.current_epoch,
+    dutch_auction.auction_length,
     dutch_auction.want,
+    dutch_auction.receiver,
+    dutch_auction.start_total,
+    dutch_auction.floor_total,
+    dutch_auction.step_duration,
+    dutch_auction.lots,
+    dutch_auction.window,
     dutch_auction.available,
     dutch_auction.price,
     dutch_auction.getAmountNeeded,
-    dutch_auction.check_order,
     dutch_auction.take,
     dutch_auction.take_with_limits,
-    dutch_auction.start_total,
-    dutch_auction.floor_total,
-    dutch_auction.decay_factor_ray,
-    dutch_auction.step_duration,
-    dutch_auction.receiver,
-    dutch_auction.lots,
-    dutch_auction.isActive,
-    dutch_auction.auctionLength,
-    dutch_auction.auctions,
-    dutch_auction.reconfigured_epoch,
+    dutch_auction.check_order,
+)
+exports: (
+    yearn_auction.isActive,
+    yearn_auction.auctionLength,
+    yearn_auction.auctions,
 )
 exports: (
     adapters.registry,
@@ -58,8 +60,8 @@ exports: (
 
 WEEK: constant(uint256) = 7 * 24 * 60 * 60
 
+# Window start of the reference week; other weeks shift it by whole weeks.
 frame_start: public(uint256)
-frame_end: public(uint256)
 not_sellable: public(HashMap[address, bool])
 
 
@@ -71,8 +73,8 @@ def __init__(
     _role_source: address,
     _start_total: uint256,
     _floor_total: uint256,
-    _decay_factor_ray: uint256,
     _step_duration: uint256,
+    _auction_length: uint256,
 ):
     roles.__init__(roles.RoleSource(_role_source))
     dutch_auction.__init__(
@@ -80,22 +82,25 @@ def __init__(
         _receiver,
         _start_total,
         _floor_total,
-        _decay_factor_ray,
         _step_duration,
+        _auction_length,
     )
     adapters.__init__(_registry)
-    frame_start: uint256 = block.timestamp // WEEK * WEEK
-    self.frame_start = frame_start
-    self.frame_end = frame_start + WEEK
+    self.frame_start = block.timestamp
 
 
 # Hook configuration
 
 
 @external
-def set_frame(_start: uint256, _end: uint256):
+def set_frame(_start: uint256):
     self.frame_start = _start
-    self.frame_end = _end
+
+
+@external
+@view
+def frame_end() -> uint256:
+    return self.frame_start + dutch_auction.auction_length
 
 
 @external
@@ -112,9 +117,18 @@ def stage(_token: address) -> uint256:
 
 
 @external
-@view
-def epoch_bounds(_epoch: uint256) -> (uint256, uint256):
-    return self._epoch_bounds(_epoch)
+def resync(
+    _want: address,
+    _start_total: uint256,
+    _floor_total: uint256,
+    _step_duration: uint256,
+):
+    dutch_auction._resync_economics(IERC20(_want), _start_total, _floor_total, _step_duration)
+
+
+@external
+def set_receiver(_receiver: address):
+    dutch_auction._set_receiver(_receiver)
 
 
 # Core hook overrides
@@ -122,16 +136,13 @@ def epoch_bounds(_epoch: uint256) -> (uint256, uint256):
 
 @override(dutch_auction)
 @view
-def _auction_epoch(_timestamp: uint256) -> uint256:
-    return self.frame_start // WEEK
-
-
-@override(dutch_auction)
-@view
-def _epoch_bounds(_epoch: uint256) -> (uint256, uint256):
-    # The harness runs one configurable frame; stale epochs never reach the
-    # window check because _auction_epoch already rejects them.
-    return self.frame_start, self.frame_end
+def _lot_start(_token: IERC20, _staged_at: uint256) -> uint256:
+    # A weekly calendar built from the configurable frame start: the window
+    # of a timestamp is the frame shifted into that timestamp's week, so a
+    # lot staged last week keeps last week's window.
+    week: uint256 = _staged_at // WEEK * WEEK
+    frame_week: uint256 = self.frame_start // WEEK * WEEK
+    return self.frame_start + week - frame_week
 
 
 @override(dutch_auction)

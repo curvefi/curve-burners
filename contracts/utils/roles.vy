@@ -4,9 +4,7 @@
 @title Role source module
 @author Curve Finance
 @license MIT
-@notice Live protocol roles read from a pinned role source (the FeeCollector):
-        owner and emergency owner views plus the caller checks shared by every
-        contract that follows protocol ownership.
+@notice Live protocol roles read from a pinned role source (e.g. FeeCollector).
 @dev The module stores no roles of its own — both are staticcall'ed from the
      role source on every read, so governance always matches the protocol's
      current owner and emergency owner and needs no commit/accept plumbing
@@ -39,8 +37,8 @@ role_source: public(immutable(RoleSource))
 def __init__(_role_source: RoleSource):
     """
     @notice Pin the role source the roles are read from.
-    @param _role_source Contract exposing owner() and emergency_owner() views
-           (the FeeCollector); must answer owner() with a nonzero address.
+    @param _role_source Contract exposing owner() and emergency_owner() views;
+        must answer owner() with a nonzero address.
     """
     assert staticcall _role_source.owner() != empty(address), BadRoleSource()
     self.role_source = _role_source
@@ -70,17 +68,15 @@ def _check_owner_or_emergency():
     assert msg.sender in [self._owner(), self._emergency_owner()], OnlyOwnerOrEmergency()
 
 
-# No nonreentrancy pragma: both views only relay the role source's state,
-# which the importer's lock does not guard anyway.
 @external
 @view
 def owner() -> address:
-    """@notice Governance owner, read live from the role source."""
+    """@notice Governance owner."""
     return self._owner()
 
 
 @external
 @view
 def emergency_owner() -> address:
-    """@notice Emergency role, read live from the role source."""
+    """@notice Emergency role owner."""
     return self._emergency_owner()

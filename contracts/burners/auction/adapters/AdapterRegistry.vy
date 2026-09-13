@@ -11,12 +11,11 @@
         registered adapters, and whether an executor is in use.
 @dev An adapter is a settlement rail: any contract that sells auction
      inventory by its own rules. Its executor is the protocol contract that
-     pulls sold tokens (often the adapter itself): auctions approve it while
+     pulls sold tokens (can be the adapter itself): auctions approve it while
      is_executor_active(executor) (an active adapter references it), so
      listing an adapter is a custody-relevant act reviewed by the owner. The
-     registry is the single management point: auctions reading it hold no
-     adapter state of their own. It holds no tokens, calls no external
-     protocols, and never executes adapters.
+     registry is the single management point. It holds no tokens, calls no
+     external protocols, and never executes adapters.
 @custom:kill The emergency owner can only disable_adapter, which immediately
              releases the executor reference and, for adapters reached
              through the ERC-1271 router, stops routing on every auction
@@ -126,12 +125,9 @@ def is_executor_active(_executor: address) -> bool:
 @internal
 def _remove_listing(_adapter: address):
     # Swap-remove: order is not part of the listing's contract.
-    last: uint256 = len(self.adapters) - 1
-    for i: uint256 in range(c.MAX_ADAPTERS):
-        if i > last:
-            break
+    for i: uint256 in range(len(self.adapters), bound=c.MAX_ADAPTERS):
         if self.adapters[i] == _adapter:
-            self.adapters[i] = self.adapters[last]
+            self.adapters[i] = self.adapters[len(self.adapters) - 1]
             self.adapters.pop()
             break
 
@@ -142,9 +138,8 @@ def set_adapter(_adapter: address, _executor: address):
     @notice Register an adapter, repoint an inactive one at a new executor,
             or remove it (executor == empty(address) reads as unknown and
             drops it from get_adapters). Entries are stored inactive:
-            activation is a separate owner step so a mistaken set cannot go
-            live in the same transaction, and an active adapter must be
-            disabled first so executor references stay consistent.
+            activation is a separate owner step, and an active adapter must
+            be disabled first so executor references stay consistent.
     @param _adapter Adapter contract.
     @param _executor Protocol contract that pulls sold tokens; the approval
            target auctions grant while the adapter is active. Zero removes

@@ -24,7 +24,7 @@
      later fills of the same lot.
 """
 
-from contracts.interfaces import IDutchAuctionBurner
+from contracts.interfaces import IDutchAuction
 
 
 error WrongChain:
@@ -39,7 +39,7 @@ error IntentExpired:
     pass
 
 
-error WrongEpoch:
+error WrongLot:
     pass
 
 
@@ -53,7 +53,9 @@ struct DutchAuctionIntent:
     chain_id: uint256
     auction: address
     sell_token: address
-    auction_epoch: uint64
+    # Window start of the lot the intent was built for: pins the intent to
+    # one lot instance so a restaged lot's fresh curve never resolves.
+    lot_start: uint64
     max_sell_amount: uint256
     deadline: uint48
 
@@ -78,7 +80,7 @@ struct CallStep:
 #   empty(address) because the taker receiver is solver-chosen at fill time.
 # - want_payment: want owed for the fill; take() pulls the full amount from
 #   the caller's want allowance. recipient is informational: the auction's
-#   immutable receiver, where the auction forwards the payment.
+#   receiver, where the auction forwards the payment.
 # - quoted_at/valid_from/fill_deadline: amounts are exact at quoted_at; the
 #   fill window is [valid_from, fill_deadline] inclusive.
 # - call_step: minimal take() calldata template. The taker receiver argument
@@ -90,7 +92,6 @@ struct ResolvedOrder:
     resolver_version: uint256
     chain_id: uint256
     auction: address
-    auction_epoch: uint256
     quoted_at: uint256
     valid_from: uint256
     fill_deadline: uint256
@@ -118,16 +119,15 @@ def resolve(_payload: Bytes[INTENT_PAYLOAD_LEN]) -> ResolvedOrder:
     """
     @notice Resolve a native auction intent payload against live auction state.
     @dev Reverts (deterministically, for eth_call classification) on a foreign
-         chain, an expired deadline, a stale epoch, and an inactive or empty
-         lot; a malformed payload fails abi decoding. The returned amounts are
+         chain, an expired deadline, a lot other than the intent's, and an
+         inactive or empty lot; a malformed payload fails abi decoding. The returned amounts are
          quoted at block.timestamp: the want payment only decreases later
          within the same lot, while the sell payout can shrink if other fills
          land first, so solvers should re-resolve close to execution.
          Named token assumption: amounts assume vanilla ERC-20 transfers;
          fee-on-transfer or rebasing sell tokens may deliver less than
-         sell_payout.amount, while the full want payment stays owed. Lots are
-         assumed staged within a single auction frame; take() additionally
-         re-checks that the lot epoch is the current epoch at execution.
+         sell_payout.amount, while the full want payment stays owed. take()
+         independently re-checks that the lot is live at execution.
     @param _payload abi-encoded DutchAuctionIntent.
     @return The versioned resolved order (see the struct documentation).
     """
@@ -136,23 +136,22 @@ def resolve(_payload: Bytes[INTENT_PAYLOAD_LEN]) -> ResolvedOrder:
     assert intent.auction != empty(address), BadAuction()
     assert convert(intent.deadline, uint256) >= block.timestamp, IntentExpired()
 
-    auction: IDutchAuctionBurner = IDutchAuctionBurner(intent.auction)
-    epoch: uint256 = staticcall auction.current_epoch()
-    assert convert(intent.auction_epoch, uint256) == epoch, WrongEpoch()
-
+    auction: IDutchAuction = IDutchAuction(intent.auction)
     # available() is 0 for unstaged, fenced, out-of-window, killed, and
     # drained lots alike; take() would reject all of them the same way.
     available_amount: uint256 = staticcall auction.available(intent.sell_token)
     sell_amount: uint256 = min(intent.max_sell_amount, available_amount)
     assert sell_amount > 0, NothingAvailable()
+    # A live lot: now make sure it is the one the intent was built for and
+    # not a restage with a fresh curve.
+    lot_start: uint256 = 0
+    lot_end: uint256 = 0
+    lot_start, lot_end = staticcall auction.window(intent.sell_token)
+    assert convert(intent.lot_start, uint256) == lot_start, WrongLot()
 
     payment: uint256 = staticcall auction.getAmountNeeded(intent.sell_token, sell_amount)
     want: address = (staticcall auction.want()).address
     receiver: address = staticcall auction.receiver()
-    # A lot with availability is staged in the current epoch.
-    lot_start: uint256 = 0
-    lot_end: uint256 = 0
-    lot_start, lot_end = staticcall auction.epoch_bounds(epoch)
 
     empty_callback: Bytes[1] = b""
     call_data: Bytes[TAKE_CALLDATA_BOUND] = abi_encode(
@@ -167,7 +166,6 @@ def resolve(_payload: Bytes[INTENT_PAYLOAD_LEN]) -> ResolvedOrder:
         resolver_version=RESOLVER_VERSION,
         chain_id=chain.id,
         auction=intent.auction,
-        auction_epoch=epoch,
         quoted_at=block.timestamp,
         valid_from=lot_start,
         # The lot window is exclusive of its end; the intent deadline is inclusive.

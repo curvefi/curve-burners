@@ -25,7 +25,8 @@ WAD = 10**18
 START_TOTAL = 100_000 * WAD
 FLOOR_TOTAL = WAD
 STEP_DURATION = 60
-DECAY_FACTOR_RAY = 992031276831159793484252056
+# Floor reached by the last active second of a day: 1439 sixty-second steps.
+AUCTION_LENGTH = 24 * 60 * 60
 LOT_AMOUNT = 250 * WAD
 
 APP_DATA = keccak(b"CURVE_DUTCH_AUCTION_TEST_APP_DATA")
@@ -131,8 +132,8 @@ def harness(role_source, want, proceeds_receiver, registry, adapter, owner, rela
         role_source.address,
         START_TOTAL,
         FLOOR_TOTAL,
-        DECAY_FACTOR_RAY,
         STEP_DURATION,
+        AUCTION_LENGTH,
     )
     with boa.env.prank(owner):
         registry.set_adapter(adapter, relayer)
@@ -451,7 +452,7 @@ def test_order_for_stays_valid_as_the_curve_decays(harness, adapter, sell_token,
     # lower rather than cancel.
     # Re-open the frame at the current block so the curve starts from the top.
     now = boa.env.evm.vm.state.timestamp
-    harness.set_frame(now, harness.frame_end())
+    harness.set_frame(now)
     order, signature = adapter.order_for(harness.address, sell_token.address)
     boa.env.time_travel(seconds=10 * STEP_DURATION)
     assert harness.getAmountNeeded(sell_token.address, LOT_AMOUNT) < order[4]

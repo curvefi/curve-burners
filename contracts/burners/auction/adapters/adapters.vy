@@ -16,12 +16,7 @@
      semantics bubble up; anything else is invalid. Routing is
      sender-agnostic (off-chain checkers eth_call from the zero address) and
      rechecks the registry live, so a registry disable stops settlement at
-     once. Economic authority never leaves the auction: adapters prove
-     protocol digests and price fills through the core's check_order view.
-     The contract-wide nonreentrancy lock rejects validation during a native
-     take callback. The module knows nothing about the auction core: the
-     importing contract vetoes allowance grants through the _pre_approve
-     hook (the auction refuses its payment token there).
+     once.
 """
 
 
@@ -29,10 +24,6 @@ from ethereum.ercs import IERC20
 
 from contracts.interfaces import IAdapterRegistry
 from contracts.utils import constants as c, token
-
-
-error BadExecutor:
-    pass
 
 
 interface Adapter:
@@ -43,7 +34,7 @@ INVALID_SIGNATURE: constant(bytes4) = 0xffffffff
 # The adapter address opening every adapter signature.
 ADAPTER_PREFIX_LEN: constant(uint256) = 20
 
-# Adapter catalog, fixed at deployment; unset means native settlement only.
+# Adapter catalog, fixed at deployment.
 registry: public(immutable(IAdapterRegistry))
 
 
@@ -66,18 +57,12 @@ def sync_executor_approvals(_executor: address, _tokens: DynArray[IERC20, c.MAX_
     """
     @notice Permissionlessly drive token allowances to the executor's target
             state.
-    @dev The target is derived, never caller-chosen: infinity while an active
-         registry adapter references the executor, zero once none does.
-         Keepers call it after staging so freshly staged tokens become
-         pullable; it doubles as retired-executor cleanup. Allowances are
-         never granted implicitly (staging does not touch them): this is the
-         only path. Grants pass the importer's _pre_approve veto and only
+    @dev Grants pass the importer's _pre_approve veto and only
          ever go from zero to infinity; clears are always allowed so a token
          the importer no longer approves sheds its stale allowance.
     @param _executor Executor whose allowances are synchronized.
     @param _tokens Tokens to synchronize.
     """
-    assert _executor != empty(address), BadExecutor()
     grant: bool = self._has_registry() and (
         staticcall self.registry.is_executor_active(_executor)
     )
@@ -115,8 +100,7 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[INF]) -> bytes4:
 
 
 # Compile-time integration hook implemented by the importing contract: runs
-# before every allowance grant and reverts for tokens that must never be
-# approved (the auction's payment token).
+# before every allowance grant.
 @internal
 @view
 @abstract

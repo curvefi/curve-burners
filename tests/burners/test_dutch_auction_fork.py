@@ -14,7 +14,6 @@ from .conftest import custom_err
 from .test_dutch_auction_v2 import (
     APP_DATA,
     BURNER_INTERFACE,
-    DECAY_FACTOR_RAY,
     ERC20_BALANCE,
     ERC1271_MAGIC_VALUE,
     FLOOR_TOTAL,
@@ -157,7 +156,6 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
             fee_collector,
             START_TOTAL,
             FLOOR_TOTAL,
-            DECAY_FACTOR_RAY,
             STEP_DURATION,
             registry,
         )
@@ -182,10 +180,7 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
         with boa.env.prank(keeper):
             fee_collector.collect([sell_token.address], keeper)
 
-        lot = burner.lots(sell_token)
-        # The contract stores no time bounds; extend the record so LOT_START
-        # and LOT_END keep indexing the epoch window.
-        lot = (*lot, *burner.epoch_bounds(lot[0]))
+        lot = (*burner.window(sell_token), burner.lots(sell_token).initial_amount)
         assert lot[LOT_INITIAL_AMOUNT] > 0
         # Staging grants nothing; the keeper's permissionless sync gives the
         # real vault relayer (the active registry adapter's executor) its allowance.

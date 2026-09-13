@@ -2,48 +2,37 @@
 @title IDutchAuction
 @author Curve Finance
 @license MIT
-@notice Minimal Dutch auction ABI: the Yearn Auction-compatible subset
-        want/available/price/getAmountNeeded/take/isActive/auctionLength/
-        auctions plus the lot record.
-@dev Only these selectors from Yearn Auction (yearn/
-     tokenized-strategy-periphery, src/Auctions/Auction.sol) are implemented.
-     Vyper default arguments export every Yearn overload of them: the
-     timestamped available/price/getAmountNeeded, the single-argument
-     getAmountNeeded (everything available), and the shortened take forms
-     (everything available, to the caller, no callback). price() is a
-     Curve-style 1e18-precision quote over raw amounts (raw want per 1e18
-     raw sell units), not Yearn's per-whole-token price; auctions() returns
-     Yearn's record shape (kicked, scaler, initialAvailable) derived from
-     the lot with scaler = 1 to match, so Yearn's
-     `amount * scaler * price / 1e18` reproduces getAmountNeeded() up to
-     rounding. getAmountNeeded() is the canonical payment quote. kicked is
-     the lot window's start (possibly in the future for a lot staged ahead
-     of its window, so Yearn readers must gate on isActive rather than
-     subtract kicked from now), initialAvailable the snapshot. The rest of
-     Yearn's surface —
-     kick/kickable/kicked and the governance setters — is absent; Yearn
-     tooling relying on it will not work unchanged. Yearn's code is
-     AGPL-3.0: only the selectors and their intended semantics were copied,
-     the implementation behind this interface is independent.
+@notice The Dutch auction core ABI: economics, lot windows, quotes, native
+        takes, and the signed-order check settlement adapters delegate to.
+@dev Time is plain timestamps throughout: a lot is its staging timestamp
+     plus the snapshot, window(token) is the window it trades in, and every
+     window is auction_length long.
+     Quotes and takes are named after Yearn
+     Auction's selectors (want/available/price/getAmountNeeded/take) so
+     Yearn tooling can drive them; the Yearn-only views live in
+     IYearnAuction. price() is a 1e18-precision quote over raw amounts (raw
+     want per 1e18 raw sell units); getAmountNeeded() is the canonical
+     payment quote.
 """
 
 from ethereum.ercs import IERC20
 
 
-# Lot staged for one epoch. Time bounds are not part of the record: the
-# auction's calendar publishes them per epoch, and the curve is read live, so
+# A staged lot: when it was staged (0 = never) and the balance snapshot. The
+# window is window(token, staged_at); the curve is read live, so
 # initial_amount only pins the unit price and caps what is available.
 struct Lot:
-    epoch: uint256
+    staged_at: uint256
     initial_amount: uint256
 
 
-# Yearn Auction's record shape (its `auctions(address)` getter), derived from
-# the lot on read.
-struct AuctionInfo:
-    kicked: uint64
-    scaler: uint64
-    initialAvailable: uint128
+# Economics
+
+
+@external
+@view
+def auction_length() -> uint256:
+    ...
 
 
 @external
@@ -54,25 +43,40 @@ def want() -> IERC20:
 
 @external
 @view
+def receiver() -> address:
+    ...
+
+
+@external
+@view
+def start_total() -> uint256:
+    ...
+
+
+@external
+@view
+def floor_total() -> uint256:
+    ...
+
+
+@external
+@view
+def step_duration() -> uint256:
+    ...
+
+
+# Lots and quotes
+
+
+@external
+@view
 def lots(_token: IERC20) -> Lot:
     ...
 
 
 @external
 @view
-def isActive(_from: address) -> bool:
-    ...
-
-
-@external
-@view
-def auctionLength() -> uint256:
-    ...
-
-
-@external
-@view
-def auctions(_from: address) -> AuctionInfo:
+def window(_token: address, _timestamp: uint256 = ...) -> (uint256, uint256):
     ...
 
 
@@ -96,6 +100,9 @@ def getAmountNeeded(
     ...
 
 
+# Native settlement
+
+
 @external
 def take(
     _from: address,
@@ -103,4 +110,33 @@ def take(
     takerReceiver: address = ...,
     data: Bytes[...] = ...,
 ) -> uint256:
+    ...
+
+
+@external
+def take_with_limits(
+    _from: address,
+    _max_amount: uint256,
+    _min_amount: uint256,
+    _max_payment: uint256,
+    _receiver: address,
+    _deadline: uint256,
+    _data: Bytes[...],
+) -> (uint256, uint256):
+    ...
+
+
+# Signed-order economics
+
+
+@external
+@view
+def check_order(
+    _sell_token: address,
+    _buy_token: address,
+    _receiver: address,
+    _sell_amount: uint256,
+    _min_buy_amount: uint256,
+    _valid_to: uint256,
+) -> bool:
     ...

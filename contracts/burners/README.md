@@ -10,38 +10,56 @@ Basically a template Burner, that allows to collect coins with associated payout
 
 During `FeeCollector`'s COLLECT phase, each token's full burner balance is
 snapshotted as the lot for the upcoming calendar EXCHANGE week. The snapshot
-fixes `initial_amount`; the curve (`start_total`, `floor_total`, decay, step)
-is read live, the active window is the epoch's calendar frame
-(`epoch_bounds`), and partial fills do not resize the lot or restart its curve.
-
-An epoch is its EXCHANGE window's start timestamp, read from the FeeCollector
-calendar; `epoch_bounds(epoch)` publishes the window.
+fixes `initial_amount`; the curve (`start_total`, `floor_total`,
+`step_duration`) is read live, the active window is the EXCHANGE frame read
+from the FeeCollector calendar, and partial fills do not resize the lot or
+restart its curve. `lots(token)` is the plain record `(staged_at,
+initial_amount)` and `window(token)` its window (`window(token, timestamp)`
+answers for a hypothetical staging time; a never-staged token reads
+`(0, 0)`). Every window is
+`auction_length` long (the EXCHANGE frame length for this burner); the
+calendar hook only places its start, so a per-token slot inside the frame
+would be a burner-only change.
 
 While the lot is active, its total target-token price follows a discrete
-geometric decay:
+exponential decay: equal time buys the same percentage drop, so
+`100 000 -> 1` passes `10 000 -> 1 000 -> 100 -> 10` at each successive fifth
+of the decay.
 
 ```text
-steps       = floor((timestamp - start) / step_duration)
-total_price = max(floor_total, start_total * decay_factor^steps)
-payment     = ceil(total_price * amount / initial_amount)
+decay_steps  = (auction_length - 1) // step_duration
+step         = (timestamp - start) // step_duration
+total_price  = start_total                         if step == 0
+             = floor_total                         if step >= decay_steps
+             = exp(log_start - log_drop * step / decay_steps)   otherwise,
+               clamped into [floor_total, start_total]
+payment      = ceil(total_price * amount / initial_amount)
 ```
 
-The total price therefore starts at `start_total`, steps down toward the hard
-`floor_total`, and becomes inactive at the EXCHANGE end. `price(from)` is the
-corresponding upward-rounded 1e18-precision unit quote (raw want per 1e18 raw
-units of `from`); `getAmountNeeded(from, amount)` is the canonical exact
-raw-token payment quote.
+`log_start = ln(start_total)` and `log_drop = ln(start_total / floor_total)`
+(WAD fixed point) are prepared internally at deploy and on every resync;
+the public parameters determine them, so any quote can be reproduced
+off-chain with the same arithmetic (`scripts/dutch_auction_curve.py` is the
+bit-exact Python mirror). The endpoints are exact by explicit branches: the price is
+`start_total` during the first step and `floor_total` from the last active
+step on (23:59 for a one-day frame with minute steps). `ln`/`exp` come from
+snekmate's `math` module (the dependency pinned in `requirements.in`),
+property-tested here against a high-precision reference.
+`price(from)` is the corresponding upward-rounded 1e18-precision unit quote
+(raw want per 1e18 raw units of `from`); `getAmountNeeded(from, amount)` is
+the canonical exact raw-token payment quote.
 
-Native settlement exposes the Yearn Auction selector subset — `want`,
-`receiver`, `available`, `price`, `getAmountNeeded`, `take`, `isActive`,
-`auctionLength`, and `auctions` — with every Yearn overload and the optional
-atomic taker callback. `price` is a 1e18-precision quote over raw amounts and
-`auctions().scaler = 1` to match, so Yearn's `amount * scaler * price / 1e18`
-reproduces `getAmountNeeded` up to rounding (see `IDutchAuction.vyi`). The
-curve parameters keep their own units (`step_duration` in seconds,
-`decay_factor_ray` as a RAY multiplier, totals per lot in raw want).
-`take_with_limits` additionally binds inclusion to a deadline, minimum amount,
-and maximum payment.
+The native surface (`interfaces/IDutchAuction.vyi`) is `want`, `receiver`,
+the curve parameters, `auction_length`, `lots`, `window`, `available`, `price`, `getAmountNeeded`, `take`
+(with the optional atomic taker callback), `take_with_limits` (inclusion
+bound to a deadline, minimum amount, and maximum payment) and `check_order`.
+Quotes and `take` carry Yearn Auction's selector names with every Yearn
+overload; the Yearn-only views `isActive`, `auctionLength`, and `auctions`
+live in the separate `auction/yearn_auction.vy` module
+(`interfaces/IYearnAuction.vyi`), which the burner imports and exports and
+which can be dropped without touching the core. `auctions().scaler = 1`
+matches the raw 1e18-precision `price`, so Yearn's `amount * scaler * price /
+1e18` reproduces `getAmountNeeded` up to rounding.
 
 ### Settlement rails: native take and registry adapters
 
@@ -70,11 +88,13 @@ is a single switch per adapter, the registry flag: `disable_adapter(adapter)`
 reference, and kills the rail at once for every auction reading the registry;
 only the owner can activate again.
 
-Types and constants are shared through interfaces: the `Lot` record lives in
-`interfaces/IDutchAuction.vyi`, `AdapterConfig` in
+Types and constants are shared through interfaces: the `Lot` record
+lives in `interfaces/IDutchAuction.vyi`, Yearn's `AuctionInfo` in
+`interfaces/IYearnAuction.vyi`, `AdapterConfig` in
 `interfaces/IAdapterRegistry.vyi`, and the ERC-165 ids, the burner interface
 id, and the ERC-1271 magic value in `utils/constants.vy`; the GPv2 constants
-in `cow/gpv2.vy` are keccak256-derived.
+in `cow/gpv2.vy` are keccak256-derived. Peers (`CowAdapter`, the resolver)
+read the burner through `IDutchAuction` alone.
 
 ### Adapter signature format
 
@@ -148,15 +168,18 @@ The payment token (`want`, no `target()` alias) mirrors
 migrates its target, the
 burner freezes in place — staging reverts and every fill path (native take and
 ERC-1271 validation) goes inactive — until the owner calls
-`resync_target(expected_target, start_total, floor_total, decay_factor,
-step_duration)` during the SLEEP phase, which re-reads the target from the
-FeeCollector (never a parameter), asserts it equals the one the parameters
-were tuned for, and revalidates the full curve against the EXCHANGE frame
-exactly like the constructor. A target change fences out every previous
-epoch's lot (`reconfigured_epoch`); trading resumes with the next staging, and
-the old target itself becomes regular sellable inventory. Calling
-`resync_target` with an unchanged target is a plain curve retune that reprices
-live lots immediately.
+`resync_target(expected_target, start_total, floor_total, step_duration)`
+during the SLEEP phase, which re-reads the target from the FeeCollector
+(never a parameter), asserts it equals the one the parameters were tuned
+for, and solves the curve against the EXCHANGE frame exactly like the
+constructor. Every resync stales every lot staged up to its block (staging
+counts from the next block); trading resumes with the next staging, and after
+a target change the old
+target itself becomes regular sellable inventory. Calling `resync_target`
+with an unchanged target is a plain curve retune under the same fence: the
+retuned curve applies from the next staging, never to a live lot. The
+proceeds receiver is mutable in the core module for other importers; the
+burner pins it to the FeeCollector and exposes no setter.
 
 ### Roles and recovery
 
