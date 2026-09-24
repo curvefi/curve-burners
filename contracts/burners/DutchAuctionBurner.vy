@@ -199,9 +199,6 @@ def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
     custody_transfers: DynArray[IFeeCollector.Transfer, c.MAX_COINS] = []
 
     for coin: IERC20 in _coins:
-        # _stage_lot re-checks stageability; checking here first fails before
-        # any transfer when the target token is among the coins.
-        dutch_auction._check_stageable(coin)
         collector_balance: uint256 = staticcall coin.balanceOf(self.fee_collector.address)
         fee_payouts.append(
             IFeeCollector.Transfer(
