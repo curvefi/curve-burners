@@ -1,11 +1,10 @@
 from copy import deepcopy
 
-import pytest
 import boa
+import pytest
 from boa import BoaError
 
-from ..conftest import Epoch, ZERO_ADDRESS, ETH_ADDRESS
-
+from tests.conftest import ETH_ADDRESS, ZERO_ADDRESS, Epoch
 
 APP_DATA = "0x058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"
 
@@ -44,8 +43,11 @@ def isValidSafeSignature(safe: address, sender: address, _hash: bytes32, _domain
 @pytest.fixture(scope="module", autouse=True)
 def burner(admin, fee_collector, cow_swap):
     with boa.env.prank(admin):
-        burner = boa.load("contracts/burners/CowSwapBurner.vy", fee_collector, cow_swap, cow_swap, 1)
+        burner = boa.load(
+            "contracts/deprecated/CowSwapBurner.vy", fee_collector, cow_swap, cow_swap, 1
+        )
         fee_collector.set_burner(burner)
+        fee_collector.set_killed([(ZERO_ADDRESS, 0)])
     return burner
 
 
@@ -83,8 +85,11 @@ def test_burn(burner, fee_collector, coins, arve, burle, set_epoch):
     payouts = [coin.balanceOf(burle) for coin in coins]
     for coin, amount, payout in zip(coins, amounts, payouts):
         assert coin.balanceOf(fee_collector) == 0
-        assert amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10 ** 18) <= payout <= \
-               amount * fee_collector.max_fee(Epoch.COLLECT) // 10 ** 18
+        assert (
+            amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10**18)
+            <= payout
+            <= amount * fee_collector.max_fee(Epoch.COLLECT) // 10**18
+        )
         assert payout + coin.balanceOf(burner) == amount
 
     # Check double spend
@@ -105,8 +110,11 @@ def test_burn(burner, fee_collector, coins, arve, burle, set_epoch):
         assert coin.balanceOf(burle) >= 2 * payout  # might be greater since Dutch auction for fee
 
         assert coin.balanceOf(fee_collector) == 0
-        assert 2 * amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10 ** 18) <= coin.balanceOf(burle) <= \
-               2 * amount * fee_collector.max_fee(Epoch.COLLECT) // 10 ** 18
+        assert (
+            2 * amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10**18)
+            <= coin.balanceOf(burle)
+            <= 2 * amount * fee_collector.max_fee(Epoch.COLLECT) // 10**18
+        )
         assert coin.balanceOf(burle) + coin.balanceOf(burner) == 2 * amount
 
     with boa.reverts("Only FeeCollector"):
@@ -115,28 +123,42 @@ def test_burn(burner, fee_collector, coins, arve, burle, set_epoch):
 
 def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoch, admin):
     def poll_try_at_epoch_error(ts, msg):
-        return bytes(boa.eval(f'_abi_encode(convert({ts}, uint256), "{msg}",'
-                              f'method_id=method_id("PollTryAtEpoch(uint256,string)"))'))
+        return bytes(
+            boa.eval(
+                f'abi_encode(convert({ts}, uint256), "{msg}",'
+                f'method_id=method_id("PollTryAtEpoch(uint256,string)"))'
+            )
+        )
 
-    next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.evm.vm.state.timestamp + 7 * 24 * 3600)[0]
+    next_ts = fee_collector.epoch_time_frame(
+        Epoch.EXCHANGE, boa.env.evm.vm.state.timestamp + 7 * 24 * 3600
+    )[0]
     with pytest.raises(BoaError) as error:
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
-    assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "ZeroBalance")
+    assert error.value.call_trace.output == poll_try_at_epoch_error(next_ts, "ZeroBalance")
 
     weth._mint_for_testing(burner, 10 ** weth.decimals())
-    order = burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
+    order = burner.getTradeableOrder(
+        burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b""
+    )
     assert order[0] == weth.address, "Wrong sellToken"
     assert order[1] == target.address, "Wrong buyToken"
     assert order[2] == fee_collector.address, "Wrong receiver"
     assert order[3] == 10 ** weth.decimals(), "Wrong sellAmount"
     assert order[4] == burner.target_threshold(), "Wrong buyAmount"
     assert order[5] == fee_collector.epoch_time_frame(Epoch.EXCHANGE)[1]
-    assert order[6].hex() == APP_DATA[2:],  "Wrong appData"
-    assert order[7] == 0,  "Positive feeAmount"
-    assert order[8].hex() == "f3b277728b3fee749481eb3e0b3b48980dbbab78658fc419025cb16eee346775", "Wrong kind"
+    assert order[6].hex() == APP_DATA[2:], "Wrong appData"
+    assert order[7] == 0, "Positive feeAmount"
+    assert order[8].hex() == "f3b277728b3fee749481eb3e0b3b48980dbbab78658fc419025cb16eee346775", (
+        "Wrong kind"
+    )
     assert order[9], "Not partiallyFillable"
-    assert order[10].hex() == "5a28e9363bb942b639270062aa6bb295f434bcdfc42c97267bf003f272060dc9", "Wrong location"
-    assert order[11].hex() == "5a28e9363bb942b639270062aa6bb295f434bcdfc42c97267bf003f272060dc9", "Wrong location"
+    assert order[10].hex() == "5a28e9363bb942b639270062aa6bb295f434bcdfc42c97267bf003f272060dc9", (
+        "Wrong location"
+    )
+    assert order[11].hex() == "5a28e9363bb942b639270062aa6bb295f434bcdfc42c97267bf003f272060dc9", (
+        "Wrong location"
+    )
 
     current_order = burner.get_current_order()
     for i in range(12):
@@ -147,20 +169,22 @@ def test_get_tradeable_order(burner, fee_collector, weth, target, arve, set_epoc
     set_epoch(Epoch.FORWARD)
     with pytest.raises(BoaError) as error:  # Outdated
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
-    assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "NotAllowed")
+    assert error.value.call_trace.output == poll_try_at_epoch_error(next_ts, "NotAllowed")
 
     set_epoch(Epoch.EXCHANGE)
-    next_ts = fee_collector.epoch_time_frame(Epoch.EXCHANGE, boa.env.evm.vm.state.timestamp + 7 * 24 * 3600)[0]
+    next_ts = fee_collector.epoch_time_frame(
+        Epoch.EXCHANGE, boa.env.evm.vm.state.timestamp + 7 * 24 * 3600
+    )[0]
     with boa.env.prank(admin):
         fee_collector.set_killed([(weth.address, Epoch.EXCHANGE)])
     with pytest.raises(BoaError) as error:  # killed
         burner.getTradeableOrder(burner.address, arve, b"", bytes.fromhex(weth.address[2:]), b"")
-    assert error.value.args[0].last_frame.vm_error.args[0] == poll_try_at_epoch_error(next_ts, "NotAllowed")
+    assert error.value.call_trace.output == poll_try_at_epoch_error(next_ts, "NotAllowed")
 
 
 def test_verify(burner, coins, arve, target, fee_collector, admin):
     def order_not_valid_error(msg):
-        return bytes(boa.eval(f'_abi_encode("{msg}", method_id=method_id("OrderNotValid(string)"))'))
+        return bytes(boa.eval(f'abi_encode("{msg}", method_id=method_id("OrderNotValid(string)"))'))
 
     coins = [coin for coin in coins if coin != target]
     coin = coins[0]
@@ -184,7 +208,7 @@ def test_verify(burner, coins, arve, target, fee_collector, admin):
     invalid_params[6] = bytes.fromhex("00")
     with pytest.raises(BoaError) as error:
         burner.verify(*invalid_params)
-    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("NonZeroOffchainInput")
+    assert error.value.call_trace.output == order_not_valid_error("NonZeroOffchainInput")
 
     invalid_params[6] = bytes.fromhex("0100")
     with boa.reverts():  # Overflow error
@@ -196,20 +220,20 @@ def test_verify(burner, coins, arve, target, fee_collector, admin):
     invalid_params[5] = bytes.fromhex(coins[1].address[2:])  # Wrong sellToken
     with pytest.raises(BoaError) as error:
         burner.verify(*invalid_params)
-    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("BadOrder")
+    assert error.value.call_trace.output == order_not_valid_error("BadOrder")
 
     invalid_params = deepcopy(params)
     invalid_params[7] = list(invalid_params[7])
     invalid_params[7][1] = coins[1].address  # Wrong buyToken
     with pytest.raises(BoaError) as error:
         burner.verify(*invalid_params)
-    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("BadOrder")
+    assert error.value.call_trace.output == order_not_valid_error("BadOrder")
 
     with boa.env.prank(admin):
         fee_collector.set_killed([(coin.address, Epoch.EXCHANGE)])
     with pytest.raises(BoaError) as error:
         burner.verify(*params)
-    assert error.value.args[0].last_frame.vm_error.args[0] == order_not_valid_error("NotAllowed")
+    assert error.value.call_trace.output == order_not_valid_error("NotAllowed")
 
 
 def test_admin(burner, admin, emergency_admin, arve):
@@ -221,24 +245,24 @@ def test_admin(burner, admin, emergency_admin, arve):
 
     # Only ownership admin
     with boa.env.prank(admin):
-        burner.set_target_threshold(10 ** 18)
-        assert burner.target_threshold() == 10 ** 18
+        burner.set_target_threshold(10**18)
+        assert burner.target_threshold() == 10**18
     with boa.env.prank(emergency_admin):
         with boa.reverts("Only owner"):
-            burner.set_target_threshold(10 ** 18)
+            burner.set_target_threshold(10**18)
 
     # Third wheel
     with boa.env.prank(arve):
         with boa.reverts("Only owner"):
             burner.recover([])
         with boa.reverts("Only owner"):
-            burner.set_target_threshold(10 ** 18)
+            burner.set_target_threshold(10**18)
 
 
 def test_recover_balance(burner, fee_collector, admin, emergency_admin, arve, coins):
     for coin in coins:
         coin._mint_for_testing(burner, 10 ** coin.decimals())
-    boa.env.set_balance(burner.address, 10 ** 18)
+    boa.env.set_balance(burner.address, 10**18)
 
     with boa.env.prank(admin):
         burner.recover(coins + [ETH_ADDRESS])
@@ -247,4 +271,4 @@ def test_recover_balance(burner, fee_collector, admin, emergency_admin, arve, co
         assert coin.balanceOf(burner) == 0
         assert coin.balanceOf(fee_collector) == 10 ** coin.decimals()
     assert boa.env.get_balance(burner.address) == 0
-    assert boa.env.get_balance(fee_collector.address) == 10 ** 18
+    assert boa.env.get_balance(fee_collector.address) == 10**18

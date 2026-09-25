@@ -1,4 +1,12 @@
-titanoboa @ git+https://github.com/vyperlang/titanoboa@c9aa6c6f31661880157de2f518f5014eab597862
-vyper==0.3.10
-boa-solidity==0.1.1
+# Application compiler and runtime. Keep these commits aligned with the Dutch
+# auction compiler pragma and the compatibility notes in requirements.lock.
+titanoboa @ git+https://github.com/vyperlang/titanoboa@7740c2efd9094973debb98c5cfe7923bc2552ce6
+vyper==0.5.0b1
+snekmate @ git+https://github.com/pcaversaccio/snekmate@7008a6af169d5c10b939a463b0b85331f99fe4ff
+
+# Titanoboa delegates contracts pinned below the application compiler to VVM.
+# Run `python scripts/bootstrap_test_compilers.py` after installing requirements.
+vvm==0.3.2
+
 hypothesis==6.102.4
+python-dotenv==1.0.1

@@ -1,0 +1,35 @@
+# Local mirror of the CI lint workflow (.github/workflows/lint.yml); install with
+# `pre-commit install`. Keep the tool versions in sync with the workflow.
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.9
+    hooks:
+      - id: ruff-check
+        files: ^(tests|scripts)/
+        args: [--fix]
+      - id: ruff-format
+        files: ^(tests|scripts)/
+
+  - repo: https://github.com/benber86/mamushi
+    rev: v0.1.2
+    hooks:
+      - id: mamushi
+        args: [--line-length=100]
+        # Every Vyper source except the contracts pinned to 0.3.x/0.4.x, which
+        # are deployed as-is (CI selects the same set by pragma).
+        files: ^contracts/.*\.vyi?$
+        exclude: ^contracts/(FeeCollector\.vy|deprecated/|hooks/|burners/(ProxyFeeCollectorBurner|XYZBurner)\.vy|testing/(ERC20Mock|ERC20MockNoReturn|WETH)\.vy|testing/dutch_auction/AuctionTakerMock\.vy)
+
+  # natrix (vyper lint, 0.1.9 and git main alike) is blocked twice: its version
+  # pattern accepts 0.4.x only, and it compiles every file on its own, which
+  # fails for the Bytes[INF] modules without --experimental-codegen. Enable
+  # once both are resolved:
+  # - repo: local
+  #   hooks:
+  #     - id: natrix
+  #       name: natrix (vyper lint)
+  #       entry: natrix lint
+  #       language: python
+  #       additional_dependencies: [natrix==0.1.9, vyper==0.5.0b1]
+  #       files: ^contracts/.*\.vyi?$
+  #       exclude: ^contracts/(FeeCollector\.vy|deprecated/|hooks/|burners/(ProxyFeeCollectorBurner|XYZBurner)\.vy|testing/(ERC20Mock|ERC20MockNoReturn|WETH)\.vy|testing/dutch_auction/AuctionTakerMock\.vy)

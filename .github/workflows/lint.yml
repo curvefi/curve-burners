@@ -1,0 +1,51 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  style:
+    name: code style
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install linters
+        run: pip install ruff==0.16.9 mamushi==0.1.2
+
+      - name: ruff (python lint)
+        run: ruff check tests scripts
+
+      - name: ruff (python format)
+        run: ruff format --check tests scripts
+
+      # Every Vyper source on the current compiler line; contracts pinned to
+      # 0.3.x or 0.4.x are deployed as-is and stay out.
+      - name: Select vyper sources
+        run: >-
+          echo "VYPER_SOURCES=$(grep -rL -E '^#\s*(pragma version|@version)\s*[=^]*0\.[34]\.'
+          contracts --include='*.vy' --include='*.vyi' | sort | tr '\n' ' ')" >> "$GITHUB_ENV"
+
+      - name: mamushi (vyper format)
+        run: mamushi --check --line-length 100 $VYPER_SOURCES
+
+      # natrix (vyper lint, 0.1.9 and git main alike) is blocked twice: its
+      # version pattern accepts 0.4.x only, and it compiles every file on its
+      # own with `vyper -f metadata`, which fails for the Bytes[INF] modules
+      # (adapters.vy, dutch_auction.vy) without --experimental-codegen.
+      # Enable once both are resolved:
+      # - name: natrix (vyper lint)
+      #   run: |
+      #     pip install natrix==0.1.9 vyper==0.5.0b1
+      #     natrix lint $VYPER_SOURCES
