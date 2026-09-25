@@ -9,7 +9,6 @@
 @custom:kill Testing-only contract, never deployed to production.
 """
 
-
 owner: public(address)
 emergency_owner: public(address)
 

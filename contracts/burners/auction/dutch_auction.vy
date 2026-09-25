@@ -27,7 +27,6 @@
      adapters price their orders through the external check_order view.
 """
 
-
 from ethereum.ercs import IERC20
 
 from contracts.burners.auction import dutch_auction_math as auction_math
@@ -481,7 +480,6 @@ def _take(
             payment,
             _data,
         )
-
     # The full quote is pulled from the caller's allowance after the callback.
     # Crediting balance deltas at the proceeds receiver instead would let a
     # callback route unrelated third-party inflows (any permissionless push

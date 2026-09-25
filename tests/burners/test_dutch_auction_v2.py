@@ -13,11 +13,8 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from scripts import dutch_auction_curve as curve
-
-from ..conftest import ETH_ADDRESS, ZERO_ADDRESS, Epoch, WEEK
-
-from .conftest import custom_err
-
+from tests.burners.conftest import custom_err
+from tests.conftest import ETH_ADDRESS, WEEK, ZERO_ADDRESS, Epoch
 
 WAD = 10**18
 START_TOTAL = 100_000 * WAD
@@ -307,9 +304,7 @@ def deployment(burner_deployer: Any) -> AuctionDeployment:
     problem_token = boa.load(
         "contracts/testing/dutch_auction/ProblemERC20.vy", "Problem Token", "PROBLEM", 18
     )
-    fee_collector = boa.load(
-        "contracts/FeeCollector.vy", target, weth, owner, emergency_owner
-    )
+    fee_collector = boa.load("contracts/FeeCollector.vy", target, weth, owner, emergency_owner)
     settlement = boa.load(
         "contracts/testing/dutch_auction/SettlementMock.vy", DOMAIN_SEPARATOR, relayer
     )
@@ -406,7 +401,16 @@ def test_yearn_auction_abi_is_exact(deployment: AuctionDeployment):
         for item in deployment.burner.abi
         if item["type"] == "function"
         and item["name"]
-        in {"want", "available", "price", "getAmountNeeded", "take", "isActive", "auctionLength", "auctions"}
+        in {
+            "want",
+            "available",
+            "price",
+            "getAmountNeeded",
+            "take",
+            "isActive",
+            "auctionLength",
+            "auctions",
+        }
     ]
     signatures = {
         (
@@ -515,7 +519,10 @@ def test_constructor_prepares_curve_for_exchange_frame(deployment: AuctionDeploy
     lot, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
     assert burner.getAmountNeeded(deployment.sell_token, staged, lot[LOT_START]) == START_TOTAL
     floor_from = lot[LOT_START] + DECAY_STEPS * STEP_DURATION
-    assert burner.getAmountNeeded(deployment.sell_token, staged, floor_from - STEP_DURATION) > FLOOR_TOTAL
+    assert (
+        burner.getAmountNeeded(deployment.sell_token, staged, floor_from - STEP_DURATION)
+        > FLOOR_TOTAL
+    )
     assert burner.getAmountNeeded(deployment.sell_token, staged, floor_from) == FLOOR_TOTAL
     assert burner.getAmountNeeded(deployment.sell_token, staged, lot[LOT_END] - 1) == FLOOR_TOTAL
     assert burner.getAmountNeeded(deployment.sell_token, staged, lot[LOT_END]) == 0
@@ -542,9 +549,7 @@ def test_collect_pays_fee_moves_custody_and_snapshots_lot(deployment: AuctionDep
     amount = 1_000 * WAD
     staged, fee = _stage(deployment, deployment.sell_token, amount)
     lot_synced = next(
-        log
-        for log in deployment.fee_collector.get_logs()
-        if _event_name(log) == "LotStaged"
+        log for log in deployment.fee_collector.get_logs() if _event_name(log) == "LotStaged"
     )
     lot = _lot_with_bounds(deployment, deployment.sell_token)
 
@@ -644,9 +649,9 @@ def test_price_boundaries_geometric_checkpoints_and_floor(deployment: AuctionDep
     lot, staged = _activate_lot(deployment, deployment.sell_token, 10_000 * WAD)
 
     assert deployment.burner.getAmountNeeded(deployment.sell_token, staged) == START_TOTAL
-    assert deployment.burner.price(deployment.sell_token) == (
-        START_TOTAL * WAD + staged - 1
-    ) // staged
+    assert (
+        deployment.burner.price(deployment.sell_token) == (START_TOTAL * WAD + staged - 1) // staged
+    )
 
     previous = START_TOTAL
     for fraction, expected in [
@@ -884,9 +889,7 @@ def test_yearn_callback_pull_payment_happy_path(deployment: AuctionDeployment):
     taker.configure(4, False)  # PAY_PULL: approve the burner's allowance pull.
 
     callback_data = b"atomic unwind"
-    amount_taken = taker.execute_take(
-        deployment.sell_token, amount, taker.address, callback_data
-    )
+    amount_taken = taker.execute_take(deployment.sell_token, amount, taker.address, callback_data)
 
     assert amount_taken == amount
     assert taker.callback_count() == 1
@@ -1004,9 +1007,7 @@ def test_large_callback_data_round_trips(deployment: AuctionDeployment):
 
     callback_data = bytes(range(256)) * 32
     assert len(callback_data) == 8192
-    amount_taken = taker.execute_take(
-        deployment.sell_token, amount, taker.address, callback_data
-    )
+    amount_taken = taker.execute_take(deployment.sell_token, amount, taker.address, callback_data)
 
     assert amount_taken == amount
     assert taker.callback_data() == callback_data
@@ -1042,9 +1043,7 @@ def test_take_rejects_zero_outside_epoch_and_killed_token(deployment: AuctionDep
 
     _, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
     with boa.env.prank(deployment.owner):
-        deployment.fee_collector.set_killed(
-            [(deployment.sell_token.address, Epoch.EXCHANGE)]
-        )
+        deployment.fee_collector.set_killed([(deployment.sell_token.address, Epoch.EXCHANGE)])
     assert deployment.burner.available(deployment.sell_token) == 0
     with boa.env.prank(deployment.buyer), boa.reverts():
         deployment.burner.take(deployment.sell_token, staged, deployment.taker_receiver, b"")
@@ -1059,9 +1058,7 @@ def test_active_exact_quote_rejects_amount_above_available_and_take_zero(
 
     buyer_target_before = deployment.target.balanceOf(deployment.buyer)
     with boa.env.prank(deployment.buyer), boa.reverts(custom_err("NothingAvailable()")):
-        deployment.burner.take(
-            deployment.sell_token, 0, deployment.taker_receiver, b""
-        )
+        deployment.burner.take(deployment.sell_token, 0, deployment.taker_receiver, b"")
 
     current_lot = _lot_with_bounds(deployment, deployment.sell_token)
     assert current_lot[LOT_START] == lot[LOT_START]
@@ -1235,21 +1232,13 @@ def test_sync_grants_after_activation_and_restage_keeps_allowance(
         deployment.burner.sync_executor_approvals(
             deployment.relayer, [deployment.sell_token.address]
         )
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
-        == MAX_UINT256
-    )
+    assert deployment.sell_token.allowance(deployment.burner, deployment.relayer) == MAX_UINT256
 
     # A restage in the same frame keeps the snapshot and the allowance.
     with boa.env.prank(deployment.keeper):
-        deployment.fee_collector.collect(
-            [deployment.sell_token.address], deployment.keeper
-        )
+        deployment.fee_collector.collect([deployment.sell_token.address], deployment.keeper)
     assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_INITIAL_AMOUNT] == staged
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
-        == MAX_UINT256
-    )
+    assert deployment.sell_token.allowance(deployment.burner, deployment.relayer) == MAX_UINT256
 
 
 def test_permissionless_sync_executor_approvals_follows_derived_state(
@@ -1313,9 +1302,7 @@ def test_emergency_disable_bundle_leaves_no_allowance_window(
         (
             deployment.registry.address,
             "0x"
-            + deployment.registry.disable_adapter.prepare_calldata(
-                deployment.cow_adapter
-            ).hex(),
+            + deployment.registry.disable_adapter.prepare_calldata(deployment.cow_adapter).hex(),
         ),
         (
             deployment.burner.address,
@@ -1331,9 +1318,7 @@ def test_emergency_disable_bundle_leaves_no_allowance_window(
     # owner covers both legs.
     with boa.env.prank(deployment.emergency_owner):
         deployment.registry.disable_adapter(deployment.cow_adapter)
-        deployment.burner.sync_executor_approvals(
-            relayer, [deployment.sell_token.address]
-        )
+        deployment.burner.sync_executor_approvals(relayer, [deployment.sell_token.address])
 
     assert not _cow_active(deployment)
     assert not deployment.registry.is_executor_active(relayer)
@@ -1393,9 +1378,7 @@ def test_cow_pull_then_donation_resells_in_favor_of_fee_collector(
     unit_price = deployment.burner.price(deployment.sell_token)
 
     with boa.env.prank(deployment.relayer):
-        deployment.sell_token.transferFrom(
-            deployment.burner, deployment.taker_receiver, cow_amount
-        )
+        deployment.sell_token.transferFrom(deployment.burner, deployment.taker_receiver, cow_amount)
     # Live balance bounds availability after a relayer pull.
     assert deployment.burner.available(deployment.sell_token) == staged - cow_amount
 
@@ -1595,7 +1578,10 @@ def test_erc1271_valid_payload_magic_and_invalid_payloads(
     # Without the prefix nothing routes: the historical unprefixed encoding and
     # an unknown prefix both answer the invalid magic.
     assert deployment.burner.isValidSignature(order_hash, signature[20:]) == ERC1271_INVALID
-    assert deployment.burner.isValidSignature(order_hash, bytes(20) + signature[20:]) == ERC1271_INVALID
+    assert (
+        deployment.burner.isValidSignature(order_hash, bytes(20) + signature[20:])
+        == ERC1271_INVALID
+    )
     assert lot[LOT_START] != 0
 
 
@@ -1625,25 +1611,19 @@ def test_false_return_balance_revert_and_blacklist_fail_atomically(
     deployment.problem_token.set_returns_false(True)
     deployment.problem_token.mint(deployment.fee_collector, 100 * WAD)
     with boa.env.prank(deployment.keeper), boa.reverts():
-        deployment.fee_collector.collect(
-            [deployment.problem_token.address], deployment.keeper
-        )
+        deployment.fee_collector.collect([deployment.problem_token.address], deployment.keeper)
     assert _lot_with_bounds(deployment, deployment.problem_token)[LOT_INITIAL_AMOUNT] == 0
 
     deployment.problem_token.set_returns_false(False)
     deployment.problem_token.set_revert_balance_of(True)
     with boa.env.prank(deployment.keeper), boa.reverts():
-        deployment.fee_collector.collect(
-            [deployment.problem_token.address], deployment.keeper
-        )
+        deployment.fee_collector.collect([deployment.problem_token.address], deployment.keeper)
     assert _lot_with_bounds(deployment, deployment.problem_token)[LOT_INITIAL_AMOUNT] == 0
 
     deployment.problem_token.set_revert_balance_of(False)
     deployment.problem_token.set_blacklisted(deployment.burner.address, True)
     with boa.env.prank(deployment.keeper), boa.reverts():
-        deployment.fee_collector.collect(
-            [deployment.problem_token.address], deployment.keeper
-        )
+        deployment.fee_collector.collect([deployment.problem_token.address], deployment.keeper)
     assert _lot_with_bounds(deployment, deployment.problem_token)[LOT_INITIAL_AMOUNT] == 0
 
 
@@ -1676,9 +1656,7 @@ def test_reentrant_sell_token_transfer_reverts_without_accounting_loss(
     with boa.env.prank(deployment.buyer):
         deployment.target.approve(deployment.burner, payment)
         with boa.reverts():
-            deployment.burner.take(
-                deployment.problem_token, amount, deployment.taker_receiver, b""
-            )
+            deployment.burner.take(deployment.problem_token, amount, deployment.taker_receiver, b"")
 
     assert deployment.problem_token.balanceOf(deployment.taker_receiver) == 0
     assert deployment.burner.available(deployment.problem_token) == staged
@@ -1692,17 +1670,11 @@ def test_recover_empties_lot_and_set_killed_fences_donation_revival(
     lot, staged = _activate_lot(deployment, deployment.sell_token, 100 * WAD)
     order = _cow_order(deployment, deployment.sell_token)
     signature = _encode_erc1271_signature(order, deployment.cow_adapter)
-    order_hash = _gpv2_order_digest(
-        order, deployment.settlement.domainSeparator()
-    )
+    order_hash = _gpv2_order_digest(order, deployment.settlement.domainSeparator())
 
     with boa.env.prank(deployment.owner):
         deployment.burner.recover([deployment.sell_token.address])
-    recovered = next(
-        log
-        for log in deployment.burner.get_logs()
-        if _event_name(log) == "Recovered"
-    )
+    recovered = next(log for log in deployment.burner.get_logs() if _event_name(log) == "Recovered")
     assert recovered.address == deployment.burner.address
     assert recovered.token == deployment.sell_token.address
     assert recovered.amount == staged
@@ -1718,9 +1690,7 @@ def test_recover_empties_lot_and_set_killed_fences_donation_revival(
     assert deployment.burner.getAmountNeeded(deployment.sell_token, 1) == 0
 
     with boa.env.prank(deployment.buyer), boa.reverts():
-        deployment.burner.take(
-            deployment.sell_token, 1, deployment.taker_receiver, b""
-        )
+        deployment.burner.take(deployment.sell_token, 1, deployment.taker_receiver, b"")
     with boa.reverts():
         deployment.burner.isValidSignature(order_hash, signature)
 
@@ -1744,30 +1714,21 @@ def test_recover_empties_lot_and_set_killed_fences_donation_revival(
     # The kill also blocks the permissionless re-collect of evacuated funds.
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
     with boa.env.prank(deployment.keeper), boa.reverts():
-        deployment.fee_collector.collect(
-            [deployment.sell_token.address], deployment.keeper
-        )
+        deployment.fee_collector.collect([deployment.sell_token.address], deployment.keeper)
 
     # Lifting the kill lets a COLLECT restage everything from the curve top.
     with boa.env.prank(deployment.owner):
         deployment.fee_collector.set_killed([(deployment.sell_token.address, 0)])
     collector_balance = deployment.sell_token.balanceOf(deployment.fee_collector)
-    collect_fee = (
-        collector_balance * deployment.fee_collector.fee(Epoch.COLLECT) // WAD
-    )
+    collect_fee = collector_balance * deployment.fee_collector.fee(Epoch.COLLECT) // WAD
     with boa.env.prank(deployment.keeper):
-        deployment.fee_collector.collect(
-            [deployment.sell_token.address], deployment.keeper
-        )
+        deployment.fee_collector.collect([deployment.sell_token.address], deployment.keeper)
 
     refreshed_lot = _lot_with_bounds(deployment, deployment.sell_token)
     expected_snapshot = donation + collector_balance - collect_fee
     assert refreshed_lot[LOT_START] == lot[LOT_START] + WEEK
     assert refreshed_lot[LOT_INITIAL_AMOUNT] == expected_snapshot
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
-        == MAX_UINT256
-    )
+    assert deployment.sell_token.allowance(deployment.burner, deployment.relayer) == MAX_UINT256
 
     _move_to_timestamp(refreshed_lot[LOT_START])
     assert deployment.burner.available(deployment.sell_token) == expected_snapshot
@@ -1782,10 +1743,7 @@ def test_recover_during_collect_frame_recollect_restages_unless_killed(
     _configure_and_enable_cow(deployment)
     staged, _ = _stage(deployment, deployment.sell_token, 100 * WAD)
     first_lot = _lot_with_bounds(deployment, deployment.sell_token)
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
-        == MAX_UINT256
-    )
+    assert deployment.sell_token.allowance(deployment.burner, deployment.relayer) == MAX_UINT256
 
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
     recovery_window = _exchange_start(deployment)
@@ -1794,25 +1752,19 @@ def test_recover_during_collect_frame_recollect_restages_unless_killed(
     # alone leaves the permissionless re-collect open in the same frame.
     with boa.env.prank(deployment.owner):
         deployment.burner.recover([deployment.sell_token.address])
-        deployment.fee_collector.set_killed(
-            [(deployment.sell_token.address, Epoch.COLLECT)]
-        )
+        deployment.fee_collector.set_killed([(deployment.sell_token.address, Epoch.COLLECT)])
 
     assert deployment.sell_token.balanceOf(deployment.burner) == 0
     assert deployment.sell_token.balanceOf(deployment.fee_collector) == staged
 
     new_receipts = 25 * WAD
-    deployment.sell_token._mint_for_testing(
-        deployment.fee_collector, new_receipts
-    )
+    deployment.sell_token._mint_for_testing(deployment.fee_collector, new_receipts)
     collector_before = deployment.sell_token.balanceOf(deployment.fee_collector)
     keeper_before = deployment.sell_token.balanceOf(deployment.keeper)
     lot_before = _lot_with_bounds(deployment, deployment.sell_token)
 
     with boa.env.prank(deployment.keeper), boa.reverts():
-        deployment.fee_collector.collect(
-            [deployment.sell_token.address], deployment.keeper
-        )
+        deployment.fee_collector.collect([deployment.sell_token.address], deployment.keeper)
 
     assert _lot_with_bounds(deployment, deployment.sell_token) == lot_before
     assert deployment.sell_token.balanceOf(deployment.fee_collector) == collector_before
@@ -1825,9 +1777,7 @@ def test_recover_during_collect_frame_recollect_restages_unless_killed(
         deployment.fee_collector.set_killed([(deployment.sell_token.address, 0)])
     fee = collector_before * deployment.fee_collector.fee(Epoch.COLLECT) // WAD
     with boa.env.prank(deployment.keeper):
-        deployment.fee_collector.collect(
-            [deployment.sell_token.address], deployment.keeper
-        )
+        deployment.fee_collector.collect([deployment.sell_token.address], deployment.keeper)
 
     refreshed_lot = _lot_with_bounds(deployment, deployment.sell_token)
     expected_snapshot = collector_before - fee
@@ -1836,10 +1786,7 @@ def test_recover_during_collect_frame_recollect_restages_unless_killed(
     assert deployment.sell_token.balanceOf(deployment.fee_collector) == 0
     assert deployment.sell_token.balanceOf(deployment.burner) == expected_snapshot
     assert deployment.sell_token.balanceOf(deployment.keeper) == keeper_before + fee
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
-        == MAX_UINT256
-    )
+    assert deployment.sell_token.allowance(deployment.burner, deployment.relayer) == MAX_UINT256
 
     _move_to_timestamp(refreshed_lot[LOT_START])
     assert deployment.burner.available(deployment.sell_token) == expected_snapshot
@@ -1854,33 +1801,23 @@ def test_recover_before_first_staging_leaves_no_state_and_collect_restages(
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
     recovery_window = _exchange_start(deployment)
     recovered_amount = 10 * WAD
-    deployment.sell_token._mint_for_testing(
-        deployment.burner, recovered_amount
-    )
+    deployment.sell_token._mint_for_testing(deployment.burner, recovered_amount)
 
     with boa.env.prank(deployment.owner):
         deployment.burner.recover([deployment.sell_token.address])
 
     assert _lot_with_bounds(deployment, deployment.sell_token) == (0, 0, 0)
     assert deployment.sell_token.balanceOf(deployment.burner) == 0
-    assert (
-        deployment.sell_token.balanceOf(deployment.fee_collector)
-        == recovered_amount
-    )
+    assert deployment.sell_token.balanceOf(deployment.fee_collector) == recovered_amount
     # Approvals only come from the keeper's sync: nothing was approved yet.
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
-        == 0
-    )
+    assert deployment.sell_token.allowance(deployment.burner, deployment.relayer) == 0
 
     # Recovery leaves no lingering lot state: the same COLLECT frame's
     # permissionless collect restages the returned balance.
     keeper_before = deployment.sell_token.balanceOf(deployment.keeper)
     fee = recovered_amount * deployment.fee_collector.fee(Epoch.COLLECT) // WAD
     with boa.env.prank(deployment.keeper):
-        deployment.fee_collector.collect(
-            [deployment.sell_token.address], deployment.keeper
-        )
+        deployment.fee_collector.collect([deployment.sell_token.address], deployment.keeper)
         deployment.burner.sync_executor_approvals(
             deployment.relayer, [deployment.sell_token.address]
         )
@@ -1890,10 +1827,7 @@ def test_recover_before_first_staging_leaves_no_state_and_collect_restages(
     assert refreshed_lot[LOT_START] == recovery_window
     assert refreshed_lot[LOT_INITIAL_AMOUNT] == expected_snapshot
     assert deployment.sell_token.balanceOf(deployment.keeper) == keeper_before + fee
-    assert (
-        deployment.sell_token.allowance(deployment.burner, deployment.relayer)
-        == MAX_UINT256
-    )
+    assert deployment.sell_token.allowance(deployment.burner, deployment.relayer) == MAX_UINT256
     _move_to_timestamp(refreshed_lot[LOT_START])
     assert _cow_order(deployment, deployment.sell_token)[ORDER_SELL_AMOUNT] == expected_snapshot
 
@@ -1937,9 +1871,7 @@ def test_full_lifecycle_collect_cow_and_native_fills_then_forward(
     fee to the Hooker.
     """
     _configure_and_enable_cow(deployment)
-    hooker = boa.load(
-        "contracts/hooks/Hooker.vy", deployment.fee_collector, [], [], []
-    )
+    hooker = boa.load("contracts/hooks/Hooker.vy", deployment.fee_collector, [], [], [])
     with boa.env.prank(deployment.owner):
         deployment.fee_collector.set_hooker(hooker)
 
@@ -1948,22 +1880,16 @@ def test_full_lifecycle_collect_cow_and_native_fills_then_forward(
     cow_amount = staged * 40 // 100
     cow_payment = deployment.burner.getAmountNeeded(deployment.sell_token, cow_amount)
     with boa.env.prank(deployment.relayer):
-        deployment.sell_token.transferFrom(
-            deployment.burner, deployment.taker_receiver, cow_amount
-        )
+        deployment.sell_token.transferFrom(deployment.burner, deployment.taker_receiver, cow_amount)
     deployment.target._mint_for_testing(deployment.fee_collector, cow_payment)
 
     native_amount = deployment.burner.available(deployment.sell_token)
-    native_payment = deployment.burner.getAmountNeeded(
-        deployment.sell_token, native_amount
-    )
+    native_payment = deployment.burner.getAmountNeeded(deployment.sell_token, native_amount)
     deployment.target._mint_for_testing(deployment.buyer, native_payment)
     with boa.env.prank(deployment.buyer):
         deployment.target.approve(deployment.burner, native_payment)
         assert (
-            deployment.burner.take(
-                deployment.sell_token, MAX_UINT256, deployment.buyer, b""
-            )
+            deployment.burner.take(deployment.sell_token, MAX_UINT256, deployment.buyer, b"")
             == native_amount
         )
     assert deployment.sell_token.balanceOf(deployment.burner) == 0
@@ -2004,54 +1930,30 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
     # Divergence freezes fills, validation, and staging before any resync.
     assert deployment.burner.available(deployment.sell_token) == 0
     with boa.env.prank(deployment.buyer), boa.reverts():
-        deployment.burner.take(
-            deployment.sell_token, MAX_UINT256, deployment.buyer, b""
-        )
+        deployment.burner.take(deployment.sell_token, MAX_UINT256, deployment.buyer, b"")
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
     deployment.second_token._mint_for_testing(deployment.fee_collector, WAD)
-    with boa.env.prank(deployment.keeper), boa.reverts(
-        custom_err("TargetChanged()", nested=True)
-    ):
-        deployment.fee_collector.collect(
-            [deployment.second_token.address], deployment.keeper
-        )
+    with boa.env.prank(deployment.keeper), boa.reverts(custom_err("TargetChanged()", nested=True)):
+        deployment.fee_collector.collect([deployment.second_token.address], deployment.keeper)
 
     # Resyncs are SLEEP-only: a COLLECT execution must wait for the next week.
-    with boa.env.prank(deployment.owner), boa.reverts(
-        custom_err("NotSleepEpoch()")
-    ):
-        deployment.burner.resync_target(
-            new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
-        )
+    with boa.env.prank(deployment.owner), boa.reverts(custom_err("NotSleepEpoch()")):
+        deployment.burner.resync_target(new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION)
     _move_to_epoch(deployment.fee_collector, Epoch.SLEEP)
 
     with boa.env.prank(deployment.keeper), boa.reverts(custom_err("OnlyOwner()")):
-        deployment.burner.resync_target(
-            new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
-        )
-    with boa.env.prank(deployment.owner), boa.reverts(
-        custom_err("StepExceedsAuction()")
-    ):
-        deployment.burner.resync_target(
-            new_target, START_TOTAL, FLOOR_TOTAL, EXCHANGE_DURATION
-        )
+        deployment.burner.resync_target(new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION)
+    with boa.env.prank(deployment.owner), boa.reverts(custom_err("StepExceedsAuction()")):
+        deployment.burner.resync_target(new_target, START_TOTAL, FLOOR_TOTAL, EXCHANGE_DURATION)
     # Delayed-execution guard: params tuned for the old denomination must not
     # bind to the new one.
-    with boa.env.prank(deployment.owner), boa.reverts(
-        custom_err("TargetChanged()")
-    ):
-        deployment.burner.resync_target(
-            old_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
-        )
+    with boa.env.prank(deployment.owner), boa.reverts(custom_err("TargetChanged()")):
+        deployment.burner.resync_target(old_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION)
 
     with boa.env.prank(deployment.owner):
-        deployment.burner.resync_target(
-            new_target, 2 * START_TOTAL, 2 * FLOOR_TOTAL, STEP_DURATION
-        )
+        deployment.burner.resync_target(new_target, 2 * START_TOTAL, 2 * FLOOR_TOTAL, STEP_DURATION)
     resynced = next(
-        log
-        for log in deployment.burner.get_logs()
-        if _event_name(log) == "EconomicsSet"
+        log for log in deployment.burner.get_logs() if _event_name(log) == "EconomicsSet"
     )
     assert resynced.want == new_target.address
     assert resynced.start_total == 2 * START_TOTAL
@@ -2060,12 +1962,12 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
 
     # The resync landed in SLEEP, before this week's staging and window: the
     # fence stops at the previous week, so only the stale lot stays dead.
-    assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_START] < _exchange_start(deployment)
+    assert _lot_with_bounds(deployment, deployment.sell_token)[LOT_START] < _exchange_start(
+        deployment
+    )
     assert deployment.burner.available(deployment.sell_token) == 0
     with boa.env.prank(deployment.buyer), boa.reverts():
-        deployment.burner.take(
-            deployment.sell_token, MAX_UINT256, deployment.buyer, b""
-        )
+        deployment.burner.take(deployment.sell_token, MAX_UINT256, deployment.buyer, b"")
 
     # Same week's COLLECT: restage picks the new curve immediately; the old
     # target is now plain sellable inventory; fills pay in the new
@@ -2073,9 +1975,7 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
     old_target._mint_for_testing(deployment.fee_collector, 10 * WAD)
     with boa.env.prank(deployment.keeper):
-        deployment.fee_collector.collect(
-            [deployment.sell_token.address], deployment.keeper
-        )
+        deployment.fee_collector.collect([deployment.sell_token.address], deployment.keeper)
         deployment.fee_collector.collect([old_target.address], deployment.keeper)
 
     lot = _lot_with_bounds(deployment, deployment.sell_token)
@@ -2089,9 +1989,7 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
     new_target._mint_for_testing(deployment.buyer, payment)
     with boa.env.prank(deployment.buyer):
         new_target.approve(deployment.burner, payment)
-        deployment.burner.take(
-            deployment.sell_token, MAX_UINT256, deployment.buyer, b""
-        )
+        deployment.burner.take(deployment.sell_token, MAX_UINT256, deployment.buyer, b"")
     assert new_target.balanceOf(deployment.fee_collector) == payment
     assert deployment.burner.available(old_target) > 0
 
@@ -2108,43 +2006,30 @@ def test_resync_only_in_sleep_fences_previous_lots(
     order = _cow_order(deployment, deployment.sell_token)
     signature = _encode_erc1271_signature(order, deployment.cow_adapter)
     order_hash = _gpv2_order_digest(order, deployment.settlement.domainSeparator())
-    assert (
-        deployment.burner.isValidSignature(order_hash, signature)
-        == ERC1271_MAGIC_VALUE
-    )
+    assert deployment.burner.isValidSignature(order_hash, signature) == ERC1271_MAGIC_VALUE
 
     new_target = boa.load("contracts/testing/ERC20Mock.vy", "New Target", "NEWT", 18)
     with boa.env.prank(deployment.owner):
         deployment.fee_collector.set_target(new_target)
         # The window is open: any resync must wait for the next SLEEP.
         with boa.reverts(custom_err("NotSleepEpoch()")):
-            deployment.burner.resync_target(
-                new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
-            )
+            deployment.burner.resync_target(new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION)
 
     # FORWARD — the window closed, but still not SLEEP.
     _move_to_timestamp(lot[LOT_END])
-    with boa.env.prank(deployment.owner), boa.reverts(
-        custom_err("NotSleepEpoch()")
-    ):
-        deployment.burner.resync_target(
-            new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
-        )
+    with boa.env.prank(deployment.owner), boa.reverts(custom_err("NotSleepEpoch()")):
+        deployment.burner.resync_target(new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION)
 
     _move_to_epoch(deployment.fee_collector, Epoch.SLEEP)
     with boa.env.prank(deployment.owner):
-        deployment.burner.resync_target(
-            new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
-        )
+        deployment.burner.resync_target(new_target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION)
 
     # The fence stops at the previous week: the lot staged then is dead while
     # the week now in SLEEP stays stageable.
     assert lot[LOT_START] < _exchange_start(deployment)
     assert deployment.burner.available(deployment.sell_token) == 0
     with boa.env.prank(deployment.buyer), boa.reverts(custom_err("NothingAvailable()")):
-        deployment.burner.take(
-            deployment.sell_token, MAX_UINT256, deployment.buyer, b""
-        )
+        deployment.burner.take(deployment.sell_token, MAX_UINT256, deployment.buyer, b"")
     # The published order names the old denomination, so the buy-token check
     # fails first; re-quoted in the new want, the fenced lot itself is inactive.
     with boa.reverts(custom_err("BadBuyToken()")):
@@ -2180,28 +2065,17 @@ def test_resync_same_target_retune_in_sleep_repins_curve(
 
     # Staging moves to the same week's COLLECT — which is no longer SLEEP.
     staged, _ = _stage(deployment, deployment.sell_token, 100 * WAD)
-    with boa.env.prank(deployment.owner), boa.reverts(
-        custom_err("NotSleepEpoch()")
-    ):
-        deployment.burner.resync_target(
-            deployment.target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
-        )
+    with boa.env.prank(deployment.owner), boa.reverts(custom_err("NotSleepEpoch()")):
+        deployment.burner.resync_target(deployment.target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION)
 
     lot = _lot_with_bounds(deployment, deployment.sell_token)
     _move_to_timestamp(lot[LOT_START])
     assert deployment.burner.available(deployment.sell_token) == staged
     # Full lot at the window open quotes the retuned start total exactly.
-    assert (
-        deployment.burner.getAmountNeeded(deployment.sell_token, staged)
-        == 2 * START_TOTAL
-    )
+    assert deployment.burner.getAmountNeeded(deployment.sell_token, staged) == 2 * START_TOTAL
     # Mid-window retunes are rejected outright.
-    with boa.env.prank(deployment.owner), boa.reverts(
-        custom_err("NotSleepEpoch()")
-    ):
-        deployment.burner.resync_target(
-            deployment.target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION
-        )
+    with boa.env.prank(deployment.owner), boa.reverts(custom_err("NotSleepEpoch()")):
+        deployment.burner.resync_target(deployment.target, START_TOTAL, FLOOR_TOTAL, STEP_DURATION)
 
     # A fill mid-window pays along the retuned curve.
     timestamp = boa.env.evm.vm.state.timestamp
@@ -2214,7 +2088,5 @@ def test_resync_same_target_retune_in_sleep_repins_curve(
     deployment.target._mint_for_testing(deployment.buyer, quote_live)
     with boa.env.prank(deployment.buyer):
         deployment.target.approve(deployment.burner, quote_live)
-        deployment.burner.take(
-            deployment.sell_token, MAX_UINT256, deployment.buyer, b""
-        )
+        deployment.burner.take(deployment.sell_token, MAX_UINT256, deployment.buyer, b"")
     assert deployment.target.balanceOf(deployment.fee_collector) == quote_live

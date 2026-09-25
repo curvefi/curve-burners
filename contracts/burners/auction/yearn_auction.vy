@@ -24,7 +24,8 @@
 from ethereum.ercs import IERC20
 
 from contracts.burners.auction import dutch_auction
-from contracts.interfaces import IDutchAuction, IYearnAuction
+from contracts.interfaces import IDutchAuction
+from contracts.interfaces import IYearnAuction
 
 uses: dutch_auction
 

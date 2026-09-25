@@ -44,8 +44,10 @@ GPV2_ORDER_TYPE_HASH: constant(bytes32) = keccak256(
     "uint256 buyAmount,uint32 validTo,bytes32 appData,uint256 feeAmount,string kind,"
     "bool partiallyFillable,string sellTokenBalance,string buyTokenBalance)"
 )  # 0xd5a25ba2e97094ad7d83dc28a6572da797d6b3e7fc6663bd93efb789fc17e489
-SELL_KIND: constant(bytes32) = keccak256("sell")  # 0xf3b277728b3fee749481eb3e0b3b48980dbbab78658fc419025cb16eee346775
-TOKEN_BALANCE: constant(bytes32) = keccak256("erc20")  # 0x5a28e9363bb942b639270062aa6bb295f434bcdfc42c97267bf003f272060dc9
+# keccak256("sell") = 0xf3b277728b3fee749481eb3e0b3b48980dbbab78658fc419025cb16eee346775
+SELL_KIND: constant(bytes32) = keccak256("sell")
+# keccak256("erc20") = 0x5a28e9363bb942b639270062aa6bb295f434bcdfc42c97267bf003f272060dc9
+TOKEN_BALANCE: constant(bytes32) = keccak256("erc20")
 
 
 @internal

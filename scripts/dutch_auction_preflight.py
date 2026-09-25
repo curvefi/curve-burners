@@ -54,9 +54,7 @@ WAD = 10**18
 # Creation code writes 42 to transient storage, reads it back, copies the word
 # with MCOPY, and returns it. Unsupported Cancun opcodes make the eth_call fail;
 # incorrect opcode semantics produce a result other than the sentinel.
-CANCUN_PROBE_INIT_CODE = bytes.fromhex(
-    "602a60005d60005c6000526020600060205e60206020f3"
-)
+CANCUN_PROBE_INIT_CODE = bytes.fromhex("602a60005d60005c6000526020600060205e60206020f3")
 CANCUN_PROBE_RESULT = (42).to_bytes(32, "big")
 
 
@@ -231,9 +229,7 @@ def _check_code(
     if expected_hash is None:
         report.warnings.append(f"no expected code hash configured for {name}")
     elif code_hash != expected_hash:
-        report.errors.append(
-            f"codeHash.{name}: expected {expected_hash}, got {code_hash}"
-        )
+        report.errors.append(f"codeHash.{name}: expected {expected_hash}, got {code_hash}")
 
 
 def validate_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -241,9 +237,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
     normalized["chainId"] = _integer(config["chainId"], "chainId")
     normalized["feeCollector"] = _address(config["feeCollector"], "feeCollector")
     normalized["target"] = _address(config["target"], "target")
-    normalized["targetDecimals"] = _integer(
-        config["targetDecimals"], "targetDecimals"
-    )
+    normalized["targetDecimals"] = _integer(config["targetDecimals"], "targetDecimals")
     if not isinstance(config["cowEnabled"], bool):
         raise ValueError("cowEnabled must be a boolean")
     normalized["cowEnabled"] = config["cowEnabled"]
@@ -279,12 +273,8 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(adapter, dict):
             raise ValueError(f"adapters[{index}] must be an object")
         entry = {
-            "adapter": _address(
-                adapter.get("adapter"), f"adapters[{index}].adapter"
-            ),
-            "executor": _address(
-                adapter.get("executor"), f"adapters[{index}].executor"
-            ),
+            "adapter": _address(adapter.get("adapter"), f"adapters[{index}].adapter"),
+            "executor": _address(adapter.get("executor"), f"adapters[{index}].executor"),
         }
         normalized_adapters.append(entry)
     if len({entry["adapter"] for entry in normalized_adapters}) != len(normalized_adapters):
@@ -301,9 +291,7 @@ def validate_config(config: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("cowAdapter must be listed in adapters")
     else:
         for name in cow_names:
-            normalized[name] = _address(
-                config.get(name, ZERO_ADDRESS), name, allow_zero=True
-            )
+            normalized[name] = _address(config.get(name, ZERO_ADDRESS), name, allow_zero=True)
     return normalized
 
 
@@ -406,9 +394,7 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
             steps = curve.decay_steps(auction_length, config["step_duration"])
             if steps == 0:
                 raise PreflightError("step_duration exceeds the EXCHANGE frame")
-            log_start, log_drop = curve.curve_logs(
-                config["start_total"], config["floor_total"]
-            )
+            log_start, log_drop = curve.curve_logs(config["start_total"], config["floor_total"])
             report.checks["curve.decaySteps"] = steps
             report.checks["curve.logStart"] = log_start
             report.checks["curve.logDrop"] = log_drop
@@ -531,18 +517,14 @@ def run_preflight(rpc: RpcClient, config: dict[str, Any]) -> Report:
         try:
             listed = [
                 to_checksum_address(address)
-                for address in _read(
-                    rpc, registry, "get_adapters()", ["address[]"]
-                )[0]
+                for address in _read(rpc, registry, "get_adapters()", ["address[]"])[0]
             ]
             report.checks["registry.adapters"] = listed
             registered = set(listed)
             configured = {adapter["adapter"] for adapter in config["adapters"]}
             for address in listed:
                 if address not in configured:
-                    report.warnings.append(
-                        f"registry lists adapter {address} not in configuration"
-                    )
+                    report.warnings.append(f"registry lists adapter {address} not in configuration")
         except (PreflightError, requests.RequestException) as exc:
             report.errors.append(f"registry.adapters: {exc}")
     for adapter in config["adapters"]:
@@ -631,9 +613,7 @@ def lifecycle_calldata(
 
     if burner or executor or tokens:
         if not burner or not executor or not tokens:
-            raise ValueError(
-                "--burner, --executor and at least one --token are required together"
-            )
+            raise ValueError("--burner, --executor and at least one --token are required together")
         burner = _address(burner, "burner")
         executor_address = _address(executor, "executor")
         normalized_tokens = [_address(token, "token") for token in tokens]

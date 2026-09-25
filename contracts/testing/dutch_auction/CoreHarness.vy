@@ -16,7 +16,8 @@
 from ethereum.ercs import IERC20
 
 from contracts.burners.adapters import adapters
-from contracts.burners.auction import dutch_auction, yearn_auction
+from contracts.burners.auction import dutch_auction
+from contracts.burners.auction import yearn_auction
 from contracts.utils import roles
 
 initializes: roles
@@ -56,7 +57,6 @@ exports: (
     adapters.sync_executor_approvals,
     adapters.isValidSignature,
 )
-
 
 WEEK: constant(uint256) = 7 * 24 * 60 * 60
 
@@ -149,5 +149,3 @@ def _lot_start(_token: IERC20, _staged_at: uint256) -> uint256:
 @view
 def _sellable(_token: address) -> bool:
     return not self.not_sellable[_token]
-
-

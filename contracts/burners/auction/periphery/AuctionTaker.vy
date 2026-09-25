@@ -35,7 +35,6 @@
                  re-entering the take entrypoint.
 """
 
-
 from ethereum.ercs import IERC20
 
 from contracts.interfaces import IDutchAuction
@@ -164,7 +163,6 @@ def auctionTakeCallback(
     for call: Call in calls:
         # A failed route step reverts the whole take; no return data is read.
         raw_call(call.target, call.data, revert_on_failure=True)
-
     # Exact-amount allowance for the auction's payment pull; the pull returns
     # it to zero in the same transaction. want() is reentrant, so it is
     # readable while the auction's lock is held.

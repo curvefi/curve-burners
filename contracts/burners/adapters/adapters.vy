@@ -19,11 +19,11 @@
      once.
 """
 
-
 from ethereum.ercs import IERC20
 
 from contracts.interfaces import IAdapterRegistry
-from contracts.utils import constants as c, token
+from contracts.utils import constants as c
+from contracts.utils import token
 
 
 interface Adapter:
@@ -93,9 +93,7 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[INF]) -> bytes4:
     """
     if len(_signature) < ADAPTER_PREFIX_LEN:
         return INVALID_SIGNATURE
-    adapter: address = convert(
-        convert(slice(_signature, 0, ADAPTER_PREFIX_LEN), bytes20), address
-    )
+    adapter: address = convert(convert(slice(_signature, 0, ADAPTER_PREFIX_LEN), bytes20), address)
     if not (staticcall self.registry.get_adapter(adapter)).active:
         return INVALID_SIGNATURE
 
@@ -103,4 +101,3 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[INF]) -> bytes4:
     if len(_signature) > ADAPTER_PREFIX_LEN:
         payload = slice(_signature, ADAPTER_PREFIX_LEN, len(_signature) - ADAPTER_PREFIX_LEN)
     return staticcall Adapter(adapter).isValidSignature(_hash, payload)
-

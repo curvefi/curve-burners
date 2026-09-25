@@ -9,9 +9,8 @@ import boa
 import pytest
 from dotenv import load_dotenv
 
-from ..conftest import ZERO_ADDRESS, Epoch
-from .conftest import custom_err
-from .test_dutch_auction_v2 import (
+from tests.burners.conftest import custom_err
+from tests.burners.test_dutch_auction_v2 import (
     APP_DATA,
     BURNER_INTERFACE,
     ERC20_BALANCE,
@@ -41,7 +40,7 @@ from .test_dutch_auction_v2 import (
     _move_to_epoch,
     _move_to_timestamp,
 )
-
+from tests.conftest import ZERO_ADDRESS, Epoch
 
 # Official deterministic deployments shared by Gnosis Chain.
 GPV2_SETTLEMENT = "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"
@@ -131,9 +130,7 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
             assert boa.env.get_code(address), f"Missing deployed code at {address}"
 
         settlement = _abi_contract(SETTLEMENT_ABI, "GPv2Settlement", GPV2_SETTLEMENT)
-        vault_relayer = _abi_contract(
-            VAULT_RELAYER_ABI, "GPv2VaultRelayer", GPV2_VAULT_RELAYER
-        )
+        vault_relayer = _abi_contract(VAULT_RELAYER_ABI, "GPv2VaultRelayer", GPV2_VAULT_RELAYER)
 
         owner = boa.env.generate_address("owner")
         emergency_owner = boa.env.generate_address("emergency_owner")
@@ -144,13 +141,11 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
         target = erc20.deploy("Fork Target", "TARGET", 18)
         sell_token = erc20.deploy("Fork Sell Token", "SELL", 18)
         weth = boa.load("contracts/testing/WETH.vy")
-        fee_collector = boa.load(
-            "contracts/FeeCollector.vy", target, weth, owner, emergency_owner
+        fee_collector = boa.load("contracts/FeeCollector.vy", target, weth, owner, emergency_owner)
+        registry = boa.load("contracts/burners/adapters/AdapterRegistry.vy", fee_collector.address)
+        cow_adapter = boa.load(
+            "contracts/burners/adapters/cow/CowAdapter.vy", GPV2_SETTLEMENT, APP_DATA
         )
-        registry = boa.load(
-            "contracts/burners/adapters/AdapterRegistry.vy", fee_collector.address
-        )
-        cow_adapter = boa.load("contracts/burners/adapters/cow/CowAdapter.vy", GPV2_SETTLEMENT, APP_DATA)
         burner = boa.load(
             "contracts/burners/DutchAuctionBurner.vy",
             fee_collector,
@@ -218,7 +213,9 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
             assert burner.isValidSignature(order_digest, signature) == ERC1271_MAGIC_VALUE
             # Anyone may publish, nothing may bypass the prefix route: the
             # unprefixed encoding selects no adapter.
-            assert burner.isValidSignature(order_digest, signature[20:]) == bytes.fromhex("ffffffff")
+            assert burner.isValidSignature(order_digest, signature[20:]) == bytes.fromhex(
+                "ffffffff"
+            )
 
         # The real relayer enforces Settlement-only access and spends the burner's allowance.
         partial_amount = order[ORDER_SELL_AMOUNT] // 3
@@ -234,10 +231,7 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
         assert sell_token.balanceOf(simulated_solver) == partial_amount
         assert sell_token.balanceOf(GPV2_SETTLEMENT) == 0
         assert sell_token.balanceOf(burner) == lot[LOT_INITIAL_AMOUNT] - partial_amount
-        assert (
-            sell_token.allowance(burner, GPV2_VAULT_RELAYER)
-            == MAX_UINT256 - partial_amount
-        )
+        assert sell_token.allowance(burner, GPV2_VAULT_RELAYER) == MAX_UINT256 - partial_amount
         assert burner.available(sell_token) == lot[LOT_INITIAL_AMOUNT] - partial_amount
 
         # The allowance-guarded sync only re-grants from zero: the decremented
@@ -245,10 +239,7 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
         # deliberately left untouched — it is still effectively unlimited.
         with boa.env.prank(keeper):
             burner.sync_executor_approvals(GPV2_VAULT_RELAYER, [sell_token.address])
-        assert (
-            sell_token.allowance(burner, GPV2_VAULT_RELAYER)
-            == MAX_UINT256 - partial_amount
-        )
+        assert sell_token.allowance(burner, GPV2_VAULT_RELAYER) == MAX_UINT256 - partial_amount
 
         payment = burner.getAmountNeeded(sell_token, partial_amount)
         target._mint_for_testing(simulated_solver, payment)

@@ -13,7 +13,6 @@ from eth_utils import to_checksum_address
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-
 DOMAIN_SEPARATOR = keccak(b"test GPv2 settlement domain")
 ORDER_TYPE_HASH = bytes.fromhex("d5a25ba2e97094ad7d83dc28a6572da797d6b3e7fc6663bd93efb789fc17e489")
 SELL_KIND = bytes.fromhex("f3b277728b3fee749481eb3e0b3b48980dbbab78658fc419025cb16eee346775")

@@ -4,8 +4,7 @@ from eth.exceptions import Revert
 from eth_abi import encode
 from eth_hash.auto import keccak
 
-from .conftest import custom_err
-
+from tests.burners.conftest import custom_err
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 WAD = 10**18
@@ -143,8 +142,7 @@ def make_payload(auction, sell_token):
             deadline = _timestamp() + 3600
         return encode(
             INTENT_ABI_TYPES,
-            [chain_id, auction_address, sell_token_address, lot_start,
-             max_sell_amount, deadline],
+            [chain_id, auction_address, sell_token_address, lot_start, max_sell_amount, deadline],
         )
 
     return _make_payload
@@ -152,7 +150,7 @@ def make_payload(auction, sell_token):
 
 def _with_receiver(call_data: bytes, offset: int, receiver: str) -> bytes:
     word = int(receiver, 16).to_bytes(32, "big")
-    return call_data[:offset] + word + call_data[offset + 32:]
+    return call_data[:offset] + word + call_data[offset + 32 :]
 
 
 def _take_calldata(sell_token_address: str, max_amount: int, receiver: str, data: bytes) -> bytes:
@@ -165,8 +163,9 @@ def _take_calldata(sell_token_address: str, max_amount: int, receiver: str, data
 # Resolution against live state
 
 
-def test_resolve_matches_take_quote_in_same_block(auction, resolver, stage, make_payload,
-                                                  sell_token, want, proceeds_receiver):
+def test_resolve_matches_take_quote_in_same_block(
+    auction, resolver, stage, make_payload, sell_token, want, proceeds_receiver
+):
     staged = stage(sell_token)
     resolved = resolver.resolve(make_payload())
 
@@ -299,9 +298,7 @@ def test_unmodified_call_step_template_cannot_execute(
     resolved = resolver.resolve(make_payload())
     # take() rejects the zero receiver placeholder left in the template.
     with pytest.raises(Revert) as error:
-        boa.env.raw_call(
-            auction.address, sender=solver, data=bytes(resolved.call_step.call_data)
-        )
+        boa.env.raw_call(auction.address, sender=solver, data=bytes(resolved.call_step.call_data))
     assert error.value.args[0] == keccak(b"ZeroReceiver()")[:4]
 
 
@@ -359,8 +356,9 @@ def test_wrong_lot_intent_reverts(auction, resolver, stage, make_payload, sell_t
         resolver.resolve(make_payload(lot_start=_lot_window(auction, sell_token)[0] - 1))
 
 
-def test_stale_lot_reverts_after_week_rolls_over(auction, resolver, stage, make_payload,
-                                                 sell_token):
+def test_stale_lot_reverts_after_week_rolls_over(
+    auction, resolver, stage, make_payload, sell_token
+):
     stage(sell_token)
     signed_start = _lot_window(auction, sell_token)[0]
     payload = make_payload(lot_start=signed_start, deadline=_timestamp() + 2 * WEEK)
@@ -412,7 +410,10 @@ def _lot_past_its_end(env: dict) -> dict:
 
 def _fully_taken_lot(env: dict) -> dict:
     auction, sell_token, want, solver = (
-        env["auction"], env["sell_token"], env["want"], env["solver"]
+        env["auction"],
+        env["sell_token"],
+        env["want"],
+        env["solver"],
     )
     staged = env["stage"](sell_token)
     payment = auction.getAmountNeeded(sell_token, staged)
@@ -492,8 +493,7 @@ def test_resolver_is_view_and_stateless(resolver, stage, make_payload, sell_toke
     assert first == second
 
 
-def test_newly_staged_token_is_resolvable_without_allowlist(auction, resolver, stage,
-                                                            make_payload):
+def test_newly_staged_token_is_resolvable_without_allowlist(auction, resolver, stage, make_payload):
     # Intent discovery needs no DAO allowlist and no resolver registration:
     # a token staged a moment ago resolves immediately.
     fresh_token = boa.load("contracts/testing/ERC20Mock.vy", "Fresh Fee Token", "FRESH", 18)

@@ -3,8 +3,7 @@ import pytest
 from eth_abi import encode
 from eth_hash.auto import keccak
 
-from .conftest import custom_err
-
+from tests.burners.conftest import custom_err
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 WAD = 10**18
@@ -109,8 +108,9 @@ def stage(auction):
     return _stage
 
 
-def test_route_fills_and_forwards_exact_payment(auction, taker, stage, sell_token, want,
-                                                solver, profit_receiver, proceeds_receiver):
+def test_route_fills_and_forwards_exact_payment(
+    auction, taker, stage, sell_token, want, solver, profit_receiver, proceeds_receiver
+):
     stage(sell_token)
     amount = STAGED_AMOUNT // 4
     payment = auction.getAmountNeeded(sell_token.address, amount)
@@ -135,8 +135,9 @@ def test_route_fills_and_forwards_exact_payment(auction, taker, stage, sell_toke
     assert want.allowance(taker.address, auction.address) == 0
 
 
-def test_want_surplus_is_profit_and_min_profit_gates(auction, taker, stage, sell_token, want,
-                                                     solver, profit_receiver):
+def test_want_surplus_is_profit_and_min_profit_gates(
+    auction, taker, stage, sell_token, want, solver, profit_receiver
+):
     stage(sell_token)
     amount = STAGED_AMOUNT // 4
     payment = auction.getAmountNeeded(sell_token.address, amount)
@@ -166,8 +167,9 @@ def test_want_surplus_is_profit_and_min_profit_gates(auction, taker, stage, sell
     assert sell_token.balanceOf(profit_receiver) == amount
 
 
-def test_multi_step_route_runs_in_order(auction, taker, stage, sell_token, want, solver,
-                                        profit_receiver):
+def test_multi_step_route_runs_in_order(
+    auction, taker, stage, sell_token, want, solver, profit_receiver
+):
     # Two mints summing to the payment prove every route step executes.
     stage(sell_token)
     amount = STAGED_AMOUNT // 10
@@ -188,8 +190,9 @@ def test_multi_step_route_runs_in_order(auction, taker, stage, sell_token, want,
     assert sell_token.balanceOf(profit_receiver) == amount
 
 
-def test_failing_route_step_reverts_whole_take(auction, taker, stage, sell_token, want,
-                                               solver, profit_receiver, proceeds_receiver):
+def test_failing_route_step_reverts_whole_take(
+    auction, taker, stage, sell_token, want, solver, profit_receiver, proceeds_receiver
+):
     stage(sell_token)
     amount = STAGED_AMOUNT // 4
     # transferFrom without allowance reverts inside the route; the raw_call
@@ -205,15 +208,20 @@ def test_failing_route_step_reverts_whole_take(auction, taker, stage, sell_token
     with boa.env.prank(solver):
         with boa.reverts():
             taker.take_with_route(
-                auction.address, sell_token.address, amount, 0, profit_receiver,
+                auction.address,
+                sell_token.address,
+                amount,
+                0,
+                profit_receiver,
                 [failing_call],
             )
     assert sell_token.balanceOf(profit_receiver) == 0
     assert auction.available(sell_token.address) == STAGED_AMOUNT
 
 
-def test_underfunded_route_reverts(auction, taker, stage, sell_token, want, solver,
-                                   profit_receiver):
+def test_underfunded_route_reverts(
+    auction, taker, stage, sell_token, want, solver, profit_receiver
+):
     stage(sell_token)
     amount = STAGED_AMOUNT // 4
     payment = auction.getAmountNeeded(sell_token.address, amount)
@@ -244,8 +252,6 @@ def test_callback_rejects_direct_calls(taker, auction, solver):
 def test_input_validation(taker, solver, profit_receiver, auction, sell_token):
     with boa.env.prank(solver):
         with boa.reverts(custom_err("ZeroAuction()")):
-            taker.take_with_route(ZERO_ADDRESS, sell_token.address, WAD, 0,
-                                  profit_receiver, [])
+            taker.take_with_route(ZERO_ADDRESS, sell_token.address, WAD, 0, profit_receiver, [])
         with boa.reverts(custom_err("ZeroReceiver()")):
-            taker.take_with_route(auction.address, sell_token.address, WAD, 0,
-                                  ZERO_ADDRESS, [])
+            taker.take_with_route(auction.address, sell_token.address, WAD, 0, ZERO_ADDRESS, [])

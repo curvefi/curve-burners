@@ -108,9 +108,7 @@ def total_price(
         return start_total
 
     log_offset: uint256 = log_drop * step // decay_steps
-    price: uint256 = convert(
-        wad_math._wad_exp(log_start - convert(log_offset, int256)), uint256
-    )
+    price: uint256 = convert(wad_math._wad_exp(log_start - convert(log_offset, int256)), uint256)
     return min(start_total, max(floor_total, price))
 
 

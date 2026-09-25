@@ -16,8 +16,7 @@ import pytest
 from eth_abi import encode
 from eth_utils import keccak
 
-from .conftest import custom_err
-
+from tests.burners.conftest import custom_err
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 WAD = 10**18
@@ -42,8 +41,7 @@ ERC1271_MAGIC_VALUE = bytes.fromhex("1626ba7e")
 ERC1271_INVALID = bytes.fromhex("ffffffff")
 
 ORDER_TYPE = (
-    "(address,address,address,uint256,uint256,uint32,bytes32,uint256,"
-    "bytes32,bool,bytes32,bytes32)"
+    "(address,address,address,uint256,uint256,uint32,bytes32,uint256,bytes32,bool,bytes32,bytes32)"
 )
 
 
@@ -90,9 +88,7 @@ def sell_token(erc20_deployer):
 
 @pytest.fixture(scope="module")
 def role_source(owner, emergency_owner):
-    return boa.load(
-        "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner
-    )
+    return boa.load("contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner)
 
 
 @pytest.fixture(scope="module")
@@ -112,9 +108,7 @@ def adapter_deployer():
 
 @pytest.fixture
 def registry(role_source):
-    return boa.load(
-        "contracts/burners/adapters/AdapterRegistry.vy", role_source.address
-    )
+    return boa.load("contracts/burners/adapters/AdapterRegistry.vy", role_source.address)
 
 
 @pytest.fixture
@@ -222,7 +216,9 @@ def _signature(adapter: Any, order: tuple) -> bytes:
     return _prefix(adapter) + _bare(order)
 
 
-def _validate(harness, adapter, order: tuple, signature: bytes | None = None, domain=DOMAIN_SEPARATOR):
+def _validate(
+    harness, adapter, order: tuple, signature: bytes | None = None, domain=DOMAIN_SEPARATOR
+):
     signature = _signature(adapter, order) if signature is None else signature
     return harness.isValidSignature(_order_digest(order, domain), signature)
 
@@ -281,8 +277,20 @@ def test_non_canonical_payload_length_rejected(harness, adapter, make_order):
 
 
 def test_zero_filled_order_fails_checks_not_decode(harness, adapter, lot):
-    zero_order = (ZERO_ADDRESS, ZERO_ADDRESS, ZERO_ADDRESS, 0, 0, 0, bytes(32), 0,
-                  bytes(32), False, bytes(32), bytes(32))
+    zero_order = (
+        ZERO_ADDRESS,
+        ZERO_ADDRESS,
+        ZERO_ADDRESS,
+        0,
+        0,
+        0,
+        bytes(32),
+        0,
+        bytes(32),
+        False,
+        bytes(32),
+        bytes(32),
+    )
     with boa.reverts(custom_err("OrderNotValid(string)", "BadAppData")):
         _validate(harness, adapter, zero_order)
 
@@ -397,9 +405,7 @@ def auctionTakeCallback(
 """
 
 
-def test_check_order_and_erc1271_are_locked_during_a_take_callback(
-    harness, sell_token, want, lot
-):
+def test_check_order_and_erc1271_are_locked_during_a_take_callback(harness, sell_token, want, lot):
     taker = boa.loads(LOCK_PROBE_TAKER, name="LockProbeTaker")
     amount = LOT_AMOUNT // 2
     want._mint_for_testing(taker.address, harness.getAmountNeeded(sell_token.address, amount))
@@ -436,7 +442,10 @@ def test_order_for_builds_the_publishable_pair(
     assert bytes(order[11]) == ERC20_BALANCE
     # The signature is the documented template and validates end-to-end.
     assert bytes(signature) == _signature(adapter, order)
-    assert harness.isValidSignature(_order_digest(order, DOMAIN_SEPARATOR), signature) == ERC1271_MAGIC_VALUE
+    assert (
+        harness.isValidSignature(_order_digest(order, DOMAIN_SEPARATOR), signature)
+        == ERC1271_MAGIC_VALUE
+    )
 
     # A partial amount is priced proportionally and validates as well.
     partial, partial_signature = adapter.order_for(
@@ -444,9 +453,10 @@ def test_order_for_builds_the_publishable_pair(
     )
     assert partial[3] == LOT_AMOUNT // 4
     assert partial[4] == harness.getAmountNeeded(sell_token.address, LOT_AMOUNT // 4)
-    assert harness.isValidSignature(
-        _order_digest(tuple(partial), DOMAIN_SEPARATOR), partial_signature
-    ) == ERC1271_MAGIC_VALUE
+    assert (
+        harness.isValidSignature(_order_digest(tuple(partial), DOMAIN_SEPARATOR), partial_signature)
+        == ERC1271_MAGIC_VALUE
+    )
 
 
 def test_order_for_stays_valid_as_the_curve_decays(harness, adapter, sell_token, lot):
@@ -459,7 +469,10 @@ def test_order_for_stays_valid_as_the_curve_decays(harness, adapter, sell_token,
     order, signature = adapter.order_for(harness.address, sell_token.address)
     boa.env.time_travel(seconds=10 * STEP_DURATION)
     assert harness.getAmountNeeded(sell_token.address, LOT_AMOUNT) < order[4]
-    assert harness.isValidSignature(_order_digest(tuple(order), DOMAIN_SEPARATOR), signature) == ERC1271_MAGIC_VALUE
+    assert (
+        harness.isValidSignature(_order_digest(tuple(order), DOMAIN_SEPARATOR), signature)
+        == ERC1271_MAGIC_VALUE
+    )
 
 
 def test_order_for_rejects_empty_lots(harness, adapter, sell_token, erc20_deployer):

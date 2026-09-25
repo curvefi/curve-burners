@@ -14,8 +14,7 @@ from typing import Any
 import boa
 import pytest
 
-from .conftest import custom_err
-
+from tests.burners.conftest import custom_err
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 WAD = 10**18
@@ -82,9 +81,7 @@ def sell_token(erc20_deployer):
 
 @pytest.fixture(scope="module")
 def role_source(owner, emergency_owner):
-    return boa.load(
-        "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner
-    )
+    return boa.load("contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner)
 
 
 @pytest.fixture(scope="module")
@@ -94,9 +91,7 @@ def adapter_deployer():
 
 @pytest.fixture
 def registry(role_source):
-    return boa.load(
-        "contracts/burners/adapters/AdapterRegistry.vy", role_source.address
-    )
+    return boa.load("contracts/burners/adapters/AdapterRegistry.vy", role_source.address)
 
 
 def _deploy_harness(want, proceeds_receiver, registry_address, role_source):
@@ -147,10 +142,7 @@ def _prefix(adapter: Any) -> bytes:
 
 
 def test_prefixed_signature_routes_to_active_adapter(harness, adapter):
-    assert (
-        harness.isValidSignature(DIGEST, _prefix(adapter) + b"payload")
-        == ERC1271_MAGIC_VALUE
-    )
+    assert harness.isValidSignature(DIGEST, _prefix(adapter) + b"payload") == ERC1271_MAGIC_VALUE
 
 
 def test_prefix_only_signature_forwards_empty_payload(harness, adapter):
@@ -159,9 +151,7 @@ def test_prefix_only_signature_forwards_empty_payload(harness, adapter):
 
 def test_adapter_answer_is_passed_through_verbatim(harness, adapter):
     adapter.set_response(bytes.fromhex("deadbeef"))
-    assert harness.isValidSignature(DIGEST, _prefix(adapter)) == bytes.fromhex(
-        "deadbeef"
-    )
+    assert harness.isValidSignature(DIGEST, _prefix(adapter)) == bytes.fromhex("deadbeef")
 
 
 def test_adapter_revert_bubbles_up(harness, adapter):
@@ -191,9 +181,7 @@ def test_short_and_empty_signatures_are_invalid(harness):
     assert harness.isValidSignature(DIGEST, b"\x00" * 19) == ERC1271_INVALID
 
 
-def test_inactive_registry_entry_is_invalid(
-    harness, registry, owner, adapter_deployer, executor
-):
+def test_inactive_registry_entry_is_invalid(harness, registry, owner, adapter_deployer, executor):
     # set_adapter alone never routes: activation is the separate owner step.
     pending = adapter_deployer.deploy()
     with boa.env.prank(owner):
@@ -257,7 +245,9 @@ def test_oversized_signature_routes_intact(
     # surfaces as its revert bubbling through the router.
     with boa.reverts():
         harness.isValidSignature(DIGEST, _prefix(adapter) + payload)
-    assert harness.isValidSignature(DIGEST, _prefix(adapter) + b"\x5a" * 4096) == ERC1271_MAGIC_VALUE
+    assert (
+        harness.isValidSignature(DIGEST, _prefix(adapter) + b"\x5a" * 4096) == ERC1271_MAGIC_VALUE
+    )
 
 
 # check_order — the shared economic order check
@@ -377,9 +367,7 @@ def test_check_order_underpriced_min_buy(harness, sell_token, lot):
     assert _check(harness, sell_token, min_buy_amount=quote + 1) is True
 
 
-def test_check_order_callable_by_external_adapter_contract(
-    harness, sell_token, lot, adapter
-):
+def test_check_order_callable_by_external_adapter_contract(harness, sell_token, lot, adapter):
     quote = harness.getAmountNeeded(sell_token.address, LOT_AMOUNT)
     assert (
         adapter.check_order_via_auction(

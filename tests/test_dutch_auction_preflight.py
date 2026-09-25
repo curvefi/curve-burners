@@ -8,7 +8,6 @@ from eth_utils import keccak
 
 from scripts import dutch_auction_preflight as preflight
 
-
 CHAIN_ID = 100
 FEE_COLLECTOR = "0x0000000000000000000000000000000000000001"
 TARGET = "0x0000000000000000000000000000000000000002"
@@ -75,11 +74,7 @@ class FakeRpc:
         if selector == preflight._selector("epoch_time_frame(uint256,uint256)"):
             return encode(["uint256", "uint256"], [0, 2])
         if selector == preflight._selector("domainSeparator()"):
-            value = (
-                self.settlement_domain_separator
-                if address == SETTLEMENT
-                else DOMAIN_SEPARATOR
-            )
+            value = self.settlement_domain_separator if address == SETTLEMENT else DOMAIN_SEPARATOR
             return encode(["bytes32"], [value])
         if selector == preflight._selector("vaultRelayer()"):
             return encode(["address"], [VAULT_RELAYER])
@@ -166,9 +161,7 @@ def test_full_preflight_preserves_existing_checks_and_adds_cancun_probe():
     assert rpc.probe_code == preflight.CANCUN_PROBE_INIT_CODE
     assert report.checks["burner.interface.erc1271"] is True
     assert report.checks["cowAdapter.settlement"] == SETTLEMENT
-    assert report.checks["cowAdapter.vaultRelayer"] == preflight.to_checksum_address(
-        VAULT_RELAYER
-    )
+    assert report.checks["cowAdapter.vaultRelayer"] == preflight.to_checksum_address(VAULT_RELAYER)
     assert report.checks["cowAdapter.domainSeparator"] is True
     assert report.checks["burner.registry"] == REGISTRY
     assert report.checks["burner.want"] == TARGET
@@ -176,9 +169,7 @@ def test_full_preflight_preserves_existing_checks_and_adds_cancun_probe():
     cow_label = f"adapter.{preflight.to_checksum_address(COW_ADAPTER)}"
     assert f"{cow_label}.enabled" not in report.checks
     assert report.checks[f"{cow_label}.active"] is True
-    assert report.checks[f"{cow_label}.executor"] == preflight.to_checksum_address(
-        VAULT_RELAYER
-    )
+    assert report.checks[f"{cow_label}.executor"] == preflight.to_checksum_address(VAULT_RELAYER)
     assert report.checks[f"{cow_label}.registered"] is True
     assert report.checks[f"{cow_label}.executorActive"] is True
     assert report.checks["registry.adapters"] == [
@@ -187,9 +178,7 @@ def test_full_preflight_preserves_existing_checks_and_adds_cancun_probe():
     ]
     adapter_label = f"adapter.{preflight.to_checksum_address(ADAPTER)}"
     assert report.checks[f"{adapter_label}.active"] is True
-    assert report.checks[f"{adapter_label}.executor"] == preflight.to_checksum_address(
-        EXECUTOR
-    )
+    assert report.checks[f"{adapter_label}.executor"] == preflight.to_checksum_address(EXECUTOR)
     assert f"{adapter_label}.pinnedCodeHash" not in report.checks
     assert report.checks["codeHash.adapters[1].adapter"] == "0x" + FAKE_CODE_HASH.hex()
     assert report.checks[f"{adapter_label}.registered"] is True
@@ -273,9 +262,7 @@ def test_cow_domain_separator_mismatch_is_an_error():
         _full_config(),
     )
 
-    assert any(
-        error.startswith("cowAdapter.domainSeparator:") for error in report.errors
-    )
+    assert any(error.startswith("cowAdapter.domainSeparator:") for error in report.errors)
 
 
 def test_cow_adapter_must_be_a_registered_adapter():
@@ -299,18 +286,13 @@ def test_native_only_cancun_probe_failure_is_an_error_without_cow_reads():
     report = preflight.run_preflight(rpc, config)
 
     assert report.checks["evm.cancunOpcodes"] is False
-    assert any(
-        "TSTORE/TLOAD/MCOPY creation probe failed" in error
-        for error in report.errors
-    )
+    assert any("TSTORE/TLOAD/MCOPY creation probe failed" in error for error in report.errors)
     assert SETTLEMENT not in rpc.read_addresses
     assert COW_ADAPTER not in rpc.read_addresses
 
 
 def test_lifecycle_calldata_covers_adapters_and_executor_sync():
-    calls = preflight.lifecycle_calldata(
-        _full_config(), BURNER, VAULT_RELAYER, [SELL_TOKEN]
-    )
+    calls = preflight.lifecycle_calldata(_full_config(), BURNER, VAULT_RELAYER, [SELL_TOKEN])
 
     # The CoW adapter is set, activated and disabled in the registry like any
     # other adapter (set before activate); only the allowance sync targets the
@@ -356,9 +338,7 @@ def test_lifecycle_calldata_covers_adapters_and_executor_sync():
     assert calls["permissionless"][0]["data"] == preflight.encode_call(
         "sync_executor_approvals(address,address[])",
         ["address", "address[]"],
-        [preflight.to_checksum_address(VAULT_RELAYER), [
-            preflight.to_checksum_address(SELL_TOKEN)
-        ]],
+        [preflight.to_checksum_address(VAULT_RELAYER), [preflight.to_checksum_address(SELL_TOKEN)]],
     )
 
 

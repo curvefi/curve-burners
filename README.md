@@ -29,6 +29,21 @@ Run:
 pytest tests
 ```
 
+Code style (the `lint` workflow runs the same checks; `pre-commit install` runs them on commit):
+```bash
+pip install ruff==0.16.9 mamushi==0.1.2
+ruff check tests scripts && ruff format --check tests scripts
+# every Vyper source except the contracts pinned to 0.3.x/0.4.x (deployed as-is)
+mamushi --check --line-length 100 $(grep -rL -E '^#\s*(pragma version|@version)\s*[=^]*0\.[34]\.' contracts --include='*.vy' --include='*.vyi')
+```
+
+Gas report (median execution gas per external call of the Dutch auction contracts; the
+`gas` workflow posts the head-vs-base comparison on every pull request):
+```bash
+python scripts/gas_report.py --output gas-report.json   # measure (defaults to the Dutch auction tests)
+python scripts/compare_gas_report.py --head gas-report.json --base other.json --output gas-report.md
+```
+
 ## CowSwap
 In order to swap accumulated coins into crvUSD, one should post orders to CowSwap backend.
 This can be done by running [WatchTower](https://github.com/cowprotocol/watch-tower).

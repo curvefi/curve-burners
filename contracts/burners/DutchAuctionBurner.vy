@@ -42,13 +42,18 @@
                  blacklist behavior are best-effort integrations.
 """
 
-
 from ethereum.ercs import IERC20
 
-from contracts.interfaces import IBurner, IDutchAuction, IFeeCollector, IYearnAuction
-from contracts.utils import constants as c, recovery, roles
+from contracts.interfaces import IBurner
+from contracts.interfaces import IDutchAuction
+from contracts.interfaces import IFeeCollector
+from contracts.interfaces import IYearnAuction
+from contracts.utils import constants as c
+from contracts.utils import recovery
+from contracts.utils import roles
 from contracts.burners.adapters import adapters
-from contracts.burners.auction import dutch_auction, yearn_auction
+from contracts.burners.auction import dutch_auction
+from contracts.burners.auction import yearn_auction
 
 implements: IBurner
 implements: IDutchAuction
@@ -181,9 +186,7 @@ def _target_is_current() -> bool:
 @internal
 @view
 def _exchange_frame(_timestamp: uint256) -> (uint256, uint256):
-    return staticcall self.fee_collector.epoch_time_frame(
-        IFeeCollector.Epoch.EXCHANGE, _timestamp
-    )
+    return staticcall self.fee_collector.epoch_time_frame(IFeeCollector.Epoch.EXCHANGE, _timestamp)
 
 
 # Weekly staging
@@ -205,9 +208,7 @@ def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
     assert msg.sender == self.fee_collector.address, OnlyFeeCollector()
     assert self._target_is_current(), TargetChanged()
 
-    fee: uint256 = staticcall self.fee_collector.fee(
-        IFeeCollector.Epoch.COLLECT, block.timestamp
-    )
+    fee: uint256 = staticcall self.fee_collector.fee(IFeeCollector.Epoch.COLLECT, block.timestamp)
     fee_payouts: DynArray[IFeeCollector.Transfer, c.MAX_COINS] = []
     custody_transfers: DynArray[IFeeCollector.Transfer, c.MAX_COINS] = []
 
@@ -253,10 +254,7 @@ def _lot_start(_token: IERC20, _staged_at: uint256) -> uint256:
 def _sellable(_token: address) -> bool:
     # The core already excludes the want token; this adds the FeeCollector
     # target-migration and kill-mask checks.
-    return self._target_is_current() and staticcall self.fee_collector.can_exchange(
-        [_token]
-    )
-
+    return self._target_is_current() and staticcall self.fee_collector.can_exchange([_token])
 
 
 # Economics resync
@@ -303,9 +301,7 @@ def resync_target(
     sleep_start, sleep_end = staticcall self.fee_collector.epoch_time_frame(
         IFeeCollector.Epoch.SLEEP, block.timestamp
     )
-    assert sleep_start <= block.timestamp and block.timestamp < sleep_end, (
-        NotSleepEpoch()
-    )
+    assert sleep_start <= block.timestamp and block.timestamp < sleep_end, NotSleepEpoch()
 
     dutch_auction._set_economics(
         IERC20(new_target),

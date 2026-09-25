@@ -17,9 +17,7 @@ from hypothesis import example, given, settings
 from hypothesis import strategies as st
 
 from scripts import dutch_auction_curve as curve
-
-from .conftest import custom_err
-
+from tests.burners.conftest import custom_err
 
 WAD = 10**18
 INT256_MAX = 2**255 - 1
@@ -274,7 +272,9 @@ def test_on_chain_price_matches_mirror_and_reference(
     assert price == c.mirror(elapsed)
     assert floor_total <= price <= start_total
     exact = c.exact(elapsed)
-    assert abs(Decimal(price) - exact) <= max(PRICE_ABSOLUTE_BOUND_WEI, exact * PRICE_RELATIVE_BOUND)
+    assert abs(Decimal(price) - exact) <= max(
+        PRICE_ABSOLUTE_BOUND_WEI, exact * PRICE_RELATIVE_BOUND
+    )
 
 
 def test_equal_time_gives_equal_percentage_drop(auction_math):

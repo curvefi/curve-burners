@@ -10,8 +10,7 @@ otherwise. Staging never touches allowances.
 import boa
 import pytest
 
-from .conftest import custom_err
-
+from tests.burners.conftest import custom_err
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 MAX_UINT256 = 2**256 - 1
@@ -23,7 +22,6 @@ STEP_DURATION = 60
 # Floor reached by the last active second of a day: 1439 sixty-second steps.
 AUCTION_LENGTH = 24 * 60 * 60
 LOT_AMOUNT = 250 * WAD
-
 
 
 @pytest.fixture(autouse=True)
@@ -84,16 +82,12 @@ def token_b(erc20_deployer):
 
 @pytest.fixture(scope="module")
 def problem_token():
-    return boa.load(
-        "contracts/testing/dutch_auction/ProblemERC20.vy", "Tether USD", "USDT", 6
-    )
+    return boa.load("contracts/testing/dutch_auction/ProblemERC20.vy", "Tether USD", "USDT", 6)
 
 
 @pytest.fixture(scope="module")
 def role_source(owner, emergency_owner):
-    return boa.load(
-        "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner
-    )
+    return boa.load("contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner)
 
 
 @pytest.fixture(scope="module")
@@ -103,9 +97,7 @@ def adapter_deployer():
 
 @pytest.fixture
 def registry(role_source):
-    return boa.load(
-        "contracts/burners/adapters/AdapterRegistry.vy", role_source.address
-    )
+    return boa.load("contracts/burners/adapters/AdapterRegistry.vy", role_source.address)
 
 
 @pytest.fixture
@@ -304,9 +296,7 @@ def test_sync_revokes_after_emergency_release(
     assert token_a.allowance(harness, relayer) == 0
 
 
-def test_sync_clears_residual_allowance_of_unreferenced_executor(
-    harness, keeper, problem_token
-):
+def test_sync_clears_residual_allowance_of_unreferenced_executor(harness, keeper, problem_token):
     stranger = boa.env.generate_address("stranger_executor")
     problem_token.mint(harness.address, LOT_AMOUNT)
     # Residual allowance without any active adapter referencing the executor.

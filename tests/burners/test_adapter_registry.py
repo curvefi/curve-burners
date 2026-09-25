@@ -3,8 +3,7 @@ from typing import Any
 import boa
 import pytest
 
-from .conftest import custom_err
-
+from tests.burners.conftest import custom_err
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 
@@ -44,9 +43,7 @@ def executor():
 
 @pytest.fixture(scope="module")
 def role_source(owner, emergency_owner):
-    return boa.load(
-        "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner
-    )
+    return boa.load("contracts/testing/dutch_auction/RoleSourceMock.vy", owner, emergency_owner)
 
 
 @pytest.fixture(scope="module")
@@ -61,9 +58,7 @@ def adapter(adapter_deployer):
 
 @pytest.fixture
 def registry(role_source):
-    return boa.load(
-        "contracts/burners/adapters/AdapterRegistry.vy", role_source.address
-    )
+    return boa.load("contracts/burners/adapters/AdapterRegistry.vy", role_source.address)
 
 
 def _register(registry: Any, owner: str, adapter: Any, executor: str) -> None:
@@ -89,12 +84,8 @@ def test_constructor_rejects_source_with_zero_owner(emergency_owner):
 
 
 def test_constructor_allows_zero_emergency_owner_sentinel(owner):
-    source = boa.load(
-        "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, ZERO_ADDRESS
-    )
-    registry = boa.load(
-        "contracts/burners/adapters/AdapterRegistry.vy", source.address
-    )
+    source = boa.load("contracts/testing/dutch_auction/RoleSourceMock.vy", owner, ZERO_ADDRESS)
+    registry = boa.load("contracts/burners/adapters/AdapterRegistry.vy", source.address)
     assert registry.emergency_owner() == ZERO_ADDRESS
 
 
@@ -179,9 +170,7 @@ def _event(registry: Any, name: str) -> Any:
     return next(log for log in registry.get_logs() if type(log).__name__.endswith(name))
 
 
-def test_activate_disable_reactivate_lifecycle(
-    registry, owner, emergency_owner, adapter, executor
-):
+def test_activate_disable_reactivate_lifecycle(registry, owner, emergency_owner, adapter, executor):
     """The flag and the executor reference move together through the cycle,
     each step announced by its event."""
     _register(registry, owner, adapter, executor)
@@ -208,9 +197,7 @@ def test_activate_disable_reactivate_lifecycle(
     assert registry.is_executor_active(executor) is True
 
 
-def test_activate_adapter_only_owner(
-    registry, owner, adapter, executor, attacker, emergency_owner
-):
+def test_activate_adapter_only_owner(registry, owner, adapter, executor, attacker, emergency_owner):
     _register(registry, owner, adapter, executor)
     for account in (attacker, emergency_owner):
         with boa.env.prank(account), boa.reverts(custom_err("OnlyOwner()")):
@@ -231,9 +218,7 @@ def test_activate_active_adapter_reverts(registry, owner, adapter, executor):
 
 
 @pytest.mark.parametrize("role", ["owner", "emergency_owner"])
-def test_disable_adapter_by_each_role(
-    registry, owner, emergency_owner, adapter, executor, role
-):
+def test_disable_adapter_by_each_role(registry, owner, emergency_owner, adapter, executor, role):
     _register(registry, owner, adapter, executor)
     with boa.env.prank(owner):
         registry.activate_adapter(adapter)
@@ -328,9 +313,7 @@ def test_get_adapters_grows_on_set_not_on_activate(registry, owner, adapter, exe
     assert registry.get_adapters() == [adapter.address]
 
 
-def test_get_adapters_preserves_registration_order(
-    registry, owner, adapter_deployer, executor
-):
+def test_get_adapters_preserves_registration_order(registry, owner, adapter_deployer, executor):
     adapters = [adapter_deployer.deploy() for _ in range(3)]
     # Register out of deployment order to prove the list follows set order.
     ordered = [adapters[2], adapters[0], adapters[1]]
@@ -364,7 +347,9 @@ def test_set_adapter_reverts_past_max_adapters(registry, owner, adapter_deployer
 # Live roles
 
 
-def test_roles_follow_source_owner_change(registry, role_source, owner, attacker, adapter, executor):
+def test_roles_follow_source_owner_change(
+    registry, role_source, owner, attacker, adapter, executor
+):
     role_source.set_owner(attacker)
     with boa.env.prank(owner), boa.reverts(custom_err("OnlyOwner()")):
         registry.set_adapter(adapter, executor)

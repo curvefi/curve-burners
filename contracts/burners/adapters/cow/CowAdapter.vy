@@ -136,9 +136,7 @@ def order_for(
 
 @external
 @view
-def isValidSignature(
-    _hash: bytes32, _signature: Bytes[gpv2.ENCODED_ORDER_LEN]
-) -> bytes4:
+def isValidSignature(_hash: bytes32, _signature: Bytes[gpv2.ENCODED_ORDER_LEN]) -> bytes4:
     """
     @notice Validate a GPv2 digest against the calling auction's live lot
             economics.
@@ -160,8 +158,12 @@ def isValidSignature(
         gpv2.OrderNotValid(reason="InvalidHash")
     )
     assert order.appData == self.app_data, gpv2.OrderNotValid(reason="BadAppData")
-    assert order.feeAmount == 0 and order.kind == gpv2.SELL_KIND and order.partiallyFillable, gpv2.OrderNotValid(reason="BadOrderFlags")
-    assert order.sellTokenBalance == gpv2.TOKEN_BALANCE and order.buyTokenBalance == gpv2.TOKEN_BALANCE, gpv2.OrderNotValid(reason="BadBalanceMode")
+    assert (
+        order.feeAmount == 0 and order.kind == gpv2.SELL_KIND and order.partiallyFillable
+    ), gpv2.OrderNotValid(reason="BadOrderFlags")
+    assert (
+        order.sellTokenBalance == gpv2.TOKEN_BALANCE and order.buyTokenBalance == gpv2.TOKEN_BALANCE
+    ), gpv2.OrderNotValid(reason="BadBalanceMode")
 
     # The shared economic check: the calling auction prices the fill against
     # its live curve and reverts with its own typed error on failure.

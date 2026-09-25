@@ -36,7 +36,8 @@
 """
 
 from contracts.interfaces import IAdapterRegistry
-from contracts.utils import constants as c, roles
+from contracts.utils import constants as c
+from contracts.utils import roles
 
 implements: IAdapterRegistry
 initializes: roles
@@ -67,11 +68,14 @@ event AdapterSet:
     adapter: indexed(address)
     executor: indexed(address)
 
+
 event AdapterActivated:
     adapter: indexed(address)
 
+
 event AdapterDisabled:
     adapter: indexed(address)
+
 
 configs: HashMap[address, IAdapterRegistry.AdapterConfig]
 # Registered adapters (executor set), in no particular order.
@@ -159,9 +163,7 @@ def set_adapter(_adapter: address, _executor: address):
         self._remove_listing(_adapter)
     elif self.configs[_adapter].executor == empty(address):
         self.adapters.append(_adapter)  # dev: too many adapters
-    self.configs[_adapter] = IAdapterRegistry.AdapterConfig(
-        executor=_executor, active=False
-    )
+    self.configs[_adapter] = IAdapterRegistry.AdapterConfig(executor=_executor, active=False)
     log AdapterSet(adapter=_adapter, executor=_executor)
 
 

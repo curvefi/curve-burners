@@ -1,9 +1,8 @@
+from collections.abc import Callable
+from enum import IntFlag
+
 import boa
 import pytest
-
-from enum import IntFlag
-from typing import Callable
-
 
 ZERO_ADDRESS = "0x0000000000000000000000000000000000000000"
 ETH_ADDRESS = "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE"
@@ -67,13 +66,18 @@ def target(erc20):
 
 @pytest.fixture(scope="session")
 def coins(erc20, erc20_no_return, weth, target):
-    return list(sorted([
-        erc20.deploy("Curve DAO", "CRV", 18),
-        erc20.deploy("Bitcoin", "BTC", 8),
-        erc20_no_return.deploy("Chinese Yuan", "CNY", 2),
-        weth,
-        target,
-    ], key=lambda contract: int(contract.address, base=16)))
+    return list(
+        sorted(
+            [
+                erc20.deploy("Curve DAO", "CRV", 18),
+                erc20.deploy("Bitcoin", "BTC", 8),
+                erc20_no_return.deploy("Chinese Yuan", "CNY", 2),
+                weth,
+                target,
+            ],
+            key=lambda contract: int(contract.address, base=16),
+        )
+    )
 
 
 @pytest.fixture(scope="session")
@@ -84,12 +88,15 @@ def fee_collector(admin, emergency_admin, target, weth):
 
 @pytest.fixture(scope="session")
 def set_epoch(fee_collector) -> Callable[[Epoch], None]:
-    boa.env.time_travel(seconds=100 * WEEK)  # move forward, so all time travels lead to positive values
+    boa.env.time_travel(
+        seconds=100 * WEEK
+    )  # move forward, so all time travels lead to positive values
 
     def inner(epoch: Epoch):
         ts = sum(fee_collector.epoch_time_frame(epoch)) // 2  # middle of the period for the fee
         diff = ts - boa.env.evm.vm.state.timestamp
         boa.env.time_travel(seconds=diff + WEEK * (diff // WEEK))
+
     return inner
 
 

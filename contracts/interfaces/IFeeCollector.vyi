@@ -10,11 +10,12 @@
 from contracts.utils import constants as c
 
 
+# Bit values: SLEEP = 1, COLLECT = 2, EXCHANGE = 4, FORWARD = 8.
 flag Epoch:
-    SLEEP  # 1
-    COLLECT  # 2
-    EXCHANGE  # 4
-    FORWARD  # 8
+    SLEEP
+    COLLECT
+    EXCHANGE
+    FORWARD
 
 
 struct Transfer:

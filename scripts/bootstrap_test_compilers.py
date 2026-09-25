@@ -7,7 +7,6 @@ import subprocess
 import vvm
 from vvm.install import get_executable
 
-
 LEGACY_VYPER_VERSION = "0.3.10"
 LEGACY_VYPER_BUILD = "0.3.10+commit.91361694"
 
@@ -28,9 +27,7 @@ def install_compilers() -> dict[str, str]:
     vyper_executable = get_executable(LEGACY_VYPER_VERSION)
     vyper_build = _version_output(str(vyper_executable))
     if LEGACY_VYPER_BUILD not in vyper_build:
-        raise RuntimeError(
-            f"unexpected Vyper {LEGACY_VYPER_VERSION} build: {vyper_build}"
-        )
+        raise RuntimeError(f"unexpected Vyper {LEGACY_VYPER_VERSION} build: {vyper_build}")
 
     return {
         "vyper": vyper_build,

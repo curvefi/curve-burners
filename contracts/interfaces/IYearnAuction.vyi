@@ -68,9 +68,7 @@ def price(_from: address, _ts: uint256 = ...) -> uint256:
 
 @external
 @view
-def getAmountNeeded(
-    _from: address, amountToTake: uint256 = ..., _ts: uint256 = ...
-) -> uint256:
+def getAmountNeeded(_from: address, amountToTake: uint256 = ..., _ts: uint256 = ...) -> uint256:
     ...
 
 

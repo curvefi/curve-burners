@@ -58,9 +58,7 @@ def set_write_state(_write: bool):
 
 
 @external
-def isValidSignature(
-    _hash: bytes32, _signature: Bytes[MAX_SIGNATURE_LEN]
-) -> bytes4:
+def isValidSignature(_hash: bytes32, _signature: Bytes[MAX_SIGNATURE_LEN]) -> bytes4:
     assert not self.should_revert, "Adapter revert"
     if self.write_state_on_validate:
         self.write_count += 1
