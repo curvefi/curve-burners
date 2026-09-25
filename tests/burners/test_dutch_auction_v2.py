@@ -313,8 +313,8 @@ def deployment(burner_deployer: Any) -> AuctionDeployment:
     settlement = boa.load(
         "contracts/testing/dutch_auction/SettlementMock.vy", DOMAIN_SEPARATOR, relayer
     )
-    registry = boa.load("contracts/burners/auction/adapters/AdapterRegistry.vy", fee_collector.address)
-    cow_adapter = boa.load("contracts/burners/cow/CowAdapter.vy", settlement, APP_DATA)
+    registry = boa.load("contracts/burners/adapters/AdapterRegistry.vy", fee_collector.address)
+    cow_adapter = boa.load("contracts/burners/adapters/cow/CowAdapter.vy", settlement, APP_DATA)
 
     burner = burner_deployer.deploy(
         fee_collector,
@@ -398,8 +398,8 @@ def test_yearn_auction_abi_is_exact(deployment: AuctionDeployment):
     """ABI-conformance for the Yearn-compatible surface (IYearnAuction.vyi).
 
     Vyper default arguments export every Yearn overload: the timestamped
-    quote views, the single-argument getAmountNeeded, and the shortened take
-    forms.
+    price/getAmountNeeded quotes, the single-argument getAmountNeeded, and
+    the shortened take forms.
     """
     functions = [
         item
@@ -424,7 +424,6 @@ def test_yearn_auction_abi_is_exact(deployment: AuctionDeployment):
         ("auctionLength", (), ("uint256",), "view"),
         ("auctions", (("_from", "address"),), ("tuple",), "view"),
         ("available", (("_from", "address"),), ("uint256",), "view"),
-        ("available", (("_from", "address"), ("_ts", "uint256")), ("uint256",), "view"),
         ("price", (("_from", "address"),), ("uint256",), "view"),
         ("price", (("_from", "address"), ("_ts", "uint256")), ("uint256",), "view"),
         ("getAmountNeeded", (("_from", "address"),), ("uint256",), "view"),
@@ -522,15 +521,18 @@ def test_constructor_prepares_curve_for_exchange_frame(deployment: AuctionDeploy
     assert burner.getAmountNeeded(deployment.sell_token, staged, lot[LOT_END]) == 0
 
 
-def test_only_fee_collector_can_burn_and_target_is_rejected(deployment: AuctionDeployment):
+def test_only_fee_collector_can_burn_and_fee_collector_rejects_target(
+    deployment: AuctionDeployment,
+):
     with boa.env.prank(deployment.keeper), boa.reverts(custom_err("OnlyFeeCollector()")):
         deployment.burner.burn([deployment.sell_token.address], deployment.keeper)
 
+    # The target is killed for COLLECT in the FeeCollector, so its custody
+    # transfer fails before the burner's own staging check (WantNotSellable,
+    # covered at the core level) is reached.
     _move_to_epoch(deployment.fee_collector, Epoch.COLLECT)
     deployment.target._mint_for_testing(deployment.fee_collector, WAD)
-    with boa.env.prank(deployment.fee_collector.address), boa.reverts(
-        custom_err("WantNotSellable()")
-    ):
+    with boa.env.prank(deployment.fee_collector.address), boa.reverts("Killed coin"):
         deployment.burner.burn([deployment.target.address], deployment.keeper)
 
     assert _lot_with_bounds(deployment, deployment.target)[LOT_INITIAL_AMOUNT] == 0
@@ -805,33 +807,29 @@ def test_yearn_views_mirror_the_lot(deployment: AuctionDeployment):
 
 
 def test_timestamped_quote_overloads_match_time_travel(deployment: AuctionDeployment):
-    """The `_ts` overloads evaluate the lot's window and curve at an arbitrary
-    timestamp: zero outside the window, and inside it exactly what the plain
-    views answer once the chain is there. Balance and FeeCollector state
-    (kill masks, live epoch) are still read at the current block, so the
-    projection is asked from inside the open window."""
+    """The `_ts` quote overloads evaluate the lot's window and curve at an
+    arbitrary timestamp: zero outside the window, and inside it exactly what
+    the plain views answer once the chain is there. Balance and FeeCollector
+    state (kill masks, live epoch) are still read at the current block, so
+    the projection is asked from inside the open window."""
     burner = deployment.burner
     token = deployment.sell_token
     lot, staged = _activate_lot(deployment, token, 100 * WAD)
     amount = staged // 3
 
     for outside in (lot[LOT_START] - 1, lot[LOT_END]):
-        assert burner.available(token, outside) == 0
         assert burner.price(token, outside) == 0
         assert burner.getAmountNeeded(token, amount, outside) == 0
 
     inside = lot[LOT_START] + 7 * STEP_DURATION + 5
     projected = (
-        burner.available(token, inside),
         burner.price(token, inside),
         burner.getAmountNeeded(token, amount, inside),
     )
-    assert projected[0] == staged
+    assert projected[0] > 0
     assert projected[1] > 0
-    assert projected[2] > 0
     _move_to_timestamp(inside)
     assert projected == (
-        burner.available(token),
         burner.price(token),
         burner.getAmountNeeded(token, amount),
     )
@@ -1262,8 +1260,10 @@ def test_permissionless_sync_executor_approvals_follows_derived_state(
     relayer = deployment.relayer
     assert deployment.sell_token.allowance(deployment.burner, relayer) == MAX_UINT256
 
-    with boa.env.prank(deployment.keeper), boa.reverts(custom_err("WantNotSellable()")):
+    # The payment token is approved like any other: no signed order sells it.
+    with boa.env.prank(deployment.keeper):
         deployment.burner.sync_executor_approvals(relayer, [deployment.target.address])
+    assert deployment.target.allowance(deployment.burner, relayer) == MAX_UINT256
 
     # While the executor is referenced, sync is a top-up path and stays at max.
     with boa.env.prank(deployment.keeper):
@@ -2051,7 +2051,7 @@ def test_resync_target_follows_fee_collector_and_fences_old_lots(
     resynced = next(
         log
         for log in deployment.burner.get_logs()
-        if _event_name(log) == "EconomicsResynced"
+        if _event_name(log) == "EconomicsSet"
     )
     assert resynced.want == new_target.address
     assert resynced.start_total == 2 * START_TOTAL

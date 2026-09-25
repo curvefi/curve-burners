@@ -23,7 +23,7 @@
                  this contract directly proves nothing about any auction.
 """
 
-from contracts.burners.cow import gpv2
+from contracts.burners.adapters.cow import gpv2
 from contracts.interfaces import IDutchAuction
 from contracts.utils import constants as c
 
@@ -149,6 +149,9 @@ def isValidSignature(
          router lets every revert bubble. A payload longer than one encoded
          order fails ABI decoding before any check runs and bubbles up the
          same way.
+    @param _hash GPv2 order digest the settlement is verifying.
+    @param _signature The abi-encoded GPv2Order, prefix already stripped.
+    @return ERC-1271 magic value for a fillable order (anything else reverts).
     """
     assert len(_signature) == gpv2.ENCODED_ORDER_LEN, gpv2.OrderNotValid(reason="NonCanonical")
     order: gpv2.GPv2Order = abi_decode(_signature, gpv2.GPv2Order)

@@ -35,8 +35,10 @@
                  Executor approvals are infinite but only toward executors of
                  active registry adapters, and only through the permissionless
                  sync. Signature validation is routed to registry adapters;
-                 every fill they admit is priced by the core's check_order
-                 view. Tokens with transfer fees, rebases, callbacks, or
+                 the core's check_order is the economic check offered to
+                 them, not enforced by the router, so an adapter that skips
+                 it sells by its own rules and listing one is the owner's
+                 review. Tokens with transfer fees, rebases, callbacks, or
                  blacklist behavior are best-effort integrations.
 """
 
@@ -45,8 +47,8 @@ from ethereum.ercs import IERC20
 
 from contracts.interfaces import IBurner, IDutchAuction, IFeeCollector, IYearnAuction
 from contracts.utils import constants as c, recovery, roles
+from contracts.burners.adapters import adapters
 from contracts.burners.auction import dutch_auction, yearn_auction
-from contracts.burners.auction.adapters import adapters
 
 implements: IBurner
 implements: IDutchAuction
@@ -57,6 +59,9 @@ initializes: yearn_auction[dutch_auction := dutch_auction]
 initializes: adapters
 # Module surfaces are exported method-by-method on purpose: a new external
 # function added to a module never enters the burner ABI unreviewed.
+# price/getAmountNeeded with a non-current `_ts`: the sellability policy is
+# FeeCollector.can_exchange, gated by the live epoch and kill masks, so the
+# projection answers 0 outside an open EXCHANGE frame.
 exports: (
     dutch_auction.auction_length,
     dutch_auction.want,
@@ -73,7 +78,8 @@ exports: (
     dutch_auction.take_with_limits,
     dutch_auction.check_order,
 )
-# Yearn-only views; drop this export (and the import) to shed them.
+# Yearn-only views; to shed them, remove every yearn_auction mention from
+# this file.
 exports: (
     yearn_auction.isActive,
     yearn_auction.auctionLength,
@@ -134,6 +140,13 @@ def __init__(
          core's auction_length and the curve decays exponentially from
          start_total to floor_total over it, so no calibration constant is
          deployed.
+    @param _fee_collector FeeCollector: caller of burn, proceeds receiver,
+           role source, calendar, and the source of the payment token.
+    @param _start_total Want price of a full lot at the window start.
+    @param _floor_total Want price of a full lot at the window end.
+    @param _step_duration Seconds per price step.
+    @param _registry AdapterRegistry read for signature routing and executor
+           allowances; an empty one means native settlement only.
     """
     assert _fee_collector.address != empty(address), BadFeeCollector()
     configured_target: address = staticcall _fee_collector.target()
@@ -245,15 +258,6 @@ def _sellable(_token: address) -> bool:
     )
 
 
-# Adapter layer integration hook
-
-
-@override(adapters)
-@view
-def _pre_approve(_coin: IERC20):
-    # The payment token never gets an executor allowance.
-    dutch_auction._check_stageable(_coin)
-
 
 # Economics resync
 
@@ -285,6 +289,9 @@ def resync_target(
            Governance executes at an uncontrolled time: if the FeeCollector
            target changed again since the vote was drafted, the totals would
            bind to the wrong denomination — execution must revert instead.
+    @param _start_total Want price of a full lot at the window start.
+    @param _floor_total Want price of a full lot at the window end.
+    @param _step_duration Seconds per price step.
     """
     roles._check_owner()
     new_target: address = staticcall self.fee_collector.target()
@@ -300,7 +307,7 @@ def resync_target(
         NotSleepEpoch()
     )
 
-    dutch_auction._resync_economics(
+    dutch_auction._set_economics(
         IERC20(new_target),
         _start_total,
         _floor_total,
@@ -313,7 +320,10 @@ def resync_target(
 
 @external
 def push_target() -> uint256:
-    """@notice Permissionlessly return target tokens held by this burner."""
+    """
+    @notice Permissionlessly return target tokens held by this burner.
+    @return Amount of target returned.
+    """
     amount: uint256 = staticcall dutch_auction.want.balanceOf(self)
     if amount != 0:
         assert extcall dutch_auction.want.transfer(
@@ -332,6 +342,7 @@ def recover(_coins: DynArray[IERC20, c.MAX_COINS]):
          available. During the same week's COLLECT frame a permissionless
          collect can pull the token back and restage it, so an evacuation
          batches recover with FeeCollector.set_killed.
+    @param _coins Tokens to return in full; ETH_ADDRESS for the native coin.
     """
     roles._check_owner()
 
@@ -347,5 +358,7 @@ def supportsInterface(_interface_id: bytes4) -> bool:
     """
     @notice Return burner interfaces. ERC-1271 is always claimed: the signature
             router stays live for adapters.
+    @param _interface_id ERC-165 interface id.
+    @return Whether the interface is supported.
     """
     return _interface_id in [c.ERC165_INTERFACE_ID, c.BURNER_INTERFACE_ID, c.ERC1271_MAGIC_VALUE]

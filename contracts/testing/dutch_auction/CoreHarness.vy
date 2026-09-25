@@ -15,8 +15,8 @@
 
 from ethereum.ercs import IERC20
 
+from contracts.burners.adapters import adapters
 from contracts.burners.auction import dutch_auction, yearn_auction
-from contracts.burners.auction.adapters import adapters
 from contracts.utils import roles
 
 initializes: roles
@@ -123,7 +123,7 @@ def resync(
     _floor_total: uint256,
     _step_duration: uint256,
 ):
-    dutch_auction._resync_economics(IERC20(_want), _start_total, _floor_total, _step_duration)
+    dutch_auction._set_economics(IERC20(_want), _start_total, _floor_total, _step_duration)
 
 
 @external
@@ -150,13 +150,4 @@ def _lot_start(_token: IERC20, _staged_at: uint256) -> uint256:
 def _sellable(_token: address) -> bool:
     return not self.not_sellable[_token]
 
-
-# Adapter layer hook override
-
-
-@override(adapters)
-@view
-def _pre_approve(_coin: IERC20):
-    # The payment token never gets an executor allowance.
-    dutch_auction._check_stageable(_coin)
 

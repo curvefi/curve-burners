@@ -107,13 +107,13 @@ def settlement(settlement_deployer, relayer):
 
 @pytest.fixture(scope="module")
 def adapter_deployer():
-    return boa.load_partial("contracts/burners/cow/CowAdapter.vy")
+    return boa.load_partial("contracts/burners/adapters/cow/CowAdapter.vy")
 
 
 @pytest.fixture
 def registry(role_source):
     return boa.load(
-        "contracts/burners/auction/adapters/AdapterRegistry.vy", role_source.address
+        "contracts/burners/adapters/AdapterRegistry.vy", role_source.address
     )
 
 
@@ -138,6 +138,9 @@ def harness(role_source, want, proceeds_receiver, registry, adapter, owner, rela
     with boa.env.prank(owner):
         registry.set_adapter(adapter, relayer)
         registry.activate_adapter(adapter)
+    # The core fences lots staged in the block that set its economics (the
+    # deployment block included): stage from the next second on.
+    boa.env.time_travel(seconds=1)
     return harness
 
 

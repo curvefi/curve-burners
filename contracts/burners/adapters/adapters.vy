@@ -30,6 +30,10 @@ interface Adapter:
     def isValidSignature(_hash: bytes32, _signature: Bytes[INF]) -> bytes4: view
 
 
+error BadRegistry:
+    pass
+
+
 INVALID_SIGNATURE: constant(bytes4) = 0xffffffff
 # The adapter address opening every adapter signature.
 ADAPTER_PREFIX_LEN: constant(uint256) = 20
@@ -40,13 +44,13 @@ registry: public(immutable(IAdapterRegistry))
 
 @deploy
 def __init__(_registry: address):
+    """
+    @notice Pin the adapter catalog.
+    @param _registry AdapterRegistry every routing and allowance decision is
+           read from; an empty catalog means native settlement only.
+    """
+    assert _registry != empty(address), BadRegistry()
     self.registry = IAdapterRegistry(_registry)
-
-
-@internal
-@view
-def _has_registry() -> bool:
-    return self.registry.address != empty(address)
 
 
 # Executor approvals
@@ -57,18 +61,17 @@ def sync_executor_approvals(_executor: address, _tokens: DynArray[IERC20, c.MAX_
     """
     @notice Permissionlessly drive token allowances to the executor's target
             state.
-    @dev Grants pass the importer's _pre_approve veto and only
-         ever go from zero to infinity; clears are always allowed so a token
-         the importer no longer approves sheds its stale allowance.
+    @dev The registry is the only input: every token is approved while the
+         executor is active and cleared once it is released. Grants only
+         ever go from zero to infinity. The payment token is not special
+         here: an executor pulls only under a signed order, and no order
+         sells the payment token.
     @param _executor Executor whose allowances are synchronized.
     @param _tokens Tokens to synchronize.
     """
-    grant: bool = self._has_registry() and (
-        staticcall self.registry.is_executor_active(_executor)
-    )
+    grant: bool = staticcall self.registry.is_executor_active(_executor)
     for coin: IERC20 in _tokens:
         if grant:
-            self._pre_approve(coin)
             token.max_approve(coin, _executor)
         else:
             token.clear_approve(coin, _executor)
@@ -84,8 +87,11 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[INF]) -> bytes4:
     @notice Validate an ERC-1271 signature over a settlement digest.
     @dev `adapter ++ payload`: an active registry adapter gets the payload
          with the prefix stripped and its reverts bubble up unchanged.
+    @param _hash Settlement digest being signed.
+    @param _signature Adapter address (20 bytes) followed by its payload.
+    @return ERC-1271 magic value for a valid signature, 0xffffffff otherwise.
     """
-    if not self._has_registry() or len(_signature) < ADAPTER_PREFIX_LEN:
+    if len(_signature) < ADAPTER_PREFIX_LEN:
         return INVALID_SIGNATURE
     adapter: address = convert(
         convert(slice(_signature, 0, ADAPTER_PREFIX_LEN), bytes20), address
@@ -98,10 +104,3 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[INF]) -> bytes4:
         payload = slice(_signature, ADAPTER_PREFIX_LEN, len(_signature) - ADAPTER_PREFIX_LEN)
     return staticcall Adapter(adapter).isValidSignature(_hash, payload)
 
-
-# Compile-time integration hook implemented by the importing contract: runs
-# before every allowance grant.
-@internal
-@view
-@abstract
-def _pre_approve(_coin: IERC20): ...

@@ -56,7 +56,7 @@ def auctions(_from: address) -> AuctionInfo:
 
 @external
 @view
-def available(_from: address, _ts: uint256 = ...) -> uint256:
+def available(_from: address) -> uint256:
     ...
 
 

@@ -9,13 +9,13 @@
      along P(u) = start_total^(1-u) * floor_total^u, u being the fraction of
      the decay steps elapsed: equal time buys the same percentage drop. The
      curve is evaluated as exp(ln(start) - u * ln(start / floor)) in WAD
-     fixed point through snekmate's wad_ln/wad_exp (the dependency pinned
-     in requirements.in), with the logarithms prepared once per configuration
-     (curve_logs) so quotes cost one exp. The endpoints are exact by
-     explicit branches and the result is clamped into
-     [floor_total, start_total], so the approximation error of ln/exp (see
-     tests/burners/test_wad_math.py) never leaves the price range. Only the payment
-     quotes round, and they round up in favor of the receiver. Products are
+     fixed point through snekmate's wad_ln/wad_exp, with the logarithms
+     prepared once per configuration (curve_logs) so quotes cost one exp.
+     The endpoints are exact by explicit branches and the result is clamped
+     into [floor_total, start_total], so the approximation error of ln/exp
+     never leaves the price range. Two roundings, both in favor of the
+     receiver: the step offset log_drop * step // decay_steps truncates,
+     which raises the price, and the payment quotes round up. Products are
      computed in checked uint256 arithmetic: quotes revert if a * b
      overflows; auction totals and amounts stay far below that domain by
      deployment policy.

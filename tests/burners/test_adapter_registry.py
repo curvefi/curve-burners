@@ -62,7 +62,7 @@ def adapter(adapter_deployer):
 @pytest.fixture
 def registry(role_source):
     return boa.load(
-        "contracts/burners/auction/adapters/AdapterRegistry.vy", role_source.address
+        "contracts/burners/adapters/AdapterRegistry.vy", role_source.address
     )
 
 
@@ -85,7 +85,7 @@ def test_constructor_rejects_source_with_zero_owner(emergency_owner):
         "contracts/testing/dutch_auction/RoleSourceMock.vy", ZERO_ADDRESS, emergency_owner
     )
     with boa.reverts():
-        boa.load("contracts/burners/auction/adapters/AdapterRegistry.vy", bad_source.address)
+        boa.load("contracts/burners/adapters/AdapterRegistry.vy", bad_source.address)
 
 
 def test_constructor_allows_zero_emergency_owner_sentinel(owner):
@@ -93,7 +93,7 @@ def test_constructor_allows_zero_emergency_owner_sentinel(owner):
         "contracts/testing/dutch_auction/RoleSourceMock.vy", owner, ZERO_ADDRESS
     )
     registry = boa.load(
-        "contracts/burners/auction/adapters/AdapterRegistry.vy", source.address
+        "contracts/burners/adapters/AdapterRegistry.vy", source.address
     )
     assert registry.emergency_owner() == ZERO_ADDRESS
 

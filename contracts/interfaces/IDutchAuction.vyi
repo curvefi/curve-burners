@@ -82,7 +82,7 @@ def window(_token: address, _timestamp: uint256 = ...) -> (uint256, uint256):
 
 @external
 @view
-def available(_from: address, _ts: uint256 = ...) -> uint256:
+def available(_from: address) -> uint256:
     ...
 
 

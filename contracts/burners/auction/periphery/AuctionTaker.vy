@@ -16,13 +16,15 @@
      auctionTakeCallback, after the lot has been delivered and before the
      auction pulls the payment from this contract's want allowance. A typical
      plan is [approve(router, lot), router.swap(lot -> want)]. The route must
-     leave at least the quoted payment in want on this contract; anything
-     above it (in want or unspent lot tokens) is swept to the caller-chosen
-     profit receiver and checked against the caller's minimum.
+     leave at least the quoted payment in want on this contract; the want
+     above it is the profit, checked against the caller's minimum and sent
+     to the caller-chosen profit receiver together with any unspent lot
+     tokens.
 @custom:kill Nothing to kill: no owner, no configuration, and no funds or
-             allowances at rest — every take clears its transient state and
-             sweeps both tokens in the same transaction. Retire it by no
-             longer routing fills through it.
+             allowances at rest — every take resets the active auction and
+             sweeps both tokens in the same transaction (the quoted payment
+             only feeds the event). Retire it by no longer routing fills
+             through it.
 @custom:security Permissionless by design: the contract must never custody
                  value between transactions, and nobody should grant it
                  allowances — route calls execute with this contract as
@@ -150,6 +152,11 @@ def auctionTakeCallback(
     @dev Reentrant by necessity — the take entrypoint holds the contract-wide
          lock while the auction calls back. Only the transiently recorded
          auction of the active take may enter.
+    @param _from Token taken from the auction.
+    @param _sender Caller of the auction's take (this contract).
+    @param _amount_taken Amount of `_from` delivered to this contract.
+    @param _amount_needed Want payment the auction pulls after this callback.
+    @param _data abi-encoded route (DynArray[Call, MAX_CALLS]).
     """
     assert msg.sender == self.active_auction, OnlyActiveAuction()
 

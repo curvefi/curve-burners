@@ -148,9 +148,9 @@ def test_gnosis_real_gpv2_signature_and_vault_relayer_custody():
             "contracts/FeeCollector.vy", target, weth, owner, emergency_owner
         )
         registry = boa.load(
-            "contracts/burners/auction/adapters/AdapterRegistry.vy", fee_collector.address
+            "contracts/burners/adapters/AdapterRegistry.vy", fee_collector.address
         )
-        cow_adapter = boa.load("contracts/burners/cow/CowAdapter.vy", GPV2_SETTLEMENT, APP_DATA)
+        cow_adapter = boa.load("contracts/burners/adapters/cow/CowAdapter.vy", GPV2_SETTLEMENT, APP_DATA)
         burner = boa.load(
             "contracts/burners/DutchAuctionBurner.vy",
             fee_collector,

@@ -4,8 +4,8 @@
 @title CoW GPv2 order library
 @author Curve Finance
 @license MIT
-@notice Stateless GPv2 order type, EIP-712 digest, flag checks, and the
-        OrderNotValid revert shared by CoW-facing adapters.
+@notice Stateless GPv2 order type, EIP-712 digest, and the OrderNotValid
+        revert shared by CoW-facing adapters.
 @dev Pure parametric helpers only: no storage, no external calls, no abstract
      hooks. The digest computation must stay byte-identical to the GPv2
      EIP-712 reference.

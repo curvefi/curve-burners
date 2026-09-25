@@ -7,8 +7,8 @@
 @license MIT
 @notice The Yearn Auction selectors the Dutch auction core does not need for
         itself — isActive, auctionLength, auctions — derived from the core's
-        lot records. Import and export this module to expose them; drop the
-        import to shed them.
+        lot records. To shed them, remove every mention of this module from
+        the importing contract.
 @dev Yearn's Auction.sol (yearn/tokenized-strategy-periphery) keys its record
      by token: auctions(token) -> (kicked, scaler, initialAvailable). Here
      kicked is the lot window's start (possibly in the future for a lot
@@ -32,14 +32,21 @@ uses: dutch_auction
 @external
 @view
 def isActive(_from: address) -> bool:
-    """@notice Whether `_from` can be taken right now (Yearn ABI)."""
+    """
+    @notice Whether `_from` can be taken right now (Yearn ABI).
+    @param _from Token offered by the auction.
+    @return True while available(_from) is positive.
+    """
     return dutch_auction._available(IERC20(_from), block.timestamp) > 0
 
 
 @external
 @view
 def auctionLength() -> uint256:
-    """@notice Length of every auction window (Yearn ABI)."""
+    """
+    @notice Length of every auction window (Yearn ABI).
+    @return Window length in seconds.
+    """
     return dutch_auction.auction_length
 
 
@@ -49,6 +56,8 @@ def auctions(_from: address) -> IYearnAuction.AuctionInfo:
     """
     @notice The lot in Yearn's record shape (Yearn ABI). Zeroed for a
             never-staged token, like Yearn's unenabled auction.
+    @param _from Token offered by the auction.
+    @return kicked = window start, scaler = 1, initialAvailable = snapshot.
     """
     record: IDutchAuction.Lot = dutch_auction.lots[IERC20(_from)]
     if record.staged_at == 0:

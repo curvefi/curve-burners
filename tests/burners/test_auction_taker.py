@@ -76,17 +76,23 @@ def auction(want, proceeds_receiver):
         boa.env.generate_address("owner"),
         boa.env.generate_address("emergency_owner"),
     )
-    return boa.load(
+    # An empty registry: native settlement only.
+    registry = boa.load("contracts/burners/adapters/AdapterRegistry.vy", role_source.address)
+    auction = boa.load(
         "contracts/testing/dutch_auction/CoreHarness.vy",
         want.address,
         proceeds_receiver,
-        ZERO_ADDRESS,
+        registry.address,
         role_source.address,
         START_TOTAL,
         FLOOR_TOTAL,
         STEP_DURATION,
         AUCTION_LENGTH,
     )
+    # The core fences lots staged in the block that set its economics (the
+    # deployment block included): stage from the next second on.
+    boa.env.time_travel(seconds=1)
+    return auction
 
 
 @pytest.fixture(scope="module")

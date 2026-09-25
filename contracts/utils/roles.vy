@@ -71,12 +71,18 @@ def _check_owner_or_emergency():
 @external
 @view
 def owner() -> address:
-    """@notice Governance owner."""
+    """
+    @notice Governance owner.
+    @return Owner read live from the role source.
+    """
     return self._owner()
 
 
 @external
 @view
 def emergency_owner() -> address:
-    """@notice Emergency role owner."""
+    """
+    @notice Emergency role owner.
+    @return Emergency owner read live from the role source.
+    """
     return self._emergency_owner()

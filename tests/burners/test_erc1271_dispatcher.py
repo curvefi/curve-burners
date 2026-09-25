@@ -95,12 +95,12 @@ def adapter_deployer():
 @pytest.fixture
 def registry(role_source):
     return boa.load(
-        "contracts/burners/auction/adapters/AdapterRegistry.vy", role_source.address
+        "contracts/burners/adapters/AdapterRegistry.vy", role_source.address
     )
 
 
 def _deploy_harness(want, proceeds_receiver, registry_address, role_source):
-    return boa.load(
+    harness = boa.load(
         "contracts/testing/dutch_auction/CoreHarness.vy",
         want.address,
         proceeds_receiver,
@@ -111,6 +111,10 @@ def _deploy_harness(want, proceeds_receiver, registry_address, role_source):
         STEP_DURATION,
         AUCTION_LENGTH,
     )
+    # The core fences lots staged in the block that set its economics (the
+    # deployment block included): stage from the next second on.
+    boa.env.time_travel(seconds=1)
+    return harness
 
 
 @pytest.fixture
@@ -213,15 +217,10 @@ def test_registry_disable_kills_prefixed_route_immediately(
     assert harness.isValidSignature(DIGEST, _prefix(adapter)) == ERC1271_MAGIC_VALUE
 
 
-def test_no_registry_means_native_settlement_only(
-    role_source, want, proceeds_receiver, adapter
-):
-    # A registry-less auction never routes, whatever the prefix names.
-    no_registry = _deploy_harness(want, proceeds_receiver, ZERO_ADDRESS, role_source)
-    assert no_registry.registry() == ZERO_ADDRESS
-    assert no_registry.isValidSignature(DIGEST, _prefix(adapter)) == ERC1271_INVALID
-    assert no_registry.isValidSignature(DIGEST, _prefix(adapter) + b"x") == ERC1271_INVALID
-    assert no_registry.isValidSignature(DIGEST, b"") == ERC1271_INVALID
+def test_registry_is_required(role_source, want, proceeds_receiver):
+    # No registry-less mode: an empty registry is the native-only deployment.
+    with boa.reverts(custom_err("BadRegistry()")):
+        _deploy_harness(want, proceeds_receiver, ZERO_ADDRESS, role_source)
 
 
 # Unbounded signatures: the router imposes no length cap of its own

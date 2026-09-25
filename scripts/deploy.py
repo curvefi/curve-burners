@@ -64,8 +64,8 @@ def deploy_burner(fee_collector):
         # return boa.load_partial("contracts/deprecated/CowSwapBurner.vy").at("")
     if BURNER == "DutchAuction":
         # Run scripts/dutch_auction_preflight.py against the final chain config first.
-        registry = boa.load("contracts/burners/auction/adapters/AdapterRegistry.vy", fee_collector)  # roles follow FeeCollector owner/emergency_owner
-        # registry = boa.load_partial("contracts/burners/auction/adapters/AdapterRegistry.vy").at("")
+        registry = boa.load("contracts/burners/adapters/AdapterRegistry.vy", fee_collector)  # roles follow FeeCollector owner/emergency_owner
+        # registry = boa.load_partial("contracts/burners/adapters/AdapterRegistry.vy").at("")
         print(f"AdapterRegistry: {registry.address}")
 
         burner = boa.load("contracts/burners/DutchAuctionBurner.vy",
@@ -83,11 +83,11 @@ def deploy_burner(fee_collector):
         cow_enabled = True  # ALTER: False on chains without CoW
         if cow_enabled:
             # Registry-managed; keepers run sync_executor_approvals(relayer, tokens) after collect.
-            cow_adapter = boa.load("contracts/burners/cow/CowAdapter.vy",
+            cow_adapter = boa.load("contracts/burners/adapters/cow/CowAdapter.vy",
                                    COW_SETTLEMENT,
                                    bytes.fromhex("058315b749613051abcbf50cf2d605b4fa4a41554ec35d73fd058fc530da559f"),  # ALTER: appData
                                    )
-            # cow_adapter = boa.load_partial("contracts/burners/cow/CowAdapter.vy").at("")
+            # cow_adapter = boa.load_partial("contracts/burners/adapters/cow/CowAdapter.vy").at("")
             print(f"CowAdapter: {cow_adapter.address}")
             registry.set_adapter(cow_adapter.address, cow_adapter.vault_relayer())
             registry.activate_adapter(cow_adapter.address)

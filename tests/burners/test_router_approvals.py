@@ -104,7 +104,7 @@ def adapter_deployer():
 @pytest.fixture
 def registry(role_source):
     return boa.load(
-        "contracts/burners/auction/adapters/AdapterRegistry.vy", role_source.address
+        "contracts/burners/adapters/AdapterRegistry.vy", role_source.address
     )
 
 
@@ -221,6 +221,14 @@ def test_stage_grants_nothing_and_sync_grants_referenced_executors_only(
         assert token_b.allowance(harness, relayer) == MAX_UINT256
 
 
+def test_receiver_is_never_the_auction_itself(harness):
+    # Proceeds always leave the auction: the core cannot pay itself.
+    with boa.reverts(custom_err("BadReceiver()")):
+        harness.set_receiver(harness.address)
+    with boa.reverts(custom_err("BadReceiver()")):
+        harness.set_receiver(ZERO_ADDRESS)
+
+
 def test_stage_rejects_target_token(harness, want):
     want._mint_for_testing(harness.address, LOT_AMOUNT)
     with boa.reverts(custom_err("WantNotSellable()")):
@@ -251,20 +259,6 @@ def test_sync_follows_registry_activation(
     with boa.env.prank(keeper):
         harness.sync_executor_approvals(relayer, [token_a.address])
     assert token_a.allowance(harness, relayer) == MAX_UINT256
-
-
-def test_sync_without_registry_always_clears(
-    role_source, want, proceeds_receiver, keeper, token_a, relayer
-):
-    # No registry means native settlement only: no executor is ever
-    # referenced, so the sync degrades to a pure clearing pass.
-    no_registry = _deploy_harness(want, proceeds_receiver, ZERO_ADDRESS, role_source)
-    assert no_registry.registry() == ZERO_ADDRESS
-    with boa.env.prank(no_registry.address):
-        token_a.approve(relayer, 1234)
-    with boa.env.prank(keeper):
-        no_registry.sync_executor_approvals(relayer, [token_a.address])
-    assert token_a.allowance(no_registry, relayer) == 0
 
 
 def test_shared_executor_approved_once_and_kept_until_full_release(
@@ -323,16 +317,22 @@ def test_sync_clears_residual_allowance_of_unreferenced_executor(
     assert problem_token.allowance(harness, stranger) == 0
 
 
-def test_sync_rejects_target_token(harness, keeper, want, token_a, adapter_cow, relayer):
-    with boa.env.prank(keeper), boa.reverts(custom_err("WantNotSellable()")):
+def test_sync_follows_registry_for_every_token(
+    harness, keeper, want, token_a, adapter_cow, relayer
+):
+    # The registry is the sync's only input: the payment token is approved
+    # like any other (no signed order can sell it).
+    with boa.env.prank(keeper):
         harness.sync_executor_approvals(relayer, [token_a.address, want.address])
+    assert token_a.allowance(harness, relayer) == MAX_UINT256
+    assert want.allowance(harness, relayer) == MAX_UINT256
 
 
 def test_sync_clears_want_allowance_of_released_executor(
     harness, disable, keeper, want, adapter_cow, relayer
 ):
-    """A token promoted to want by a resync may carry a stale settlement
-    allowance; only granting refuses want — clearing must stay possible."""
+    """A token promoted to want by a resync may carry a settlement allowance;
+    it is cleared like any other once the executor is released."""
     disable(adapter_cow)
     with boa.env.prank(harness.address):
         want.approve(relayer, 1234)

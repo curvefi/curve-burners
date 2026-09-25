@@ -68,9 +68,10 @@ modules: `roles` (the burner exposes only the owner, read live from the
 FeeCollector; it has no emergency role of its own), `adapters` (the
 prefix-based ERC-1271 router and the permissionless executor allowance sync)
 and `recovery`. The burner holds no adapter state of its own — management
-lives entirely in the `AdapterRegistry` (`auction/adapters/AdapterRegistry.vy`),
-which the burner reads live; an unset registry (zero address at deploy) means
-native settlement only — every signature is invalid. External settlement
+lives entirely in the `AdapterRegistry` (`adapters/AdapterRegistry.vy`),
+which the burner reads live (the registry is a required deployment
+dependency; an empty one means native settlement only — every signature is
+invalid). External settlement
 protocols plug in through it: the owner registers an adapter contract (any
 rail selling inventory by its own rules; signatures prefixed with its address
 reach it through the router) with its executor (the contract that pulls sold
@@ -93,7 +94,7 @@ lives in `interfaces/IDutchAuction.vyi`, Yearn's `AuctionInfo` in
 `interfaces/IYearnAuction.vyi`, `AdapterConfig` in
 `interfaces/IAdapterRegistry.vyi`, and the ERC-165 ids, the burner interface
 id, and the ERC-1271 magic value in `utils/constants.vy`; the GPv2 constants
-in `cow/gpv2.vy` are keccak256-derived. Peers (`CowAdapter`, the resolver)
+in `adapters/cow/gpv2.vy` are keccak256-derived. Peers (`CowAdapter`, the resolver)
 read the burner through `IDutchAuction` alone.
 
 ### Adapter signature format
@@ -127,7 +128,7 @@ publisher simply prepends the adapter address when composing the bytes.
 
 ### CoW rail: `CowAdapter`
 
-CoW Protocol is one such adapter. `cow/CowAdapter.vy` is a stateless, immutable
+CoW Protocol is one such adapter. `adapters/cow/CowAdapter.vy` is a stateless, immutable
 adapter pinned to the chain's `GPv2Settlement` (domain separator and vault
 relayer are read from it at deploy) and to the `appData` every order must
 carry; its registry entry is `adapter = CowAdapter, executor = vault relayer`.

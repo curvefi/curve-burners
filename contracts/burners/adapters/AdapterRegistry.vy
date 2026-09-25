@@ -28,8 +28,9 @@
                  cannot change under its address — accounts cannot be
                  redeployed with different code since Cancun, and an adapter
                  behind a proxy must be treated as its proxy admin's code.
-                 Activation is a separate owner step so a mistaken set cannot
-                 go live in the same transaction. An unknown adapter reads
+                 Activation is a separate owner call, so a set alone never
+                 goes live; nothing prevents batching both in one
+                 transaction. An unknown adapter reads
                  as a zeroed config (executor == empty(address)), which
                  routers must treat as invalid.
 """
@@ -108,7 +109,10 @@ def get_adapter(_adapter: address) -> IAdapterRegistry.AdapterConfig:
 @external
 @view
 def get_adapters() -> DynArray[address, c.MAX_ADAPTERS]:
-    """@notice List every registered adapter, active or not."""
+    """
+    @notice List every registered adapter, active or not.
+    @return Registered adapter addresses, in no particular order.
+    """
     return self.adapters
 
 
@@ -118,6 +122,8 @@ def is_executor_active(_executor: address) -> bool:
     """
     @notice Whether an active adapter references the executor; auctions keep
             their allowances toward it while this holds.
+    @param _executor Executor contract.
+    @return True while at least one active adapter references it.
     """
     return self.executor_refcount[_executor] > 0
 
