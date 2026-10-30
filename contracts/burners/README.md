@@ -94,8 +94,9 @@ lives in `interfaces/IDutchAuction.vyi`, Yearn's `AuctionInfo` in
 `interfaces/IYearnAuction.vyi`, `AdapterConfig` in
 `interfaces/IAdapterRegistry.vyi`, and the ERC-165 ids, the burner interface
 id, and the ERC-1271 magic value in `utils/constants.vy`; the GPv2 constants
-in `adapters/cow/gpv2.vy` are keccak256-derived. Peers (`CowAdapter`, the resolver)
-read the burner through `IDutchAuction` alone.
+in `adapters/cow/gpv2.vy` and the UniswapX/Permit2 type hashes in
+`adapters/uniswapx/uniswapx.vy` are keccak256-derived. Peers (`CowAdapter`,
+`UniswapXAdapter`, the resolver) read the burner through `IDutchAuction` alone.
 
 ### Adapter signature format
 
@@ -161,6 +162,59 @@ runbook batches the registry disable with the burner's
 stragglers afterwards. `available` never exceeds the snapshot; a balance
 restored by donations sells again along the same curve, always in the
 FeeCollector's favor.
+
+### UniswapX rail: `UniswapXAdapter`
+
+UniswapX v1 (`ExclusiveDutchOrderReactor`) is a second adapter, built the
+same way. `adapters/uniswapx/UniswapXAdapter.vy` is stateless and immutable,
+pinned to the chain's reactor (Permit2 and its EIP-712 domain separator are
+read from it at deploy); its registry entry is `adapter = UniswapXAdapter,
+executor = Permit2`, because the reactor settles through
+`Permit2.permitWitnessTransferFrom`: Permit2 is what pulls the sold tokens,
+so Permit2 is what `sync_executor_approvals(permit2, tokens)` approves. A
+filler executes `reactor.execute(SignedOrder(order = abi.encode(order), sig =
+UniswapXAdapter ++ abi.encode(order)))`; Permit2 forwards `sig` verbatim to
+the burner's `isValidSignature` with the PermitWitnessTransferFrom digest
+(permit = input token, input `endAmount`, nonce, deadline; spender = the
+reactor; witness = the ExclusiveDutchOrder hash). The burner strips the
+adapter prefix, and the adapter recomputes that digest from the bare order
+(`adapters/uniswapx/uniswapx.vy` holds the order type, the UniswapX and
+Permit2 type hashes and the reactor's `DutchDecayLib` decay), checks the
+shape — canonical encoding, this reactor, the burner as swapper, a
+non-decaying input, exactly one output — resolves the output amount the
+reactor would require now (exclusivity overrides and protocol fees only add
+to what the filler pays), requires the input to be available right now (the
+fill is atomic, unlike a CoW partial fill), and delegates the economics to
+`check_order` (output token is the target, recipient is the FeeCollector,
+input within the snapshot, resolved output at or above the live quote,
+`deadline` no later than the lot end). Shape failures revert with
+`uniswapx.OrderNotValid(reason)` (`NonCanonical`, `InvalidHash`,
+`BadReactor`, `BadSwapper`, `InputDecay`, `BadOutputs`, `BadDecayTimes`,
+`BadDecayDirection`, `ExceedsAvailable`); the auction's typed `check_order`
+revert bubbles unchanged, through the real reactor and Permit2 included.
+
+`UniswapXAdapter.order_for(burner, token, nonce, sell_amount)` returns the
+publishable pair for a live lot: a fixed-price order (the reactor's linear
+decay cannot follow the stepped curve, so it is not used) for the whole
+available amount by default, priced at the current block, open to every
+filler, valid until the lot end. Two UniswapX facts shape publishing. Orders
+are fill-or-kill: Permit2 burns the order nonce on settlement, so each order
+sells its input exactly once, every re-post needs a nonce no earlier fill has
+used (the nonce is the publisher's choice; the adapter neither derives nor
+checks it — Permit2 flips it before verifying the signature, so a signature
+check cannot see it), and an order for the full amount dies by itself after
+any other fill (`ExceedsAvailable`). And orders live off-chain: there is no
+public permissionless orderbook for third-party ExclusiveDutchOrders, so a
+publisher hands orders to fillers directly (or through its own feed); the
+on-chain part — any filler calling the reactor — is permissionless.
+
+Emergency procedure is the CoW one with `executor = Permit2`:
+`registry.disable_adapter(UniswapXAdapter)` batched with
+`sync_executor_approvals(permit2, tokens)` (`scripts/emergency_cow_disable.py`
+takes the executor as an argument). Note that Permit2 is shared by every
+Permit2-based adapter: the executor reference count keeps the allowance
+while any of them is active, and clears it only when the last one is
+disabled.
 
 ### Payment token and resync
 
