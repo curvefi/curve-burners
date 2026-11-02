@@ -94,8 +94,9 @@ lives in `interfaces/IDutchAuction.vyi`, Yearn's `AuctionInfo` in
 `interfaces/IYearnAuction.vyi`, `AdapterConfig` in
 `interfaces/IAdapterRegistry.vyi`, and the ERC-165 ids, the burner interface
 id, and the ERC-1271 magic value in `utils/constants.vy`; the GPv2 constants
-in `adapters/cow/gpv2.vy` are keccak256-derived. Peers (`CowAdapter`, the resolver)
-read the burner through `IDutchAuction` alone.
+in `adapters/cow/gpv2.vy` and the 1inch LOP v4 type hash and traits layout
+in `adapters/oneinch/oneinch.vy` are keccak256-derived. Peers (`CowAdapter`,
+`OneInchAdapter`, the resolver) read the burner through `IDutchAuction` alone.
 
 ### Adapter signature format
 
@@ -161,6 +162,85 @@ runbook batches the registry disable with the burner's
 stragglers afterwards. `available` never exceeds the snapshot; a balance
 restored by donations sells again along the same curve, always in the
 FeeCollector's favor.
+
+### 1inch rail: `OneInchAdapter`
+
+The 1inch Limit Order Protocol v4 (hosted by `AggregationRouterV6`,
+`0x111111125421cA6dc452d289314280a0f8842A65` on every chain 1inch supports,
+Ethereum and Polygon included, with identical verified source) is a second
+adapter, built the same way. It was chosen over the other candidates (OKX
+intent swap, Bebop JAM) because the settlement contract is open, verified and
+unchanged across chains, a contract maker is a first-class citizen on-chain
+(`fillContractOrder[Args]` forwards the signature bytes verbatim to the
+maker's ERC-1271 `isValidSignature` with the EIP-712 order digest), and any
+taker may fill a plain order permissionlessly, so the rail works without an
+off-chain feed. `adapters/oneinch/OneInchAdapter.vy` is stateless and
+immutable, pinned to the chain's router: at deploy it rebuilds the EIP-712
+domain from the router's ERC-5267 `eip712Domain()` and cross-checks it
+against the router's own `hashOrder` on a probe order, so a wrong address, a
+proxy with another domain or a different order type fails the deployment.
+Its registry entry is `adapter = OneInchAdapter, executor = router`, because
+a fill pulls the maker asset with a plain `transferFrom` from the maker: the
+router is what `sync_executor_approvals(router, tokens)` approves (orders
+with the `USE_PERMIT2` trait are rejected, so Permit2 is never involved).
+
+A taker calls `router.fillContractOrder(order, sig, amount, takerTraits)`
+(or `fillContractOrderArgs` with an extension) with `sig = OneInchAdapter ++
+abi.encode(order, extension)`; the router forwards `sig` to the burner's
+`isValidSignature` with the order digest, the burner strips the adapter
+prefix, and the adapter recomputes the digest from the bare order
+(`adapters/oneinch/oneinch.vy` holds the order type, the type hash, the
+`makerTraits` bit layout and the extension binding and field layout of
+`OrderLib`/`ExtensionLib`), checks the shape — canonical encoding, the burner
+as maker, neither `USE_PERMIT2` nor `UNWRAP_WETH`, the extension bound to the
+order exactly as the protocol binds it (flag and salt) and carrying neither
+asset suffixes nor amount getters — and delegates the economics to
+`check_order` (taker asset is the target, the resolved receiver — an empty
+one means the maker — is the FeeCollector, making amount within the
+snapshot, taking amount at or above the live quote, the 40-bit `makerTraits`
+expiration no later than the lot end; a never-expiring order fails it).
+Without amount getters the protocol prices every fill linearly from the
+order amounts, rounding the taking amount up, so the order's `takingAmount`
+is a floor on what any fill pays per unit; predicates, maker permits and
+interactions only restrict or decorate a fill and pass through. Shape
+failures revert with `oneinch.OrderNotValid(reason)` (`NonCanonical`,
+`InvalidHash`, `BadMaker`, `BadMakerTraits`, `MissingOrderExtension`,
+`UnexpectedOrderExtension`, `InvalidExtensionHash`, `BadAssetSuffix`,
+`BadAmountGetter`); the auction's typed `check_order` revert bubbles
+unchanged through the burner. The router itself, however, swallows every
+revert of a contract signature check into its own `BadSignature()`, so a
+publisher classifies an order by `eth_call` against the burner's
+`isValidSignature`, not against a fill.
+
+`OneInchAdapter.order_for(burner, token, salt, sell_amount)` returns the
+publishable pair for a live lot: a plain order (no extension) for the whole
+available amount by default, priced at the current block, open to every
+taker, partially and multiply fillable, expiring at the lot end. Like the
+CoW order it is a standing ask: the burner keeps accepting it as the curve
+decays below it, and a publisher re-posts lower with a fresh salt (the
+router tracks fills per order hash). Two protocol facts shape publishing.
+The router checks a contract signature on the first fill of an order only:
+a partially filled order keeps filling at its signed unit price (at or above
+the curve at validation time, which only decays) until it expires, without
+asking the burner again — fine economically, but it means that disabling the
+adapter does not stop the remainder of an already started order; only the
+allowance does. And the plain orders this adapter accepts are not what the
+1inch off-chain feeds carry: Fusion orders use the settlement extension as
+amount getter (resolver auction, fees, `receiver = settlement`) and the
+public orderbook API accepts only `FeeTaker` extension orders, both rejected
+here as `BadAmountGetter`. Supporting them would mean a pinned, version-
+specific extension parser (fees, custom receiver, surplus) and a 1inch
+portal API key for submission; it is a deliberate follow-up, not part of
+this adapter. Until then a publisher hands orders to takers directly (or
+through its own feed); the on-chain fill is permissionless. 1inch is not
+deployed on Fraxtal, so this rail is for Polygon and Ethereum.
+
+Emergency procedure is the CoW one with `executor = router`:
+`registry.disable_adapter(OneInchAdapter)` batched with
+`sync_executor_approvals(router, tokens)` (`scripts/emergency_cow_disable.py`
+takes the executor as an argument). Here the allowance sync is not optional
+hygiene but the step that actually stops fills of orders validated before
+the disable, as the mainnet fork test demonstrates.
 
 ### Payment token and resync
 

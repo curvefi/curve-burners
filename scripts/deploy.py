@@ -30,6 +30,10 @@ COW_SETTLEMENT = "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"  # ALTER: GPv2Sett
 COMPOSABLE_COW = (
     "0xfdaFc9d1902f4e0b84f65F49f244b32b31013b74"  # ALTER: ComposableCow (CowSwapBurner only)
 )
+# 1inch dependency (verify against the target chain before deploy): the
+# Limit Order Protocol v4 host (AggregationRouterV6, the same address on
+# every supported chain); OneInchAdapter checks its EIP-712 domain at deploy.
+ONEINCH_LIMIT_ORDER_PROTOCOL = "0x111111125421cA6dc452d289314280a0f8842A65"  # ALTER
 COW_VAULT_RELAYER = (
     "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"  # ALTER: VaultRelayer (CowSwapBurner only)
 )
@@ -106,6 +110,18 @@ def deploy_burner(fee_collector):
             print(f"CowAdapter: {cow_adapter.address}")
             registry.set_adapter(cow_adapter.address, cow_adapter.vault_relayer())
             registry.activate_adapter(cow_adapter.address)
+
+        oneinch_enabled = True  # ALTER: False on chains without 1inch LOP v4
+        if oneinch_enabled:
+            # Registry-managed; keepers run sync_executor_approvals(router, tokens) after collect.
+            oneinch_adapter = boa.load(
+                "contracts/burners/adapters/oneinch/OneInchAdapter.vy",
+                ONEINCH_LIMIT_ORDER_PROTOCOL,
+            )
+            # oneinch_adapter = boa.load_partial("contracts/burners/adapters/oneinch/OneInchAdapter.vy").at("")
+            print(f"OneInchAdapter: {oneinch_adapter.address}")
+            registry.set_adapter(oneinch_adapter.address, oneinch_adapter.limit_order_protocol())
+            registry.activate_adapter(oneinch_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 
