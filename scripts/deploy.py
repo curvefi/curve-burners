@@ -34,6 +34,12 @@ COMPOSABLE_COW = (
 # Limit Order Protocol v4 host (AggregationRouterV6, the same address on
 # every supported chain); OneInchAdapter checks its EIP-712 domain at deploy.
 ONEINCH_LIMIT_ORDER_PROTOCOL = "0x111111125421cA6dc452d289314280a0f8842A65"  # ALTER
+# 1inch extension contracts (verify against the target chain before deploy):
+# the FeeTaker the public orderbook relays orders through, and the Fusion
+# settlement (Settlement on Ethereum, SimpleSettlement on Polygon, the same
+# address and layout); each adapter probes its extension at deploy.
+ONEINCH_FEE_TAKER = "0xc0DFdB9E7a392c3dBBE7c6FBe8FBC1789C9FE05e"  # ALTER
+ONEINCH_FUSION_SETTLEMENT = "0x2Ad5004c60e16E54d5007C80CE329Adde5B51Ef5"  # ALTER
 COW_VAULT_RELAYER = (
     "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"  # ALTER: VaultRelayer (CowSwapBurner only)
 )
@@ -122,6 +128,29 @@ def deploy_burner(fee_collector):
             print(f"OneInchAdapter: {oneinch_adapter.address}")
             registry.set_adapter(oneinch_adapter.address, oneinch_adapter.limit_order_protocol())
             registry.activate_adapter(oneinch_adapter.address)
+
+            # The fee-taking 1inch rails share the router as executor.
+            fee_taker_adapter = boa.load(
+                "contracts/burners/adapters/oneinch/OneInchFeeTakerAdapter.vy",
+                ONEINCH_LIMIT_ORDER_PROTOCOL,
+                ONEINCH_FEE_TAKER,
+            )
+            # fee_taker_adapter = boa.load_partial("contracts/burners/adapters/oneinch/OneInchFeeTakerAdapter.vy").at("")
+            print(f"OneInchFeeTakerAdapter: {fee_taker_adapter.address}")
+            registry.set_adapter(
+                fee_taker_adapter.address, fee_taker_adapter.limit_order_protocol()
+            )
+            registry.activate_adapter(fee_taker_adapter.address)
+
+            fusion_adapter = boa.load(
+                "contracts/burners/adapters/oneinch/OneInchFusionAdapter.vy",
+                ONEINCH_LIMIT_ORDER_PROTOCOL,
+                ONEINCH_FUSION_SETTLEMENT,
+            )
+            # fusion_adapter = boa.load_partial("contracts/burners/adapters/oneinch/OneInchFusionAdapter.vy").at("")
+            print(f"OneInchFusionAdapter: {fusion_adapter.address}")
+            registry.set_adapter(fusion_adapter.address, fusion_adapter.limit_order_protocol())
+            registry.activate_adapter(fusion_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 

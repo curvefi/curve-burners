@@ -52,11 +52,13 @@ struct OrderWords:
 
 # Every field is a static ABI type, so the struct encodes to 8 words.
 ENCODED_ORDER_LEN: constant(uint256) = 8 * 32
-# Decoding bound for an order extension carried next to the order. Only
-# extensions without amount getters are accepted (see the adapter), which
-# leaves predicates, permits and interactions; longer ones fail ABI decoding
-# before any check runs.
-MAX_EXTENSION: constant(uint256) = 1024
+# Decoding bound for an order extension carried next to the order. The plain
+# adapter accepts only getter-less extensions (predicates, permits,
+# interactions); the FeeTaker and Fusion adapters accept their fee tails with
+# a resolver whitelist, and the bound covers a Fusion extension with a few
+# dozen whitelisted resolvers. Longer ones fail ABI decoding before any check
+# runs.
+MAX_EXTENSION: constant(uint256) = 2048
 
 # OrderLib._LIMIT_ORDER_TYPEHASH.
 ORDER_TYPE_HASH: constant(bytes32) = keccak256(
@@ -254,3 +256,42 @@ def _field_is_empty(_offsets: uint256, _field: uint256) -> bool:
     if _field > 0:
         begin = (_offsets >> (32 * (_field - 1))) & FIELD_END_MASK
     return end == begin
+
+
+@internal
+@pure
+def _field(
+    _extension: Bytes[MAX_EXTENSION], _offsets: uint256, _field: uint256
+) -> Bytes[MAX_EXTENSION]:
+    """
+    @notice ExtensionLib._get / OffsetsLib.get: the bytes of extension field
+            `_field` (0..7), empty for an extension shorter than a word. The
+            protocol reverts on an end past the extension and reads a bogus
+            length for an end below its start; both fail here with
+            BadExtensionOffsets.
+    """
+    if len(_extension) < 32:
+        return b""
+    end: uint256 = (_offsets >> (32 * _field)) & FIELD_END_MASK
+    begin: uint256 = 0
+    if _field > 0:
+        begin = (_offsets >> (32 * (_field - 1))) & FIELD_END_MASK
+    assert begin <= end and 32 + end <= len(_extension), (
+        OrderNotValid(reason="BadExtensionOffsets")
+    )
+    if end == begin:
+        return b""
+    return slice(_extension, 32 + begin, end - begin)
+
+
+@internal
+@pure
+def _bind_salt(_salt: uint256, _extension: Bytes[MAX_EXTENSION]) -> uint256:
+    """
+    @notice The salt of an order carrying `_extension`, bound the way
+            OrderLib.isValidExtension checks it and the 1inch SDK builds it
+            (LimitOrder.buildSalt): the publisher's salt in the high 96 bits
+            (higher bits of `_salt` are dropped), the extension hash in the
+            low 160.
+    """
+    return (_salt << 160) | (convert(keccak256(_extension), uint256) & EXTENSION_HASH_MASK)

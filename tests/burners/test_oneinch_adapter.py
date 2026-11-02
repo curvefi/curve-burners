@@ -98,7 +98,9 @@ def protocol_deployer():
 
 @pytest.fixture(scope="module")
 def protocol(protocol_deployer):
-    return protocol_deployer.deploy(ROUTER_NAME, ROUTER_VERSION, DOMAIN_FIELDS, bytes(32))
+    return protocol_deployer.deploy(
+        ROUTER_NAME.encode(), ROUTER_VERSION.encode(), DOMAIN_FIELDS, bytes(32)
+    )
 
 
 @pytest.fixture(scope="module")
@@ -242,7 +244,9 @@ def test_deploy_rejects_zero_protocol(adapter_deployer):
 
 
 def test_deploy_rejects_unexpected_domain_fields(protocol_deployer, adapter_deployer):
-    with_salt = protocol_deployer.deploy(ROUTER_NAME, ROUTER_VERSION, b"\x1f", bytes(32))
+    with_salt = protocol_deployer.deploy(
+        ROUTER_NAME.encode(), ROUTER_VERSION.encode(), b"\x1f", bytes(32)
+    )
     with boa.reverts(custom_err("BadDomain()")):
         adapter_deployer.deploy(with_salt)
 
@@ -252,7 +256,9 @@ def test_deploy_rejects_a_protocol_hashing_under_another_domain(
 ):
     # eip712Domain() describes one domain, hashOrder uses another (a proxy
     # or a fork with its own separator): the cross-check fails.
-    lying = protocol_deployer.deploy(ROUTER_NAME, ROUTER_VERSION, DOMAIN_FIELDS, FOREIGN_DOMAIN)
+    lying = protocol_deployer.deploy(
+        ROUTER_NAME.encode(), ROUTER_VERSION.encode(), DOMAIN_FIELDS, FOREIGN_DOMAIN
+    )
     with boa.reverts(custom_err("BadDomain()")):
         adapter_deployer.deploy(lying)
 
@@ -287,9 +293,9 @@ def test_malformed_payloads_fail_decoding(harness, adapter, make_order, validate
         validate(order, _prefix(adapter))
     with boa.reverts():
         validate(order, _prefix(adapter) + _bare(order)[: 8 * 32])
-    oversized = bind_extension(order, bytes(1025))
+    oversized = bind_extension(order, bytes(2049))
     with boa.reverts():
-        validate(oversized, extension=bytes(1025))
+        validate(oversized, extension=bytes(2049))
 
 
 def test_non_canonical_encodings_rejected(harness, adapter, make_order, validate):

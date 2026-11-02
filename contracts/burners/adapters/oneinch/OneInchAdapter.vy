@@ -19,8 +19,10 @@
      orders order_for builds); the protocol forwards sig verbatim to the
      maker's (the auction's) isValidSignature (see order_for and
      isValidSignature). Linear pricing only: extensions with amount getters
-     (Fusion settlement, FeeTaker) are rejected, so the taking amount is a
-     fixed ratio of the making amount, rounded in the maker's favour, and
+     (Fusion settlement, FeeTaker) are rejected here and handled by the
+     sibling adapters that import this contract as a module
+     (OneInchFeeTakerAdapter, OneInchFusionAdapter), so the taking amount is
+     a fixed ratio of the making amount, rounded in the maker's favour, and
      the order's takingAmount is a floor on what any fill pays per unit.
      The protocol checks a contract signature on the first fill of an order
      only: a partially filled standing ask keeps filling at its signed price
@@ -146,6 +148,31 @@ def __init__(_limit_order_protocol: address):
 # Publishing
 
 
+@internal
+@view
+def _quote_lot(
+    _auction: IDutchAuction, _token: address, _sell_amount: uint256
+) -> (uint256, uint256, uint256):
+    """
+    @notice The amounts and validity bound of an order over a live lot: the
+            amount to sell (everything available for 0), its taking amount
+            at the current block, and the lot end as the order expiration.
+    @dev Shared by every 1inch adapter's order_for. The expiration is
+         inclusive on the protocol side; check_order rejects at lot_end
+         anyway (LotInactive), so nothing settles past the window.
+    """
+    sell_amount: uint256 = _sell_amount
+    if sell_amount == 0:
+        sell_amount = staticcall _auction.available(_token)
+    assert sell_amount > 0, NothingToSell()
+    lot_start: uint256 = 0
+    lot_end: uint256 = 0
+    lot_start, lot_end = staticcall _auction.window(_token)
+    assert lot_end <= oneinch.EXPIRATION_MASK, BadExpiration()
+    taking_amount: uint256 = staticcall _auction.getAmountNeeded(_token, sell_amount)
+    return sell_amount, taking_amount, lot_end
+
+
 @external
 @view
 def order_for(
@@ -167,16 +194,10 @@ def order_for(
     @param _sell_amount Amount to sell; 0 sells everything available.
     @return The order and `this_adapter ++ abi_encode(order, b"")`.
     """
-    sell_amount: uint256 = _sell_amount
-    if sell_amount == 0:
-        sell_amount = staticcall _auction.available(_token)
-    assert sell_amount > 0, NothingToSell()
-    lot_start: uint256 = 0
+    sell_amount: uint256 = 0
+    taking_amount: uint256 = 0
     lot_end: uint256 = 0
-    lot_start, lot_end = staticcall _auction.window(_token)
-    # The expiration is inclusive on the protocol side; check_order rejects
-    # at lot_end anyway (LotInactive), so nothing settles past the window.
-    assert lot_end <= oneinch.EXPIRATION_MASK, BadExpiration()
+    sell_amount, taking_amount, lot_end = self._quote_lot(_auction, _token, _sell_amount)
 
     order: oneinch.Order = oneinch.Order(
         salt=_salt,
@@ -185,13 +206,76 @@ def order_for(
         makerAsset=_token,
         takerAsset=(staticcall _auction.want()).address,
         makingAmount=sell_amount,
-        takingAmount=staticcall _auction.getAmountNeeded(_token, sell_amount),
+        takingAmount=taking_amount,
         makerTraits=PUBLISHED_TRAITS | (lot_end << oneinch.EXPIRATION_OFFSET),
     )
     return order, concat(convert(self, bytes20), abi_encode(order, b""))
 
 
 # Settlement
+
+
+@internal
+@view
+def _decode_and_check(
+    _hash: bytes32, _signature: Bytes[PAYLOAD_BOUND]
+) -> (oneinch.Order, Bytes[oneinch.MAX_EXTENSION], uint256):
+    """
+    @notice The protocol-level checks every 1inch adapter shares: decode the
+            canonical (Order, extension) pair, prove the digest, require the
+            calling auction as maker, neither USE_PERMIT2 nor UNWRAP_WETH,
+            the extension bound as the protocol binds it, and no asset
+            suffixes.
+    @dev Reverts with oneinch.OrderNotValid(reason); a payload that does not
+         decode fails ABI decoding before any check runs. Returns the order,
+         its extension and the packed extension field ends.
+    """
+    order: oneinch.Order = empty(oneinch.Order)
+    extension: Bytes[oneinch.MAX_EXTENSION] = b""
+    order, extension = abi_decode(_signature, (oneinch.Order, Bytes[oneinch.MAX_EXTENSION]))
+    # The decoder tolerates trailing bytes and loose offsets; the payload
+    # must be the one encoding of the pair.
+    assert abi_encode(order, extension) == _signature, oneinch.OrderNotValid(reason="NonCanonical")
+
+    assert oneinch._order_digest(order, self.domain_separator) == _hash, (
+        oneinch.OrderNotValid(reason="InvalidHash")
+    )
+    assert order.maker == msg.sender, oneinch.OrderNotValid(reason="BadMaker")
+    # The executor pulls with a plain transferFrom (no Permit2 allowance
+    # exists) and the auction's receiver takes the payment token itself.
+    assert not (
+        oneinch._has_flag(order.makerTraits, oneinch.USE_PERMIT2_FLAG)
+        or oneinch._has_flag(order.makerTraits, oneinch.UNWRAP_WETH_FLAG)
+    ), oneinch.OrderNotValid(reason="BadMakerTraits")
+    oneinch._check_extension_binding(order, extension)
+    offsets: uint256 = oneinch._extension_offsets(extension)
+    # Suffixes alter the transferFrom calldata and never leave the order
+    # amounts in charge of the economics.
+    assert (
+        oneinch._field_is_empty(offsets, oneinch.MAKER_ASSET_SUFFIX)
+        and oneinch._field_is_empty(offsets, oneinch.TAKER_ASSET_SUFFIX)
+    ), oneinch.OrderNotValid(reason="BadAssetSuffix")
+    return order, extension, offsets
+
+
+@internal
+@view
+def _check_order(_order: oneinch.Order, _receiver: address):
+    """
+    @notice The shared economic check: the calling auction prices the order
+            as a whole against its live curve, with `_receiver` as the
+            resolved receiver of the taking tokens and the maker-traits
+            expiration as the validity bound (0, never expiring, fails it),
+            and reverts with its own typed error on failure.
+    """
+    assert staticcall IDutchAuction(msg.sender).check_order(
+        _order.makerAsset,
+        _order.takerAsset,
+        _receiver,
+        _order.makingAmount,
+        _order.takingAmount,
+        oneinch._expiration(_order.makerTraits),
+    )
 
 
 @external
@@ -225,42 +309,14 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[PAYLOAD_BOUND]) -> bytes4
     """
     order: oneinch.Order = empty(oneinch.Order)
     extension: Bytes[oneinch.MAX_EXTENSION] = b""
-    order, extension = abi_decode(_signature, (oneinch.Order, Bytes[oneinch.MAX_EXTENSION]))
-    # The decoder tolerates trailing bytes and loose offsets; the payload
-    # must be the one encoding of the pair.
-    assert abi_encode(order, extension) == _signature, oneinch.OrderNotValid(reason="NonCanonical")
-
-    assert oneinch._order_digest(order, self.domain_separator) == _hash, (
-        oneinch.OrderNotValid(reason="InvalidHash")
-    )
-    assert order.maker == msg.sender, oneinch.OrderNotValid(reason="BadMaker")
-    # The executor pulls with a plain transferFrom (no Permit2 allowance
-    # exists) and the auction's receiver takes the payment token itself.
-    assert not (
-        oneinch._has_flag(order.makerTraits, oneinch.USE_PERMIT2_FLAG)
-        or oneinch._has_flag(order.makerTraits, oneinch.UNWRAP_WETH_FLAG)
-    ), oneinch.OrderNotValid(reason="BadMakerTraits")
-    oneinch._check_extension_binding(order, extension)
-    offsets: uint256 = oneinch._extension_offsets(extension)
-    # Suffixes alter the transferFrom calldata; getters replace the linear
-    # price. Neither leaves the order amounts in charge of the economics.
-    assert (
-        oneinch._field_is_empty(offsets, oneinch.MAKER_ASSET_SUFFIX)
-        and oneinch._field_is_empty(offsets, oneinch.TAKER_ASSET_SUFFIX)
-    ), oneinch.OrderNotValid(reason="BadAssetSuffix")
+    offsets: uint256 = 0
+    order, extension, offsets = self._decode_and_check(_hash, _signature)
+    # Getters replace the linear price; the fee-taking ones have their own
+    # adapters.
     assert (
         oneinch._field_is_empty(offsets, oneinch.MAKING_AMOUNT_DATA)
         and oneinch._field_is_empty(offsets, oneinch.TAKING_AMOUNT_DATA)
     ), oneinch.OrderNotValid(reason="BadAmountGetter")
 
-    # The shared economic check: the calling auction prices the fill against
-    # its live curve and reverts with its own typed error on failure.
-    assert staticcall IDutchAuction(msg.sender).check_order(
-        order.makerAsset,
-        order.takerAsset,
-        oneinch._receiver(order),
-        order.makingAmount,
-        order.takingAmount,
-        oneinch._expiration(order.makerTraits),
-    )
+    self._check_order(order, oneinch._receiver(order))
     return c.ERC1271_MAGIC_VALUE
