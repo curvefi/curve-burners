@@ -1,7 +1,7 @@
 import time
 from abc import abstractmethod
 
-from fee_keeper import BrownieData
+from keepers.fee_keeper import BrownieData
 from utils import Registrar, prune_config
 
 

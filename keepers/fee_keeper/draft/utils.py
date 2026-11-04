@@ -53,7 +53,7 @@ class Chain(Enum):
     # Polygon = 137
 
 
-def load_config_from_file(path="fee_keeper/fee_keeper.yaml") -> dict:
+def load_config_from_file(path="keepers/fee_keeper/fee_keeper.yaml") -> dict:
     with open(path, "r") as stream:
         config = yaml.safe_load(stream)
     config["chain"] = Chain[config["chain"]]
@@ -102,7 +102,7 @@ class Registrar:
 
 
 class Cached:
-    _DIR = "fee_keeper/cache"
+    _DIR = "keepers/fee_keeper/cache"
 
     def __getstate__(self) -> dict:
         """Should be of type dict"""

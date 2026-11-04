@@ -1,6 +1,8 @@
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# The legacy fee_keeper (brownie-era scripts and drafts) is kept as-is, unlinted.
+extend-exclude = ["keepers/fee_keeper"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "TID252"]
@@ -13,4 +15,4 @@ ignore = [
 ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
-known-first-party = ["contracts", "scripts", "tests"]
+known-first-party = ["contracts", "keepers", "scripts", "tests"]

@@ -14,7 +14,7 @@ Main purpose is to show example of all features along with having open-source wo
 # Run
 Fill [config](fee_keeper.yaml) and run
 ```bash
-python3 fee_keeper/main.py
+python3 keepers/fee_keeper/main.py
 ```
 
 

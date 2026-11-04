@@ -1,4 +1,4 @@
-from fee_keeper.draft.collect.main import collect
+from keepers.fee_keeper.draft.collect.main import collect
 from exchange.main import exchange
 from utils import EPOCH
 from forward.main import forward
