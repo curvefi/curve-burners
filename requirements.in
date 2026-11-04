@@ -10,3 +10,7 @@ vvm==0.3.2
 
 hypothesis==6.102.4
 python-dotenv==1.0.1
+
+# auction_keeper runtime (node access and the YAML config).
+web3==7.16.0
+PyYAML==6.0.3

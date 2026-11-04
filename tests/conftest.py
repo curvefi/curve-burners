@@ -16,6 +16,32 @@ class Epoch(IntFlag):
     FORWARD = 8
 
 
+# Thursday 2026-10-29 12:00 UTC: the middle of a SLEEP frame of the FeeCollector
+# calendar (START_TIME 1600300800 + n * WEEK + 12 h).
+PINNED_START = 1793361600
+
+
+@pytest.fixture(scope="session", autouse=True)
+def pinned_clock():
+    """boa seeds the EVM clock from the wall clock, and the FeeCollector calendar
+    makes several suites depend on the weekday they start in (staging in COLLECT
+    lands in the current week, in SLEEP in the next one). Start every session at
+    the same SLEEP instant instead; `time_travel` moves forward from there."""
+    boa.env.evm.patch.timestamp = PINNED_START
+
+
+@pytest.fixture(scope="module", autouse=True)
+def fresh_storage_traces():
+    """boa keeps `sstore_trace`/`sha3_trace` for the whole session and only resets
+    them on `fork_rpc`. A mock deployed at an address an earlier module's mock
+    used inherits that mock's nested-HashMap key paths, and boa's storage dump
+    on a revert then walks them against the wrong layout (boa 0.2.8,
+    `StorageVar.get`: 'IntegerT' object has no attribute 'key_type'). Start
+    each module with empty traces."""
+    boa.env.sstore_trace.clear()
+    boa.env.sha3_trace.clear()
+
+
 @pytest.fixture(scope="session")
 def accounts():
     return [boa.env.generate_address() for _ in range(10)]

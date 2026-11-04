@@ -44,7 +44,14 @@ python scripts/gas_report.py --output gas-report.json   # measure (defaults to t
 python scripts/compare_gas_report.py --head gas-report.json --base other.json --output gas-report.md
 ```
 
-## CowSwap
-In order to swap accumulated coins into crvUSD, one should post orders to CowSwap backend.
-This can be done by running [WatchTower](https://github.com/cowprotocol/watch-tower).
-Instruction for setup can be found [here](keepers/fee_keeper/WatchTower.md).
+## Keeper backend
+[`auction_keeper`](keepers/auction_keeper/README.md) publishes the Dutch auction lots to the
+settlement adapters (CoW orderbook today) and runs custom takes:
+```bash
+python -m keepers.auction_keeper run --config config.yaml
+```
+
+## CowSwap (legacy CowSwapBurner)
+Orders for the deprecated `CowSwapBurner` were posted by running
+[WatchTower](https://github.com/cowprotocol/watch-tower); the setup is kept in
+[keepers/fee_keeper/WatchTower.md](keepers/fee_keeper/WatchTower.md).
