@@ -38,6 +38,23 @@ class RailSettings:
         return os.environ.get(self.api_key_env) if self.api_key_env else None
 
 
+@dataclass(frozen=True)
+class OneInchSettings(RailSettings):
+    """The three 1inch publishers (plain LOP, FeeTaker orderbook, Fusion)
+    share one Developer Portal key. ``post`` applies to the plain publisher
+    only: the public orderbook relays FeeTaker orders alone, so plain orders
+    are logged for direct fills unless a private feed is configured."""
+
+    api_key_env: str | None = "ONEINCH_API_KEY"
+    # Base URLs without the chain id; the publishers append /{chainId}/...
+    orderbook_url: str = "https://api.1inch.dev/orderbook/v4.0"
+    fusion_url: str = "https://api.1inch.dev/fusion"
+    # Fusion custom preset: the resolver auction length and how far above the
+    # curve quote it starts (the end amount is the quote).
+    fusion_auction_duration: int = 180
+    fusion_start_premium_bps: int = 100
+
+
 # Integer rail fields that may be zero (the rest must be positive).
 _NON_NEGATIVE_FIELDS: set[str] = set()
 

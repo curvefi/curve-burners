@@ -284,6 +284,81 @@ class CowAdapterContract(AdapterContract):
         return bytes(self._read_one(self.APP_DATA))
 
 
+# 1inch Limit Order Protocol v4 order (adapters/oneinch/oneinch.vy Order):
+# salt, maker, receiver, makerAsset, takerAsset, makingAmount, takingAmount,
+# makerTraits.
+ONEINCH_ORDER_ABI = "(uint256,address,address,address,address,uint256,uint256,uint256)"
+ONEINCH_FEES_ABI = "(uint256,uint256,uint256,uint256)"
+ONEINCH_RECEIVERS_ABI = "(address,address,address)"
+ONEINCH_AUCTION_ABI = "(uint256,uint256,uint256,uint256,uint256,uint256)"
+ONEINCH_SURPLUS_ABI = "(uint256,uint256)"
+
+
+class OneInchAdapterContract(AdapterContract):
+    """``OneInchAdapter``: the plain LOP v4 adapter (the FeeTaker and Fusion
+    adapters export the same protocol and domain getters)."""
+
+    LIMIT_ORDER_PROTOCOL = Function("limit_order_protocol()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function("order_for(address,address,uint256,uint256)", (ONEINCH_ORDER_ABI, "bytes"))
+
+    def limit_order_protocol(self) -> str:
+        return to_checksum_address(self._read_one(self.LIMIT_ORDER_PROTOCOL))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(
+        self, auction: str, token: str, salt: int, sell_amount: int = 0
+    ) -> tuple[tuple, bytes]:
+        """The adapter's publishable (order, signature) for a live lot; typed reverts bubble."""
+        order, signature = self._read(self.ORDER_FOR, auction, token, salt, sell_amount)
+        return tuple(order), bytes(signature)
+
+
+class OneInchFeeTakerAdapterContract(OneInchAdapterContract):
+    FEE_TAKER = Function("fee_taker()", ("address",))
+    ORDER_FOR_EXT = Function(
+        "order_for(address,address,uint256,uint256,bytes)", (ONEINCH_ORDER_ABI, "bytes")
+    )
+    DESCRIBE = Function("describe(bytes)", (ONEINCH_FEES_ABI, ONEINCH_RECEIVERS_ABI, "uint256"))
+
+    def fee_taker(self) -> str:
+        return to_checksum_address(self._read_one(self.FEE_TAKER))
+
+    def order_for_extension(
+        self, auction: str, token: str, salt: int, sell_amount: int, extension: bytes
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(
+            self.ORDER_FOR_EXT, auction, token, salt, sell_amount, extension
+        )
+        return tuple(order), bytes(signature)
+
+    def describe(self, extension: bytes) -> tuple:
+        """(fees, receivers, whitelist size) after the adapter's shape checks."""
+        return self._read(self.DESCRIBE, extension)
+
+
+class OneInchFusionAdapterContract(OneInchFeeTakerAdapterContract):
+    SETTLEMENT = Function("settlement()", ("address",))
+    DESCRIBE = Function(
+        "describe(bytes)",
+        (
+            ONEINCH_FEES_ABI,
+            ONEINCH_RECEIVERS_ABI,
+            "uint256",
+            ONEINCH_AUCTION_ABI,
+            ONEINCH_SURPLUS_ABI,
+        ),
+    )
+
+    def settlement(self) -> str:
+        return to_checksum_address(self._read_one(self.SETTLEMENT))
+
+    def fee_taker(self) -> str:
+        return self.settlement()
+
+
 class AuctionTaker(Contract):
     """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route."""
 
@@ -310,6 +385,7 @@ __all__ = [
     "ERC1271_INVALID",
     "ERC1271_MAGIC_VALUE",
     "LOT_STAGED_TOPIC",
+    "ONEINCH_ORDER_ABI",
     "AdapterConfig",
     "AdapterContract",
     "AdapterRegistry",
@@ -319,6 +395,9 @@ __all__ = [
     "Erc20",
     "Lot",
     "LotView",
+    "OneInchAdapterContract",
+    "OneInchFeeTakerAdapterContract",
+    "OneInchFusionAdapterContract",
     "address_word",
     "lot_staged_token",
 ]
