@@ -1,0 +1,1444 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Curve fee auction monitor</title>
+    <style>
+      :root {
+        --bg: #f8f7f4;
+        --ink: #1c1c1c;
+        --muted: #5f5f5f;
+        --line: #d9d6cf;
+        --panel: #ffffff;
+        --accent: #0c4a6e;
+        --good: #1b5e20;
+        --warn: #9a3412;
+        --bad: #b91c1c;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        background: var(--bg);
+        color: var(--ink);
+        line-height: 1.4;
+      }
+      main, footer { max-width: 1200px; margin: 0 auto; padding: 0 16px; }
+      header { max-width: 1200px; margin: 28px auto 8px; padding: 0 16px; }
+      h1 { margin: 0 0 4px; font-size: 26px; }
+      h2 { margin: 28px 0 8px; font-size: 20px; }
+      h3 { margin: 20px 0 6px; font-size: 14px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); }
+      a { color: var(--accent); }
+      .subtle { color: var(--muted); font-size: 13px; }
+      section.network { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px 16px; margin: 16px 0; }
+      .table-wrap { overflow-x: auto; }
+      table { width: 100%; border-collapse: collapse; font-size: 13px; }
+      th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; white-space: nowrap; }
+      th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+      td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+      tbody tr:hover { background: #f4f2ec; }
+      dl.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 16px; margin: 0; font-size: 13px; }
+      dl.kv dt { color: var(--muted); }
+      dl.kv dd { margin: 0; font-variant-numeric: tabular-nums; }
+      .error { color: var(--bad); }
+      .warn { color: var(--warn); }
+      .good { color: var(--good); }
+      .loading { color: var(--muted); }
+      code { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+      button { padding: 6px 12px; font: inherit; cursor: pointer; background: var(--accent); color: #fff; border: none; border-radius: 6px; }
+      button.secondary { background: #e8e5dd; color: var(--ink); }
+      button.small { padding: 2px 8px; font-size: 12px; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      button.copy { background: none; color: var(--muted); padding: 0 4px; font-size: 13px; }
+      button.copy:hover { color: var(--accent); }
+      input[type="url"], input[type="text"], input[type="password"], input[type="number"] { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; }
+      input[type="url"] { width: 100%; max-width: 420px; }
+      input[type="password"], input[type="text"] { width: 150px; }
+      input[type="number"] { width: 90px; }
+      details { margin: 12px 0; }
+      summary { cursor: pointer; font-weight: 600; }
+      details.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 8px 16px; margin: 12px 0; }
+      details.panel > summary { padding: 4px 0; }
+      .controls { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 12px 0 4px; }
+      .controls label { margin: 0; font-size: 13px; }
+      select { font: inherit; font-size: 13px; padding: 5px 8px; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+      .totals { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+      .past .live { display: none; }
+      .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 0 32px; }
+      table.week { width: auto; margin: 8px 0 12px; }
+      table.week th, table.week td { text-align: center; padding: 4px 10px; }
+      table.week .today { font-weight: 700; background: #f4f2ec; }
+      table.week td.phase { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+      table.fees { width: auto; display: inline-table; margin: 2px 0; }
+      table.fees th, table.fees td { padding: 2px 10px; }
+      @media (max-width: 800px) { .two-col { grid-template-columns: 1fr; } }
+      .title-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 8px 16px; }
+      .title-row .controls { margin: 0; }
+      details.rpc { margin: 6px 0 0; font-size: 12px; color: var(--muted); }
+      details.rpc > summary { font-weight: 400; color: var(--muted); font-size: 12px; }
+      details.rpc > summary::after { content: " · settings"; color: var(--accent); }
+      details.rpc .controls { margin: 6px 0 0; padding: 8px 10px; background: #f1efe9; border-radius: 6px; }
+      details.rpc label { color: var(--muted); }
+      footer { margin: 32px auto 48px; padding-top: 12px; border-top: 1px solid var(--line); font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div class="title-row">
+        <h1>Curve fee auction monitor</h1>
+        <div class="controls">
+          <label>Display
+            <select id="week-mode">
+              <option value="week">Mon → Sun</option>
+              <option value="epoch">Thu → Wed (epoch)</option>
+            </select>
+          </label>
+          <label>Time
+            <select id="tz-mode">
+              <option value="local">local</option>
+              <option value="utc">UTC</option>
+            </select>
+          </label>
+        </div>
+      </div>
+      <p class="subtle" id="cal-line">…</p>
+      <div class="controls">
+        <label>Network <select id="network-select"></select></label>
+        <label>Week <select id="week-select"></select></label>
+        <button id="week-prev" class="secondary" title="previous week">◀</button>
+        <button id="week-next" class="secondary" title="next week">▶</button>
+        <button id="refresh">Refresh</button>
+        <span class="subtle">updated <span id="last-refreshed">never</span></span>
+      </div>
+      <details class="rpc" id="rpc-panel">
+        <summary id="rpc-line">RPC</summary>
+      <div class="controls">
+        <label>Provider
+          <select id="rpc-provider">
+            <option value="public">public</option>
+            <option value="drpc">dRPC</option>
+            <option value="ankr">Ankr</option>
+            <option value="alchemy">Alchemy</option>
+            <option value="custom">custom URL</option>
+          </select>
+        </label>
+        <label>dRPC key <input type="password" id="key-drpc" autocomplete="off" /></label>
+        <label>Ankr key <input type="password" id="key-ankr" autocomplete="off" /></label>
+        <label>Alchemy key <input type="password" id="key-alchemy" autocomplete="off" /></label>
+        <label>custom URL <input type="url" id="rpc-custom" /></label>
+        <label>logs span <input type="number" id="logs-span" min="1" step="1" title="blocks per eth_getLogs request the endpoint accepts" /></label>
+        <button id="rpc-save" class="secondary small">Save</button>
+        <button id="rpc-reset" class="secondary small">Default</button>
+        <span>keys stay in this browser's localStorage</span>
+      </div>
+      </details>
+    </header>
+
+    <main id="view">
+      <section class="network">
+        <h2 id="week-title">…</h2>
+        <div class="table-wrap">
+          <table class="week">
+            <thead><tr id="week-days"></tr></thead>
+            <tbody><tr id="week-phases"></tr></tbody>
+          </table>
+        </div>
+        <dl class="kv" id="week-kv"></dl>
+      </section>
+
+      <section class="network">
+        <h3>Lots</h3>
+        <p class="subtle" id="lots-window"></p>
+        <div class="table-wrap">
+          <table id="lots-table">
+            <thead>
+              <tr>
+                <th>Token</th>
+                <th class="num">Sold</th><th class="num">Paid</th><th class="num">Avg price (#fills)</th>
+                <th class="num live">Available</th>
+              </tr>
+            </thead>
+            <tbody id="lots"><tr><td colspan="5" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="totals" id="lots-totals"></p>
+        <details id="stage-panel">
+          <summary>Tokens on the FeeCollector not staged this week</summary>
+          <p class="subtle">
+            Tokens that received fees on the FeeCollector in the last
+            <select id="stage-period"><option value="1">1 month</option><option value="3" selected>3 months</option><option value="12">12 months</option></select>
+            (ERC-20 <code>Transfer</code> logs), still held and without a lot this week
+            <button id="stage-load" class="secondary small">Load</button>. The log scan is the slow part.
+            Collect stages them: <code>FeeCollector.collect(tokens)</code> from a browser wallet, allowed only in COLLECT.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th></th><th>Token</th><th class="num">On FeeCollector</th><th>Last fee transfer</th><th>Last staged</th></tr></thead>
+              <tbody id="stage"><tr><td colspan="5" class="loading">Press Load to scan.</td></tr></tbody>
+            </table>
+          </div>
+          <p><button id="stage-collect" class="small" disabled>collect selected</button> <span class="subtle" id="stage-line"></span></p>
+        </details>
+      </section>
+
+      <section class="network">
+        <h3>Fills</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Time</th><th>Token</th><th class="num">Sold</th><th class="num">Paid</th>
+                <th class="num">Price</th><th>Filler</th><th>Tx / order</th>
+              </tr>
+            </thead>
+            <tbody id="takes"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div id="orders-section">
+        <p class="subtle" id="orders-line">Loading…</p>
+        <details id="orders-details">
+          <summary id="orders-summary">Filled and open orders</summary>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Created</th><th>Status</th><th class="num">Sell</th><th class="num">Buy (min)</th>
+                    <th class="num">Executed buy</th><th>Valid to</th><th>Order</th>
+                </tr>
+              </thead>
+              <tbody id="orders"><tr><td colspan="7" class="loading">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </details>
+        </div>
+      </section>
+
+      <details class="panel" id="config-panel">
+        <summary>Contracts and configuration</summary>
+        <div class="two-col">
+          <div>
+            <h3>FeeCollector</h3>
+            <dl class="kv" id="collector"></dl>
+          </div>
+          <div>
+            <h3>Auction economics</h3>
+            <dl class="kv" id="burner"></dl>
+          </div>
+        </div>
+        <h3>Adapters (AdapterRegistry)</h3>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Adapter</th><th>Executor</th><th>Active</th><th>Approvals</th></tr></thead>
+            <tbody id="adapters"><tr><td colspan="4" class="loading">Open to load…</td></tr></tbody>
+          </table>
+        </div>
+        <p class="subtle" id="sync-line">
+          Sync sends <code>sync_executor_approvals(executor, tokens)</code> for the tokens staged this week whose allowance
+          to the executor is below the amount still available (permissionless; needs a browser wallet on this network).
+        </p>
+        <div class="two-col">
+          <div>
+            <h3>Settings</h3>
+            <dl class="kv" id="addresses-settings"></dl>
+          </div>
+          <div>
+            <h3>Collection</h3>
+            <dl class="kv" id="addresses-collection"></dl>
+          </div>
+        </div>
+      </details>
+    </main>
+
+    <footer>
+      <p class="subtle">
+        History is rebuilt from <code>LotStaged</code>/<code>Taken</code> logs of the burner via
+        <code>eth_getLogs</code> (once per week view, cached for past weeks); the current week also reads live state with
+        <code>eth_call</code>. The configuration panel loads when opened, the staging scan on its Load button. Link to a view: <code>#network/YYYY-MM-DD</code> (epoch week start).
+      </p>
+    </footer>
+
+    <script>
+      // ---------------------------------------------------------------------
+      // Config: adding a network is adding one entry to CONFIG.networks.
+      // contracts.settings = the auction deployment (an entry is "0x…" or
+      // { name, address }: the key is the label, the name is the link text);
+      // contracts.collection = where fees sit before they reach the FeeCollector;
+      // contracts.known = addresses to name in tables without listing them.
+      // ---------------------------------------------------------------------
+      const CONFIG = {
+        calendar: {
+          startTime: 1600300800, // FeeCollector START_TIME (Thu 2020-09-17 00:00 UTC)
+          week: 7 * 86400,
+          // name, offset of start / end within the week, Epoch flag bit
+          phases: [
+            ["SLEEP", 0, 4 * 86400, 1],
+            ["COLLECT", 4 * 86400, 5 * 86400, 2],
+            ["EXCHANGE", 5 * 86400, 6 * 86400, 4],
+            ["FORWARD", 6 * 86400, 7 * 86400, 8],
+          ],
+        },
+        // RPC URL templates per provider; `${key}` is replaced with the stored key.
+        providers: {
+          drpc: { polygon: "https://lb.drpc.org/ogrpc?network=polygon&dkey=${key}", fraxtal: "https://lb.drpc.org/ogrpc?network=fraxtal&dkey=${key}", logsSpan: 100 },
+          ankr: { polygon: "https://rpc.ankr.com/polygon/${key}", fraxtal: "https://rpc.ankr.com/fraxtal/${key}", logsSpan: 10000 },
+          alchemy: { polygon: "https://polygon-mainnet.g.alchemy.com/v2/${key}", fraxtal: "https://frax-mainnet.g.alchemy.com/v2/${key}", logsSpan: 2000 },
+        },
+        networks: [
+          {
+            key: "polygon",
+            name: "Polygon",
+            chainId: 137,
+            rpc: "https://polygon-bor-rpc.publicnode.com", // polygon-rpc.com answers 403 as of 2026-10-31
+            explorer: "https://polygonscan.com",
+            cow: "polygon", // CoW orderbook chain slug; null = native take only
+            since: 1791158400, // burner deployed 2026-10-05: first week in the history selector
+            logsRange: 10000, // eth_getLogs block span the RPC accepts (publicnode and drpc: 10000)
+            blockTime: 2.1, // seconds, only a first guess for timestamp -> block
+            target: { address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", symbol: "USDC", decimals: 6 },
+            contracts: {
+              settings: {
+                FeeCollector: "0xf03591c62A57F71f5EbD774453db57ADCC299a6a",
+                DutchAuctionBurner: "0x3Fe661204F04ce0793D40FeC90aEEd6539dfa788",
+                AdapterRegistry: "0xEb4b6A015AB06aad3C9EEDd3b8cf6116bF484961",
+                Bridger: { name: "CCTPBridger", address: "0x8DA3f8048fc9Ec2A929786256B39642240BD456a" },
+              },
+              collection: {
+                "PoolProxy (fee receiver)": "0x774D1Dba98cfBD1F2Bc3A1F59c494125e07C48F9",
+                ProxyFeeCollectorBurner: "0x16F38025A7BeAB7A445721017C4f3945c7244447",
+              },
+              known: {
+                CowAdapter: "0x54322A6d2D1c96e847c22b2e519BbF90Cc8e8f98",
+              },
+            },
+          },
+          {
+            key: "fraxtal",
+            name: "Fraxtal",
+            chainId: 252,
+            rpc: "https://rpc.frax.com",
+            explorer: "https://fraxscan.com",
+            cow: null, // registry is empty: native take only (AuctionTaker)
+            since: 1792713600, // burner deployed 2026-10-23
+            logsRange: 500000, // rpc.frax.com serves >1M-block ranges
+            blockTime: 2,
+            target: { address: "0xFc00000000000000000000000000000000000001", symbol: "frxUSD", decimals: 18 },
+            contracts: {
+              settings: {
+                FeeCollector: "0xc38a3A402837c7829c5E74059e98e2531502e466",
+                DutchAuctionBurner: "0xea982B86c6b8a4DFB10eA128522567F02794B9B3",
+                AdapterRegistry: "0x0fE9C419aC0bE5cfCcAaCe266fE7d64202DA7eD3",
+                AuctionTaker: "0xbC80ef170705232A82752d87334429218d988996",
+                Bridger: { name: "LZOFTBridger", address: "0xa833a94f70A492CB4Ae289415Cbae130c1Bec3BD" },
+              },
+              collection: {
+                "Legacy fee receiver": "0x8b3EFBEfa6eD222077455d6f0DCdA3bF4f3F57A6",
+              },
+              known: {},
+            },
+          },
+        ],
+      };
+
+      // 4-byte selectors, precomputed (keccak256 of the signature).
+      const SEL = {
+        // FeeCollector
+        epoch: "0x900cf0cf", // epoch() -> Epoch flag (SLEEP=1, COLLECT=2, EXCHANGE=4, FORWARD=8)
+        target: "0xd4b83992", // target() -> address
+        max_fee: "0xc47339c2", // max_fee(uint256 epoch) -> uint256 (1e18 = 100%)
+        fee: "0xddca3f43", // fee() -> uint256 current keeper fee (1e18 = 100%)
+        burner: "0x27810b6e", // burner() -> address
+        collect: "0xa4520aee", // collect(address[] coins), receiver = msg.sender
+        // ERC-20
+        balanceOf: "0x70a08231", // balanceOf(address) -> uint256
+        allowance: "0xdd62ed3e", // allowance(address owner, address spender) -> uint256
+        decimals: "0x313ce567", // decimals() -> uint8
+        symbol: "0x95d89b41", // symbol() -> string (or bytes32 on old tokens)
+        // DutchAuctionBurner (dutch_auction core + adapters module)
+        want: "0x1f1fcd51", // want() -> address (payment token, mirrors target)
+        receiver: "0xf7260d3e", // receiver() -> address (FeeCollector)
+        start_total: "0x7bf34e0d", // start_total() -> uint256 (want for a full lot at window start)
+        floor_total: "0xfa1e2181", // floor_total() -> uint256 (want for a full lot at window end)
+        step_duration: "0xface81b2", // step_duration() -> uint256 seconds
+        auction_length: "0x939e0bf3", // auction_length() -> uint256 seconds
+        registry: "0x7b103999", // registry() -> address
+        lots: "0x9038801c", // lots(address token) -> (uint256 staged_at, uint256 initial_amount)
+        window: "0xf3dac3da", // window(address token) -> (uint256 start, uint256 end)
+        available: "0x10098ad5", // available(address token) -> uint256
+        price: "0xaea91078", // price(address token) -> uint256 raw want per 1e18 raw token units
+        sync_executor_approvals: "0xb81868aa", // sync_executor_approvals(address executor, address[] tokens)
+        // AdapterRegistry
+        get_adapters: "0x0d6b180c", // get_adapters() -> address[]
+        get_adapter: "0x388b17d2", // get_adapter(address) -> (address executor, bool active)
+      };
+
+      // Event topics (keccak256 of the Vyper event signatures in auction/dutch_auction.vy)
+      const TOPIC = {
+        // LotStaged(token indexed, initial_amount, start_total, floor_total, start, end)
+        LotStaged: "0x975d6df2994d6289bd117d40b5be204c50ab26615ff9bb5685b2efd9ec49a892",
+        // Taken(token indexed, caller indexed, receiver, amount_out, payment, remaining_balance)
+        Taken: "0xb3ec1b9819bd7acdc5dced75778ce2510829c094f1ab60da8dc13f1780371d09",
+        // ERC-20 Transfer(from indexed, to indexed, value)
+        Transfer: "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+      };
+
+      const STORAGE_KEY = "curve-burn-monitor";
+      const DAY = 86400;
+
+      // ---------------------------------------------------------------------
+      // Settings (localStorage, best effort)
+      // ---------------------------------------------------------------------
+      function loadSettings() {
+        try {
+          return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}") || {};
+        } catch (e) {
+          return {};
+        }
+      }
+      function saveSettings(settings) {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+        } catch (e) {
+          /* private mode or blocked storage: settings live for this page load only */
+        }
+      }
+      const prefs = () => {
+        const s = loadSettings();
+        return { weekMode: s.weekMode || "week", tz: s.tz || "local", provider: s.provider || "public", keys: s.keys || {}, custom: s.custom || {}, logsSpan: s.logsSpan || {} };
+      };
+      // RPC URL and eth_getLogs span for a network under the chosen provider.
+      function rpcFor(net) {
+        const p = prefs();
+        if (p.provider === "custom" && p.custom[net.key]) return p.custom[net.key];
+        const prov = CONFIG.providers[p.provider];
+        if (prov && prov[net.key] && p.keys[p.provider]) return prov[net.key].replace("${key}", p.keys[p.provider]);
+        return net.rpc;
+      }
+      function logsSpanFor(net) {
+        const p = prefs();
+        if (p.logsSpan[p.provider]) return Number(p.logsSpan[p.provider]);
+        const prov = CONFIG.providers[p.provider];
+        return prov ? prov.logsSpan : net.logsRange;
+      }
+
+      // ---------------------------------------------------------------------
+      // JSON-RPC: batched requests with per-request results {ok, value|error}
+      // ---------------------------------------------------------------------
+      async function rpcBatch(rpc, reqs) {
+        if (!reqs.length) return [];
+        const payload = reqs.map((r, i) => ({ jsonrpc: "2.0", id: i + 1, method: r.method, params: r.params }));
+        const res = await fetch(rpc, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(payload.length === 1 ? payload[0] : payload),
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        let json = await res.json();
+        if (!Array.isArray(json)) {
+          if (payload.length === 1) json = [json];
+          // Batch unsupported on this endpoint: fall back to one request per call.
+          else return Promise.all(reqs.map((r) => rpcBatch(rpc, [r]).then((x) => x[0])));
+        }
+        const byId = new Map(json.map((item) => [item.id, item]));
+        return payload.map((req) => {
+          const item = byId.get(req.id);
+          if (!item) return { ok: false, error: "missing batch response" };
+          if (item.error) return { ok: false, error: item.error.message || "rpc error" };
+          return { ok: true, value: item.result };
+        });
+      }
+
+      // Chunked so public endpoints do not reject a 400-request batch; a transport
+      // failure marks every request of that chunk as an error instead of throwing.
+      async function rpcMany(rpc, reqs, chunk = 40, onProgress) {
+        const out = [];
+        for (let i = 0; i < reqs.length; i += chunk) {
+          const part = reqs.slice(i, i + chunk);
+          try {
+            out.push(...(await rpcBatch(rpc, part)));
+          } catch (e) {
+            out.push(...part.map(() => ({ ok: false, error: e.message || "rpc error" })));
+          }
+          if (onProgress) onProgress(Math.min(i + chunk, reqs.length), reqs.length);
+        }
+        return out;
+      }
+      const ethCalls = (rpc, calls) =>
+        rpcMany(rpc, calls.map((c) => ({ method: "eth_call", params: [{ to: c.to, data: c.data }, "latest"] })));
+
+      async function getBlock(rpc, tag) {
+        const [r] = await rpcMany(rpc, [{ method: "eth_getBlockByNumber", params: [typeof tag === "number" ? "0x" + tag.toString(16) : tag, false] }]);
+        if (!r.ok || !r.value) throw new Error("eth_getBlockByNumber: " + (r.error || "no block"));
+        return { number: Number(BigInt(r.value.number)), timestamp: Number(BigInt(r.value.timestamp)) };
+      }
+
+      // Block whose timestamp is at or just after `ts`: estimate from the block time,
+      // then correct with a few probes. Accurate to about one block time.
+      async function blockAtTime(rpc, ts, latest, blockTime) {
+        if (ts >= latest.timestamp) return latest.number;
+        let est = Math.max(0, latest.number - Math.round((latest.timestamp - ts) / blockTime));
+        for (let i = 0; i < 6; i++) {
+          const b = await getBlock(rpc, est);
+          const diff = b.timestamp - ts;
+          if (Math.abs(diff) < 2 * blockTime) return b.number;
+          // refine the block time from this probe when it is far enough from the tip
+          if (latest.number - b.number > 1000) blockTime = (latest.timestamp - b.timestamp) / (latest.number - b.number);
+          est = Math.min(latest.number, Math.max(0, b.number - Math.round(diff / blockTime)));
+        }
+        return est;
+      }
+
+      // eth_getLogs over [from, to] in spans the endpoint accepts, batched 10 per request.
+      async function getLogs(rpc, address, topics, from, to, span, onProgress) {
+        const reqs = [];
+        for (let a = from; a <= to; a += span) {
+          const b = Math.min(to, a + span - 1);
+          reqs.push({ method: "eth_getLogs", params: [{ fromBlock: "0x" + a.toString(16), toBlock: "0x" + b.toString(16), address, topics }] });
+        }
+        const rs = await rpcMany(rpc, reqs, 10, onProgress);
+        const bad = rs.find((r) => !r.ok);
+        if (bad) throw new Error("eth_getLogs: " + bad.error);
+        return rs.flatMap((r) => r.value);
+      }
+
+      // ---------------------------------------------------------------------
+      // ABI helpers (just enough for the getters and events above)
+      // ---------------------------------------------------------------------
+      const pad32 = (hex) => hex.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+      const encAddress = (addr) => pad32(addr);
+      const encUint = (n) => pad32("0x" + BigInt(n).toString(16));
+      const word = (hex, i) => "0x" + hex.replace(/^0x/, "").slice(i * 64, i * 64 + 64).padStart(64, "0");
+      const decUint = (hex, i = 0) => (hex && hex !== "0x" ? BigInt(word(hex, i)) : 0n);
+      const decAddress = (hex, i = 0) => "0x" + word(hex, i).slice(26);
+      function decAddressArray(hex) {
+        const n = Number(decUint(hex, 1));
+        return Array.from({ length: n }, (_, i) => decAddress(hex, 2 + i));
+      }
+      function decString(hex, fallback) {
+        const data = (hex || "").replace(/^0x/, "");
+        if (!data) return fallback;
+        try {
+          let bytes;
+          if (data.length === 64) {
+            bytes = data; // bytes32 symbol
+          } else {
+            const len = Number(decUint(hex, 1));
+            bytes = data.slice(128, 128 + len * 2);
+          }
+          const arr = Uint8Array.from(bytes.match(/../g).map((b) => parseInt(b, 16)));
+          return new TextDecoder().decode(arr).replace(/\0+$/, "") || fallback;
+        } catch (e) {
+          return fallback;
+        }
+      }
+      // selector + (address, address[]) or (address[]) calldata
+      const encAddrArray = (tokens) => encUint(tokens.length) + tokens.map(encAddress).join("");
+      const encSyncApprovals = (executor, tokens) => SEL.sync_executor_approvals + encAddress(executor) + encUint(64) + encAddrArray(tokens);
+      const encCollect = (tokens) => SEL.collect + encUint(32) + encAddrArray(tokens);
+
+      // ---------------------------------------------------------------------
+      // Formatting
+      // ---------------------------------------------------------------------
+      function fmtUnits(raw, decimals, maxFrac = 4) {
+        if (typeof raw !== "bigint") return "-";
+        const base = 10n ** BigInt(decimals);
+        const whole = raw / base;
+        const frac = (raw % base).toString().padStart(Number(decimals), "0").slice(0, maxFrac).replace(/0+$/, "");
+        return Number(whole).toLocaleString("en-US") + (frac ? "." + frac : "");
+      }
+      const toNum = (raw, decimals) => Number(raw) / 10 ** Number(decimals);
+      const fmtPct = (wad) => (Number(wad) / 1e16).toFixed(3) + "%";
+      // The FeeCollector calendar is UTC; timestamps are shown in local time or UTC (header toggle).
+      const useLocal = () => prefs().tz === "local";
+      function parts(ts) {
+        const d = new Date(Number(ts) * 1000);
+        return useLocal()
+          ? { y: d.getFullYear(), mo: d.getMonth() + 1, d: d.getDate(), h: d.getHours(), mi: d.getMinutes() }
+          : { y: d.getUTCFullYear(), mo: d.getUTCMonth() + 1, d: d.getUTCDate(), h: d.getUTCHours(), mi: d.getUTCMinutes() };
+      }
+      const p2 = (n) => String(n).padStart(2, "0");
+      const tzLabel = () => (useLocal() ? Intl.DateTimeFormat().resolvedOptions().timeZone || "local" : "UTC");
+      const fmtTs = (ts) => {
+        if (!ts) return "-";
+        const p = parts(ts);
+        return `${p.y}-${p2(p.mo)}-${p2(p.d)} ${p2(p.h)}:${p2(p.mi)}`;
+      };
+      const fmtDate = (ts) => new Date(Number(ts) * 1000).toISOString().slice(0, 10); // UTC date: hashes and the week selector
+      const fmtDM = (ts) => {
+        const p = parts(ts);
+        return `${p2(p.d)}/${p2(p.mo)}`;
+      };
+      const fmtDMH = (ts) => {
+        const p = parts(ts);
+        return `${p2(p.d)}/${p2(p.mo)} ${p2(p.h)}:${p2(p.mi)}`;
+      };
+      function fmtDuration(seconds) {
+        seconds = Math.max(0, Math.floor(seconds));
+        const d = Math.floor(seconds / 86400);
+        const h = Math.floor((seconds % 86400) / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+        return (d ? `${d}d ` : "") + `${h}h ${p2(m)}m ${p2(s)}s`;
+      }
+      const EPOCH_NAMES = { 1: "SLEEP", 2: "COLLECT", 4: "EXCHANGE", 8: "FORWARD" };
+      const short = (addr) => addr.slice(0, 6) + "…" + addr.slice(-4);
+      function link(explorer, addr, text, kind = "address") {
+        const a = document.createElement("a");
+        a.href = `${explorer}/${kind}/${addr}`;
+        a.target = "_blank";
+        a.rel = "noreferrer";
+        a.textContent = text || short(addr);
+        a.title = addr;
+        return a;
+      }
+      // Address widget: a labelled explorer link (the address on hover) plus a copy button.
+      function addr(explorer, address, label) {
+        const span = document.createElement("span");
+        span.appendChild(link(explorer, address, label || short(address)));
+        const b = document.createElement("button");
+        b.className = "copy";
+        b.type = "button";
+        b.textContent = "⧉";
+        b.title = `copy ${address}`;
+        b.addEventListener("click", async () => {
+          try {
+            await navigator.clipboard.writeText(address);
+            b.textContent = "✓";
+            setTimeout(() => (b.textContent = "⧉"), 1200);
+          } catch (e) {
+            prompt("Address", address);
+          }
+        });
+        span.appendChild(b);
+        return span;
+      }
+      // Name of a configured contract, or null.
+      // A contracts entry is "0x…" or { name, address } (label = key, link text = name).
+      const entryAddr = (v) => (typeof v === "string" ? v : v.address);
+      const entryName = (key, v) => (typeof v === "string" ? key : v.name);
+      function knownName(net, address) {
+        for (const group of Object.values(net.contracts)) {
+          const hit = Object.entries(group).find(([, v]) => entryAddr(v).toLowerCase() === address.toLowerCase());
+          if (hit) return entryName(hit[0], hit[1]);
+        }
+        if (address.toLowerCase() === net.target.address.toLowerCase()) return net.target.symbol;
+        return null;
+      }
+      // For a cell built from several calls: the first failed one, else the first.
+      const firstErr = (...rs) => rs.find((x) => !x.ok) || rs[0];
+      // Put a decoded value, or a visible error, in an element.
+      function fill(el, result, render) {
+        el.textContent = "";
+        el.classList.remove("error");
+        if (!result || !result.ok || result.value === "0x") {
+          // "0x" is what a call to an address without code returns
+          el.textContent = result && result.ok ? "empty return" : "rpc error";
+          el.title = (result && (result.error || "no data returned: not a contract?")) || "no response";
+          el.classList.add("error");
+          return;
+        }
+        try {
+          const v = render(result.value);
+          if (v instanceof Node) el.appendChild(v);
+          else el.textContent = v;
+        } catch (e) {
+          el.textContent = "decode error";
+          el.title = e.message;
+          el.classList.add("error");
+        }
+      }
+      function td(row, content, cls) {
+        const cell = document.createElement("td");
+        if (cls) cell.className = cls;
+        if (content instanceof Node) cell.appendChild(content);
+        else if (content !== undefined) cell.textContent = content;
+        row.appendChild(cell);
+        return cell;
+      }
+      function kv(dl, label, valueNode) {
+        const dt = document.createElement("dt");
+        dt.textContent = label;
+        const dd = document.createElement("dd");
+        if (valueNode instanceof Node) dd.appendChild(valueNode);
+        else if (valueNode !== undefined) dd.textContent = valueNode;
+        dl.appendChild(dt);
+        dl.appendChild(dd);
+        return dd;
+      }
+      function note(tbody, text, cls, span) {
+        tbody.textContent = "";
+        td(tbody.appendChild(document.createElement("tr")), text, cls).colSpan = span;
+      }
+      const $ = (id) => document.getElementById(id);
+
+      // ---------------------------------------------------------------------
+      // Calendar (mirrors FeeCollector._epoch_ts / _epoch_time_frame)
+      // ---------------------------------------------------------------------
+      function phaseAt(ts) {
+        const cal = CONFIG.calendar;
+        const weekStart = ts - ((ts - cal.startTime) % cal.week);
+        const offset = ts - weekStart;
+        const [name, from, to, bit] = cal.phases.find(([, f, t]) => offset >= f && offset < t);
+        return { name, bit, start: weekStart + from, end: weekStart + to, weekStart };
+      }
+      const weekOf = (ts) => phaseAt(ts).weekStart; // epoch week (Thu 00:00 UTC) containing ts
+      const nowTs = () => Math.floor(Date.now() / 1000);
+      // Display week: the epoch week (Thu → Wed) or the Mon → Sun week starting on its COLLECT day.
+      const weekMode = () => prefs().weekMode;
+      const displayStart = (epochWeek) => epochWeek + (weekMode() === "week" ? 4 * DAY : 0);
+      const epochWeekAt = (ts) => (weekMode() === "week" ? weekOf(ts - 4 * DAY) : weekOf(ts)); // epoch week of the display week containing ts
+      const DAY_NAMES = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
+      function renderCalendar() {
+        const now = nowTs();
+        const phase = phaseAt(now);
+        const p = parts(now);
+        $("cal-line").textContent = `${p2(p.d)}/${p2(p.mo)}/${p.y} ${p2(p.h)}:${p2(p.mi)} ${tzLabel()} · ${phase.name} (${fmtDuration(phase.end - now)} left)`;
+      }
+
+      // ---------------------------------------------------------------------
+      // View state: network + week, mirrored in the URL hash (#polygon/2026-10-30)
+      // ---------------------------------------------------------------------
+      const state = { net: null, week: null, weekTokens: [], epochOnChain: null };
+      function weeksFor(net) {
+        const weeks = [];
+        for (let w = epochWeekAt(nowTs()); w >= weekOf(net.since); w -= CONFIG.calendar.week) weeks.push(w);
+        return weeks; // newest first
+      }
+      function readHash() {
+        const m = location.hash.match(/^#([a-z]+)(?:\/(\d{4}-\d{2}-\d{2}))?$/);
+        const net = CONFIG.networks.find((n) => n.key === (m ? m[1] : loadSettings().network)) || CONFIG.networks[0];
+        let week = epochWeekAt(nowTs());
+        if (m && m[2]) {
+          const ts = Math.floor(Date.parse(m[2] + "T00:00:00Z") / 1000);
+          if (ts && weeksFor(net).includes(weekOf(ts))) week = weekOf(ts);
+        }
+        return { net, week };
+      }
+      function writeHash() {
+        const h = `#${state.net.key}/${fmtDate(state.week)}`;
+        if (location.hash !== h) history.replaceState(null, "", h);
+      }
+      function renderControls() {
+        const ns = $("network-select");
+        ns.textContent = "";
+        for (const net of CONFIG.networks) {
+          const o = document.createElement("option");
+          o.value = net.key;
+          o.textContent = `${net.name} (${net.target.symbol})`;
+          o.selected = net === state.net;
+          ns.appendChild(o);
+        }
+        const ws = $("week-select");
+        ws.textContent = "";
+        const weeks = weeksFor(state.net);
+        for (const w of weeks) {
+          const o = document.createElement("option");
+          o.value = w;
+          const start = displayStart(w);
+          o.textContent = `${fmtDate(start)} → ${fmtDate(start + 6 * DAY)}${w === weeks[0] ? " (current)" : ""}`;
+          o.selected = w === state.week;
+          ws.appendChild(o);
+        }
+        $("week-prev").disabled = state.week === weeks[weeks.length - 1];
+        $("week-next").disabled = state.week === weeks[0];
+        const p = prefs();
+        $("week-mode").value = p.weekMode;
+        $("tz-mode").value = p.tz;
+        $("rpc-provider").value = p.provider;
+        $("key-drpc").value = p.keys.drpc || "";
+        $("key-ankr").value = p.keys.ankr || "";
+        $("key-alchemy").value = p.keys.alchemy || "";
+        $("rpc-custom").value = p.custom[state.net.key] || "";
+        $("rpc-custom").placeholder = state.net.rpc;
+        $("logs-span").value = logsSpanFor(state.net);
+        $("rpc-line").textContent = `RPC ${rpcFor(state.net).replace(/(dkey=|\/v2\/|ankr\.com\/[a-z]+\/)[^&/]+/, "$1…")}`;
+      }
+      function setView(net, week) {
+        state.net = net;
+        state.week = week;
+        const s = loadSettings();
+        s.network = net.key;
+        saveSettings(s);
+        writeHash();
+        renderControls();
+        refreshAll();
+      }
+
+      // ---------------------------------------------------------------------
+      // Token metadata (symbol, decimals), cached per network
+      // ---------------------------------------------------------------------
+      const tokenInfo = {}; // netKey -> address -> {symbol, decimals}
+      async function tokenMeta(net, rpc, addresses) {
+        const cache = (tokenInfo[net.key] = tokenInfo[net.key] || {});
+        cache[net.target.address.toLowerCase()] = { symbol: net.target.symbol, decimals: net.target.decimals };
+        const missing = [...new Set(addresses.map((a) => a.toLowerCase()))].filter((a) => !cache[a]);
+        if (missing.length) {
+          const r = await ethCalls(rpc, missing.flatMap((a) => [{ to: a, data: SEL.decimals }, { to: a, data: SEL.symbol }]));
+          missing.forEach((a, i) => {
+            cache[a] = {
+              decimals: r[2 * i].ok ? Number(decUint(r[2 * i].value)) : 18,
+              symbol: r[2 * i + 1].ok ? decString(r[2 * i + 1].value, short(a)) : short(a),
+            };
+          });
+        }
+        return (a) => cache[a.toLowerCase()] || { symbol: short(a), decimals: 18 };
+      }
+
+      // ---------------------------------------------------------------------
+      // Week history from burner logs
+      // ---------------------------------------------------------------------
+      // CoW orders of the burner, fetched once per refresh (null when the network has no CoW adapter)
+      let cowOrders = { key: null, promise: null };
+      function fetchCowOrders(net) {
+        if (!net.cow) return Promise.resolve([]);
+        if (cowOrders.key !== `${net.key}:${refreshSeq}`) {
+          const owner = net.contracts.settings.DutchAuctionBurner;
+          cowOrders = {
+            key: `${net.key}:${refreshSeq}`,
+            promise: fetch(`https://api.cow.fi/${net.cow}/api/v1/account/${owner}/orders?limit=500`).then((res) => {
+              if (!res.ok) throw new Error(`HTTP ${res.status}`);
+              return res.json();
+            }),
+          };
+        }
+        return cowOrders.promise;
+      }
+      // Fulfilled CoW orders of the week as take-like records: sell token, executed amounts, creation time.
+      async function cowFills(net, week, weekEnd) {
+        let orders;
+        try {
+          orders = await fetchCowOrders(net);
+        } catch (e) {
+          return [];
+        }
+        return orders
+          .filter((o) => o.status === "fulfilled")
+          .map((o) => ({ ts: Math.floor(Date.parse(o.creationDate) / 1000), token: o.sellToken, amountOut: BigInt(o.executedSellAmount || 0), payment: BigInt(o.executedBuyAmount || 0), uid: o.uid, cow: true }))
+          .filter((f) => f.ts >= week && f.ts < weekEnd && f.amountOut > 0n)
+          .sort((a, b) => a.ts - b.ts);
+      }
+
+      const eventCache = {}; // `${net.key}:${week}` -> {staged, takes}; past weeks are immutable
+      async function loadWeekEvents(net, rpc, week) {
+        const key = `${net.key}:${week}`;
+        const weekEnd = week + CONFIG.calendar.week;
+        const current = weekEnd > nowTs();
+        if (!current && eventCache[key]) return eventCache[key];
+        const burner = net.contracts.settings.DutchAuctionBurner;
+        const latest = await getBlock(rpc, "latest");
+        const margin = Math.ceil(600 / net.blockTime); // ten minutes of blocks on each side
+        const from = Math.max(0, (await blockAtTime(rpc, week, latest, net.blockTime)) - margin);
+        const to = Math.min(latest.number, (await blockAtTime(rpc, weekEnd, latest, net.blockTime)) + margin);
+        const logs = await getLogs(rpc, burner, [[TOPIC.LotStaged, TOPIC.Taken]], from, to, logsSpanFor(net));
+        // timestamps of the blocks that carry events (few), then keep this week only
+        const blocks = [...new Set(logs.map((l) => l.blockNumber))];
+        const br = await rpcMany(rpc, blocks.map((b) => ({ method: "eth_getBlockByNumber", params: [b, false] })));
+        const tsOf = Object.fromEntries(blocks.map((b, i) => [b, br[i].ok && br[i].value ? Number(BigInt(br[i].value.timestamp)) : null]));
+        const staged = [];
+        const takes = [];
+        for (const l of logs) {
+          const ts = tsOf[l.blockNumber];
+          if (ts === null || ts < week || ts >= weekEnd) continue;
+          const base = { ts, block: Number(BigInt(l.blockNumber)), tx: l.transactionHash, logIndex: Number(BigInt(l.logIndex)), token: decAddress(l.topics[1]) };
+          if (l.topics[0] === TOPIC.LotStaged) {
+            staged.push({ ...base, initial: decUint(l.data, 0), startTotal: decUint(l.data, 1), floorTotal: decUint(l.data, 2), start: Number(decUint(l.data, 3)), end: Number(decUint(l.data, 4)) });
+          } else {
+            takes.push({ ...base, caller: decAddress(l.topics[2]), receiver: decAddress(l.data, 0), amountOut: decUint(l.data, 1), payment: decUint(l.data, 2), remaining: decUint(l.data, 3) });
+          }
+        }
+        const byOrder = (a, b) => a.block - b.block || a.logIndex - b.logIndex;
+        staged.sort(byOrder);
+        takes.sort(byOrder);
+        const out = { staged, takes, from, to, latest: latest.number };
+        if (!current) eventCache[key] = out;
+        return out;
+      }
+
+      // Live lot state for the current week (eth_call on the burner)
+      async function loadLiveLots(net, rpc, tokens) {
+        const burner = net.contracts.settings.DutchAuctionBurner;
+        const r = await ethCalls(
+          rpc,
+          tokens.flatMap((t) => [
+            { to: burner, data: SEL.available + encAddress(t) },
+            { to: burner, data: SEL.price + encAddress(t) },
+          ])
+        );
+        const live = {};
+        tokens.forEach((t, i) => {
+          const [available, price] = r.slice(2 * i, 2 * i + 2);
+          live[t.toLowerCase()] = {
+            available: available.ok ? decUint(available.value) : null,
+            price: price.ok ? decUint(price.value) : null,
+          };
+        });
+        return live;
+      }
+
+      // One cell per UTC day of the week, labelled with its FeeCollector epoch; today in bold.
+      function renderWeekTable(week) {
+        const days = $("week-days");
+        const phases = $("week-phases");
+        days.textContent = "";
+        phases.textContent = "";
+        const today = Math.floor(nowTs() / DAY) * DAY;
+        const start = displayStart(week);
+        for (let i = 0; i < 7; i++) {
+          const day = start + i * DAY;
+          const name = DAY_NAMES[Math.floor(((day - week) % CONFIG.calendar.week) / DAY)];
+          const th = days.appendChild(document.createElement("th"));
+          th.textContent = `${name} ${fmtDM(day)}`;
+          th.title = `${fmtTs(day)} → ${fmtTs(day + DAY)} ${tzLabel()}`;
+          if (day === today) th.classList.add("today");
+          const tdp = phases.appendChild(document.createElement("td"));
+          tdp.className = "phase" + (day === today ? " today" : "");
+          tdp.textContent = phaseAt(day).name;
+        }
+      }
+
+      async function renderWeek(net, rpc) {
+        const week = state.week;
+        const weekEnd = week + CONFIG.calendar.week;
+        const current = weekEnd > nowTs();
+        $("view").classList.toggle("past", !current);
+        const start = displayStart(week);
+        $("week-title").textContent = `${net.name}: ${fmtDM(start)} → ${fmtDM(start + 6 * DAY)}${current ? " (current)" : ""}`;
+        renderWeekTable(week);
+        const wkv = $("week-kv");
+        wkv.textContent = "";
+        const stagedCell = kv(wkv, "Lots staged", "loading…");
+        const fillsCell = kv(wkv, "Fills", "loading…");
+        const paidCell = kv(wkv, `${net.target.symbol} paid to FeeCollector`, "loading…");
+
+        const lotsBody = $("lots");
+        const takesBody = $("takes");
+        note(lotsBody, "Loading events…", "loading", 5);
+        $("lots-window").textContent = "";
+        note(takesBody, "Loading events…", "loading", 7);
+        let ev;
+        try {
+          ev = await loadWeekEvents(net, rpc, week);
+        } catch (e) {
+          note(lotsBody, "log query failed: " + e.message, "error", 5);
+          note(takesBody, "log query failed: " + e.message, "error", 7);
+          stagedCell.textContent = fillsCell.textContent = paidCell.textContent = "-";
+          return;
+        }
+        // CoW fills do not emit Taken (the settlement pulls through ERC-1271), so they come from the orderbook
+        const fills = [...ev.takes, ...(await cowFills(net, week, weekEnd))].sort((a, b) => a.ts - b.ts);
+        const tokens = [...new Set([...ev.staged, ...fills].map((x) => x.token.toLowerCase()))];
+        state.weekTokens = current ? [...new Set(ev.staged.map((s) => s.token.toLowerCase()))] : [];
+        const meta = await tokenMeta(net, rpc, tokens);
+        const live = current && tokens.length ? await loadLiveLots(net, rpc, tokens) : {};
+        const td_ = net.target.decimals;
+        const tsym = net.target.symbol;
+        const perToken = (payment, amount, dec) => (amount > 0n ? toNum(payment, td_) / toNum(amount, dec) : null);
+        const fmtPrice = (p) => (p === null || !isFinite(p) ? "-" : `${p.toLocaleString("en-US", { maximumSignificantDigits: 5 })} ${tsym}`);
+
+        // --- window: one per week, shown above the table (a restage with another window is listed too) ---
+        const windows = [...new Map(ev.staged.map((s) => [`${s.start}:${s.end}`, s])).values()];
+        $("lots-window").textContent = windows.length
+          ? "Window " + windows.map((w) => `${fmtDMH(w.start)} → ${fmtDMH(w.end)}`).join(", ") + ` ${tzLabel()}`
+          : "";
+
+        // --- lots: one row per LotStaged (a restage in the same week makes a second row) ---
+        lotsBody.textContent = "";
+        let totalPaid = 0n;
+        let soldOut = 0;
+        for (const s of ev.staged) {
+          const { symbol, decimals } = meta(s.token);
+          // takes of this lot: same token, after this staging and before the next staging of the same token
+          const next = ev.staged.find((o) => o.token === s.token && (o.block > s.block || (o.block === s.block && o.logIndex > s.logIndex)));
+          const takes = fills.filter((t) => t.token.toLowerCase() === s.token.toLowerCase() && t.ts >= s.ts && (!next || t.ts < next.ts));
+          const sold = takes.reduce((a, t) => a + t.amountOut, 0n);
+          const paid = takes.reduce((a, t) => a + t.payment, 0n);
+          totalPaid += paid;
+          if (s.initial > 0n && sold >= s.initial) soldOut++;
+          const row = lotsBody.appendChild(document.createElement("tr"));
+          const tokenCell = td(row, addr(net.explorer, s.token, symbol));
+          tokenCell.title = `staged ${fmtTs(s.ts)} ${tzLabel()}`;
+          const soldCell = td(row, `${fmtUnits(sold, decimals)} / ${fmtUnits(s.initial, decimals)}`, "num");
+          if (s.initial > 0n && sold >= s.initial) soldCell.classList.add("good");
+          td(row, `${fmtUnits(paid, td_, 2)} ${tsym}`, "num");
+          td(row, `${fmtPrice(perToken(paid, sold, decimals))} (${takes.length})`, "num");
+          // live column (hidden on past weeks)
+          const l = live[s.token.toLowerCase()];
+          const now = nowTs();
+          const active = l && l.available > 0n && now >= s.start && now < s.end && !next;
+          const liveCell = td(row, "-", "num live");
+          if (active && l.price) {
+            // price(): raw want per 1e18 raw token units -> want per whole token
+            liveCell.textContent = `${fmtUnits(l.available, decimals)} @ ${fmtPrice((Number(l.price) * 10 ** decimals) / 1e18 / 10 ** td_)}`;
+            liveCell.classList.add("good");
+            liveCell.title = `time to floor ${fmtDuration(s.end - now)}`;
+          } else if (l && l.available !== null && !next) {
+            liveCell.textContent = l.available > 0n ? `${fmtUnits(l.available, decimals)} (window ${now < s.start ? "not open" : "closed"})` : "sold out";
+          }
+        }
+        if (!ev.staged.length) note(lotsBody, `no lots staged in this week (burner logs ${ev.from} → ${ev.to})`, undefined, 5);
+        $("lots-totals").textContent = ev.staged.length
+          ? `${ev.staged.length} lots staged, ${soldOut} sold out, ${fills.length} fills (${ev.takes.length} takes, ${fills.length - ev.takes.length} CoW), ${fmtUnits(totalPaid, td_, 2)} ${tsym} paid. Blocks ${ev.from} → ${ev.to}.`
+          : "";
+        stagedCell.textContent = String(ev.staged.length);
+        fillsCell.textContent = String(fills.length);
+        paidCell.textContent = `${fmtUnits(totalPaid, td_, 2)} ${tsym}`;
+
+        // --- takes ---
+        takesBody.textContent = "";
+        for (const t of fills) {
+          const { symbol, decimals } = meta(t.token);
+          const row = takesBody.appendChild(document.createElement("tr"));
+          td(row, fmtTs(t.ts));
+          td(row, addr(net.explorer, t.token, symbol));
+          td(row, fmtUnits(t.amountOut, decimals), "num");
+          td(row, `${fmtUnits(t.payment, td_, 2)} ${tsym}`, "num");
+          td(row, fmtPrice(perToken(t.payment, t.amountOut, decimals)), "num");
+          if (t.cow) {
+            td(row, "CoW solver");
+            const a = document.createElement("a");
+            a.href = `https://explorer.cow.fi/${net.cow}/orders/${t.uid}`;
+            a.target = "_blank";
+            a.rel = "noreferrer";
+            a.textContent = "order " + t.uid.slice(0, 10) + "…";
+            td(row, a);
+          } else {
+            td(row, addr(net.explorer, t.caller, knownName(net, t.caller) || short(t.caller)));
+            td(row, link(net.explorer, t.tx, t.tx.slice(0, 10) + "…", "tx"));
+          }
+        }
+        if (!fills.length) note(takesBody, "no fills in this week", undefined, 7);
+      }
+
+      // ---------------------------------------------------------------------
+      // Week card: epoch and target balances (three eth_calls, every refresh)
+      // ---------------------------------------------------------------------
+      async function loadWeekState(net, rpc) {
+        const fc = net.contracts.settings.FeeCollector;
+        const burner = net.contracts.settings.DutchAuctionBurner;
+        const target = net.target.address;
+        const r = await ethCalls(rpc, [
+          { to: fc, data: SEL.epoch },
+          { to: target, data: SEL.balanceOf + encAddress(fc) },
+          { to: target, data: SEL.balanceOf + encAddress(burner) },
+        ]);
+        state.epochOnChain = r[0].ok ? Number(decUint(r[0].value)) : null;
+        if ($("view").classList.contains("past")) return;
+        const wkv = $("week-kv");
+        fill(kv(wkv, "Epoch on chain"), r[0], (v) => {
+          const name = EPOCH_NAMES[Number(decUint(v))] || `mask ${decUint(v)}`;
+          const local = phaseAt(nowTs()).name;
+          return name === local ? name : `${name} (client calendar says ${local}!)`;
+        });
+        fill(kv(wkv, `${net.target.symbol} in FeeCollector / burner`), firstErr(r[1], r[2]), () =>
+          [r[1], r[2]].map((x) => fmtUnits(decUint(x.value), net.target.decimals, 2)).join(" / ")
+        );
+      }
+
+      // ---------------------------------------------------------------------
+      // Configuration panel (loaded when opened): FeeCollector, burner economics, adapters, addresses
+      // ---------------------------------------------------------------------
+      let configLoadedFor = null;
+      async function loadConfig(net, rpc) {
+        configLoadedFor = `${net.key}:${refreshSeq}`;
+        for (const id of ["collector", "burner"]) $(id).innerHTML = '<dt class="loading">Loading…</dt><dd></dd>';
+        note($("adapters"), "Loading…", "loading", 4);
+        await Promise.allSettled([loadCollector(net, rpc), loadBurner(net, rpc), loadAdapters(net, rpc)]);
+      }
+      async function loadCollector(net, rpc) {
+        const fc = net.contracts.settings.FeeCollector;
+        const burner = net.contracts.settings.DutchAuctionBurner;
+        const target = net.target.address;
+        const r = await ethCalls(rpc, [
+          { to: fc, data: SEL.target },
+          { to: fc, data: SEL.max_fee + encUint(1) },
+          { to: fc, data: SEL.max_fee + encUint(2) },
+          { to: fc, data: SEL.max_fee + encUint(4) },
+          { to: fc, data: SEL.max_fee + encUint(8) },
+          { to: fc, data: SEL.fee },
+          { to: fc, data: SEL.burner },
+        ]);
+        const dl = $("collector");
+        dl.textContent = "";
+        fill(kv(dl, "Target"), r[0], (v) => {
+          const a = decAddress(v);
+          const ok = a.toLowerCase() === target.toLowerCase();
+          const span = addr(net.explorer, a, ok ? net.target.symbol : short(a));
+          if (!ok) {
+            span.append(" differs from the configured target!");
+            span.classList.add("warn");
+          }
+          return span;
+        });
+        fill(kv(dl, "Max fee"), firstErr(r[1], r[2], r[3], r[4]), () => {
+          const byName = { SLEEP: r[1], COLLECT: r[2], EXCHANGE: r[3], FORWARD: r[4] };
+          const order = weekMode() === "week" ? ["COLLECT", "EXCHANGE", "FORWARD", "SLEEP"] : ["SLEEP", "COLLECT", "EXCHANGE", "FORWARD"];
+          const t = document.createElement("table");
+          t.className = "fees";
+          const head = t.appendChild(document.createElement("thead")).appendChild(document.createElement("tr"));
+          const body = t.appendChild(document.createElement("tbody")).appendChild(document.createElement("tr"));
+          for (const name of order) {
+            head.appendChild(document.createElement("th")).textContent = name;
+            body.appendChild(document.createElement("td")).textContent = fmtPct(decUint(byName[name].value));
+          }
+          return t;
+        });
+        fill(kv(dl, "Keeper fee now"), r[5], (v) => fmtPct(decUint(v)));
+        fill(kv(dl, "Burner"), r[6], (v) => {
+          const a = decAddress(v);
+          const ok = a.toLowerCase() === burner.toLowerCase();
+          const span = addr(net.explorer, a, ok ? "DutchAuctionBurner" : short(a));
+          if (!ok) {
+            span.append(" not the configured burner!");
+            span.classList.add("warn");
+          }
+          return span;
+        });
+      }
+
+      async function loadBurner(net, rpc) {
+        const b = net.contracts.settings.DutchAuctionBurner;
+        const calls = [SEL.want, SEL.receiver, SEL.start_total, SEL.floor_total, SEL.step_duration, SEL.auction_length, SEL.registry].map(
+          (data) => ({ to: b, data })
+        );
+        const r = await ethCalls(rpc, calls);
+        const dl = $("burner");
+        dl.textContent = "";
+        const d = net.target.decimals;
+        fill(kv(dl, "Want"), r[0], (v) => addr(net.explorer, decAddress(v), knownName(net, decAddress(v)) || short(decAddress(v))));
+        fill(kv(dl, "Receiver"), r[1], (v) => {
+          const a = decAddress(v);
+          const ok = a.toLowerCase() === net.contracts.settings.FeeCollector.toLowerCase();
+          const span = addr(net.explorer, a, ok ? "FeeCollector" : short(a));
+          if (!ok) {
+            span.append(" not the FeeCollector!");
+            span.classList.add("warn");
+          }
+          return span;
+        });
+        fill(kv(dl, "Start → floor per full lot"), firstErr(r[2], r[3]), () =>
+          `${fmtUnits(decUint(r[2].value), d, 2)} → ${fmtUnits(decUint(r[3].value), d, 2)} ${net.target.symbol}`
+        );
+        fill(kv(dl, "Step / auction length"), firstErr(r[4], r[5]), () =>
+          `${decUint(r[4].value)} s / ${fmtDuration(Number(decUint(r[5].value)))}`
+        );
+        fill(kv(dl, "Registry"), r[6], (v) => addr(net.explorer, decAddress(v), knownName(net, decAddress(v)) || short(decAddress(v))));
+      }
+
+      async function loadAdapters(net, rpc) {
+        const registry = net.contracts.settings.AdapterRegistry;
+        const tbody = $("adapters");
+        const [list] = await ethCalls(rpc, [{ to: registry, data: SEL.get_adapters }]);
+        if (!list.ok) return note(tbody, "rpc error: " + list.error, "error", 4);
+        const adapters = decAddressArray(list.value);
+        if (!adapters.length) return note(tbody, "no adapters registered: native take only", undefined, 4);
+        const configs = await ethCalls(rpc, adapters.map((a) => ({ to: registry, data: SEL.get_adapter + encAddress(a) })));
+        tbody.textContent = "";
+        adapters.forEach((adapter, i) => {
+          const row = tbody.appendChild(document.createElement("tr"));
+          td(row, addr(net.explorer, adapter, knownName(net, adapter) || short(adapter)));
+          const executor = configs[i].ok ? decAddress(configs[i].value, 0) : null;
+          fill(td(row), configs[i], (v) => addr(net.explorer, decAddress(v, 0), knownName(net, decAddress(v, 0)) || short(decAddress(v, 0))));
+          fill(td(row), configs[i], (v) => {
+            const active = decUint(v, 1) === 1n;
+            const span = document.createElement("span");
+            span.textContent = active ? "active" : "disabled";
+            span.className = active ? "good" : "warn";
+            return span;
+          });
+          const cell = td(row);
+          const b = document.createElement("button");
+          b.className = "small secondary";
+          b.type = "button";
+          b.textContent = "sync approvals";
+          b.disabled = !executor;
+          b.addEventListener("click", () => syncApprovals(net, executor, cell));
+          cell.appendChild(b);
+        });
+      }
+
+      // ---------------------------------------------------------------------
+      // Wallet transactions: sync approvals, collect
+      // ---------------------------------------------------------------------
+      function statusIn(cell) {
+        return (text, cls) => {
+          let s = cell.querySelector("span.status");
+          if (!s) {
+            s = cell.appendChild(document.createElement("span"));
+            s.className = "status";
+          }
+          s.textContent = " " + text;
+          s.className = "status " + (cls || "subtle");
+          return s;
+        };
+      }
+      async function sendTx(net, to, data, status) {
+        const chain = await window.ethereum.request({ method: "eth_chainId" });
+        if (Number(BigInt(chain)) !== net.chainId) {
+          await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x" + net.chainId.toString(16) }] });
+        }
+        const [from] = await window.ethereum.request({ method: "eth_requestAccounts" });
+        status("confirm in the wallet…");
+        const hash = await window.ethereum.request({ method: "eth_sendTransaction", params: [{ from, to, data }] });
+        const s = status("");
+        s.appendChild(link(net.explorer, hash, "tx " + hash.slice(0, 10) + "…", "tx"));
+      }
+      // sync_executor_approvals(executor, this week's staged tokens whose allowance is below the available amount)
+      async function syncApprovals(net, executor, cell) {
+        const status = statusIn(cell);
+        if (!window.ethereum) return status("no browser wallet", "warn");
+        if (!state.weekTokens.length) return status("no lots staged this week", "warn");
+        try {
+          // keep only the tokens whose allowance to the executor does not cover what is still available
+          status("checking allowances…");
+          const burner = net.contracts.settings.DutchAuctionBurner;
+          const r = await ethCalls(
+            rpcFor(net),
+            state.weekTokens.flatMap((t) => [
+              { to: t, data: SEL.allowance + encAddress(burner) + encAddress(executor) },
+              { to: burner, data: SEL.available + encAddress(t) },
+            ])
+          );
+          const tokens = state.weekTokens.filter((t, i) => {
+            const [allowance, available] = [r[2 * i], r[2 * i + 1]];
+            if (!allowance.ok || !available.ok) return true; // unknown: let the contract decide
+            return decUint(allowance.value) < decUint(available.value);
+          });
+          if (!tokens.length) return status(`allowances already cover the available amounts of ${state.weekTokens.length} tokens`, "good");
+          await sendTx(net, burner, encSyncApprovals(executor, tokens), status);
+        } catch (e) {
+          status(e.message || "rejected", "error");
+        }
+      }
+
+      // ---------------------------------------------------------------------
+      // Tokens on the FeeCollector without a lot this week (loaded when the panel opens)
+      // ---------------------------------------------------------------------
+      const stageCache = {}; // `${net.key}:${months}` -> rows
+      let stageLoadedFor = null;
+      async function loadStage(net, rpc) {
+        const months = Number($("stage-period").value);
+        const key = `${net.key}:${months}`;
+        stageLoadedFor = `${key}:${refreshSeq}`;
+        const tbody = $("stage");
+        const line = $("stage-line");
+        const collectBtn = $("stage-collect");
+        collectBtn.disabled = true;
+        const fc = net.contracts.settings.FeeCollector;
+        const burner = net.contracts.settings.DutchAuctionBurner;
+        let rows = stageCache[key];
+        if (!rows) {
+          try {
+            const latest = await getBlock(rpc, "latest");
+            const since = latest.timestamp - months * 30 * DAY;
+            const from = await blockAtTime(rpc, since, latest, net.blockTime);
+            const span = logsSpanFor(net);
+            note(tbody, `scanning Transfer logs to the FeeCollector over ${latest.number - from} blocks (${Math.ceil((latest.number - from) / span)} requests)…`, "loading", 5);
+            const logs = await getLogs(rpc, null, [TOPIC.Transfer, null, "0x" + encAddress(fc)], from, latest.number, span, (done, total) => {
+              note(tbody, `scanning Transfer logs: ${done} / ${total} requests…`, "loading", 5);
+            });
+            const lastSeen = {}; // token -> last block with a transfer in
+            for (const l of logs) {
+              if (l.topics.length !== 3) continue; // ERC-721 Transfer carries the id as a 4th topic
+              const t = l.address.toLowerCase();
+              lastSeen[t] = Math.max(lastSeen[t] || 0, Number(BigInt(l.blockNumber)));
+            }
+            const tokens = Object.keys(lastSeen).filter((t) => t !== net.target.address.toLowerCase());
+            const r = await ethCalls(
+              rpc,
+              tokens.flatMap((t) => [
+                { to: t, data: SEL.balanceOf + encAddress(fc) },
+                { to: burner, data: SEL.lots + encAddress(t) },
+              ])
+            );
+            const blocks = [...new Set(Object.values(lastSeen))];
+            const br = await rpcMany(rpc, blocks.map((b) => ({ method: "eth_getBlockByNumber", params: ["0x" + b.toString(16), false] })));
+            const tsOf = Object.fromEntries(blocks.map((b, i) => [b, br[i].ok && br[i].value ? Number(BigInt(br[i].value.timestamp)) : null]));
+            const meta = await tokenMeta(net, rpc, tokens);
+            rows = tokens
+              .map((t, i) => ({
+                token: t,
+                balance: r[2 * i].ok ? decUint(r[2 * i].value) : 0n,
+                stagedAt: r[2 * i + 1].ok ? Number(decUint(r[2 * i + 1].value, 0)) : 0,
+                lastTransfer: tsOf[lastSeen[t]],
+                ...meta(t),
+              }))
+              .filter((x) => x.balance > 0n)
+              .sort((a, b) => (b.lastTransfer || 0) - (a.lastTransfer || 0));
+            stageCache[key] = rows;
+          } catch (e) {
+            return note(tbody, "scan failed: " + e.message, "error", 5);
+          }
+        }
+        const week = epochWeekAt(nowTs());
+        const unstaged = rows.filter((x) => x.stagedAt < week + 4 * DAY); // no lot staged in this week's COLLECT
+        tbody.textContent = "";
+        for (const x of unstaged) {
+          const row = tbody.appendChild(document.createElement("tr"));
+          const cb = document.createElement("input");
+          cb.type = "checkbox";
+          cb.value = x.token;
+          cb.checked = true;
+          td(row, cb);
+          td(row, addr(net.explorer, x.token, x.symbol));
+          td(row, fmtUnits(x.balance, x.decimals), "num");
+          td(row, x.lastTransfer ? fmtTs(x.lastTransfer) : "-");
+          td(row, x.stagedAt ? fmtTs(x.stagedAt) : "never");
+        }
+        if (!unstaged.length) note(tbody, `nothing to stage: ${rows.length} tokens with a balance, all staged this week`, undefined, 5);
+        const inCollect = state.epochOnChain === 2;
+        collectBtn.disabled = !unstaged.length || !inCollect;
+        line.textContent = inCollect ? "" : `collect is allowed only in COLLECT (now ${EPOCH_NAMES[state.epochOnChain] || "unknown"})`;
+      }
+      async function collectSelected(net) {
+        const status = statusIn($("stage-line").parentElement);
+        if (!window.ethereum) return status("no browser wallet", "warn");
+        const tokens = [...$("stage").querySelectorAll("input[type=checkbox]:checked")].map((cb) => cb.value);
+        if (!tokens.length) return status("nothing selected", "warn");
+        try {
+          await sendTx(net, net.contracts.settings.FeeCollector, encCollect(tokens.slice(0, 64)), status);
+        } catch (e) {
+          status(e.message || "rejected", "error");
+        }
+      }
+
+      function renderAddresses(net) {
+        const settings = $("addresses-settings");
+        settings.textContent = "";
+        for (const [key, v] of Object.entries(net.contracts.settings)) kv(settings, key, addr(net.explorer, entryAddr(v), entryName(key, v)));
+        kv(settings, "Target", addr(net.explorer, net.target.address, net.target.symbol));
+        const collection = $("addresses-collection");
+        collection.textContent = "";
+        for (const [key, v] of Object.entries(net.contracts.collection)) kv(collection, key, addr(net.explorer, entryAddr(v), entryName(key, v)));
+      }
+
+      // ---------------------------------------------------------------------
+      // CoW orders of the selected week: a link to the explorer and the ones that matter
+      // ---------------------------------------------------------------------
+      async function loadOrders(net, rpc) {
+        const tbody = $("orders");
+        const line = $("orders-line");
+        $("orders-section").style.display = net.cow ? "" : "none";
+        if (!net.cow) return;
+        const owner = net.contracts.settings.DutchAuctionBurner;
+        line.textContent = "";
+        line.appendChild(link(`https://explorer.cow.fi/${net.cow}`, owner, "All orders of the burner on the CoW explorer", "address"));
+        let orders;
+        try {
+          orders = await fetchCowOrders(net);
+        } catch (e) {
+          line.append(` · CoW API error: ${e.message}`);
+          return note(tbody, "CoW API error: " + e.message, "error", 7);
+        }
+        const week = state.week;
+        const weekEnd = week + CONFIG.calendar.week;
+        orders = orders.filter((o) => {
+          const ts = Math.floor(Date.parse(o.creationDate) / 1000);
+          return ts >= week && ts < weekEnd;
+        });
+        const counts = {};
+        for (const o of orders) counts[o.status] = (counts[o.status] || 0) + 1;
+        line.append(` · this week: ${orders.length} published (${Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(", ") || "none"})`);
+        const shown = orders.filter((o) => o.status === "fulfilled" || o.status === "open" || o.status === "presignaturePending");
+        $("orders-summary").textContent = `Filled and open orders (${shown.length})`;
+        if (!shown.length) return note(tbody, "no filled or open orders in this week", undefined, 7);
+        const meta = await tokenMeta(net, rpc, shown.flatMap((o) => [o.sellToken, o.buyToken]));
+        const amt = (raw, a) => (raw === undefined ? "-" : `${fmtUnits(BigInt(raw), meta(a).decimals)} ${meta(a).symbol}`);
+        tbody.textContent = "";
+        for (const o of shown) {
+          const row = tbody.appendChild(document.createElement("tr"));
+          td(row, fmtTs(Math.floor(Date.parse(o.creationDate) / 1000)));
+          td(row, o.status).className = o.status === "fulfilled" ? "good" : "";
+          td(row, amt(o.sellAmount, o.sellToken), "num");
+          td(row, amt(o.buyAmount, o.buyToken), "num");
+          td(row, amt(o.executedBuyAmount, o.buyToken), "num");
+          td(row, fmtTs(o.validTo));
+          const a = document.createElement("a");
+          a.href = `https://explorer.cow.fi/${net.cow}/orders/${o.uid}`;
+          a.target = "_blank";
+          a.rel = "noreferrer";
+          a.textContent = (o.uid || "").slice(0, 10) + "…";
+          td(row, a);
+        }
+      }
+
+      // ---------------------------------------------------------------------
+      // Boot
+      // ---------------------------------------------------------------------
+      let refreshSeq = 0;
+      async function refreshAll() {
+        const seq = ++refreshSeq;
+        const net = state.net;
+        const rpc = rpcFor(net);
+        $("last-refreshed").textContent = "loading…";
+        renderAddresses(net);
+        note($("orders"), "Loading…", "loading", 7);
+        note($("stage"), "Press Load to scan.", "loading", 5);
+        $("stage-collect").disabled = true;
+        $("stage-line").textContent = "";
+        stageLoadedFor = null;
+        configLoadedFor = null;
+        // the week card is rebuilt by renderWeek; the epoch/balance rows are appended after it
+        await renderWeek(net, rpc).catch(() => {});
+        const jobs = [loadWeekState(net, rpc), loadOrders(net, rpc)];
+        if ($("config-panel").open) jobs.push(loadConfig(net, rpc));
+        await Promise.allSettled(jobs);
+        if (seq === refreshSeq) $("last-refreshed").textContent = fmtTs(nowTs()) + " " + tzLabel();
+      }
+      const savePref = (patch) => saveSettings({ ...loadSettings(), ...patch });
+
+      $("network-select").addEventListener("change", (e) => {
+        const net = CONFIG.networks.find((n) => n.key === e.target.value);
+        setView(net, weeksFor(net).includes(state.week) ? state.week : epochWeekAt(nowTs()));
+      });
+      $("week-select").addEventListener("change", (e) => setView(state.net, Number(e.target.value)));
+      $("week-prev").addEventListener("click", () => setView(state.net, state.week - CONFIG.calendar.week));
+      $("week-next").addEventListener("click", () => setView(state.net, state.week + CONFIG.calendar.week));
+      $("week-mode").addEventListener("change", (e) => {
+        savePref({ weekMode: e.target.value });
+        setView(state.net, weeksFor(state.net).includes(state.week) ? state.week : epochWeekAt(nowTs()));
+      });
+      $("tz-mode").addEventListener("change", (e) => {
+        savePref({ tz: e.target.value });
+        renderCalendar();
+        setView(state.net, state.week);
+      });
+      $("refresh").addEventListener("click", refreshAll);
+      $("rpc-save").addEventListener("click", () => {
+        const s = loadSettings();
+        s.provider = $("rpc-provider").value;
+        s.keys = { drpc: $("key-drpc").value.trim(), ankr: $("key-ankr").value.trim(), alchemy: $("key-alchemy").value.trim() };
+        s.custom = { ...(s.custom || {}), [state.net.key]: $("rpc-custom").value.trim() };
+        s.logsSpan = { ...(s.logsSpan || {}), [s.provider]: Number($("logs-span").value) || undefined };
+        saveSettings(s);
+        renderControls();
+        refreshAll();
+      });
+      $("rpc-reset").addEventListener("click", () => {
+        const s = loadSettings();
+        s.provider = "public";
+        delete s.logsSpan;
+        if (s.custom) delete s.custom[state.net.key];
+        saveSettings(s);
+        renderControls();
+        refreshAll();
+      });
+      $("config-panel").addEventListener("toggle", () => {
+        if ($("config-panel").open && configLoadedFor !== `${state.net.key}:${refreshSeq}`) loadConfig(state.net, rpcFor(state.net));
+      });
+      $("stage-load").addEventListener("click", () => loadStage(state.net, rpcFor(state.net)));
+      $("stage-period").addEventListener("change", () => {
+        if (stageLoadedFor) loadStage(state.net, rpcFor(state.net));
+      });
+      $("stage-collect").addEventListener("click", () => collectSelected(state.net));
+      window.addEventListener("hashchange", () => {
+        const { net, week } = readHash();
+        if (net !== state.net || week !== state.week) setView(net, week);
+      });
+
+      renderCalendar();
+      setInterval(renderCalendar, 1000);
+      const initial = readHash();
+      setView(initial.net, initial.week);
+    </script>
+  </body>
+</html>

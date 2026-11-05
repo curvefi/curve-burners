@@ -51,6 +51,26 @@ settlement adapters (CoW orderbook today) and runs custom takes:
 python -m keepers.auction_keeper run --config config.yaml
 ```
 
+## Monitoring
+[`index.html`](index.html) is a single static page (no build step) that shows the
+Dutch auction per network and week: the week as one cell per UTC day labelled
+by the FeeCollector epoch, the lots and fills read from the burner's
+`LotStaged` / `Taken` logs through `eth_getLogs` (CoW fills merged in, one
+column per adapter) with the auction's CoW orders in the same block (explorer
+link, collapsible filled and open orders, a sync-approvals button), the
+auction economics (max fee per epoch) and the contract addresses split into
+settings and collection, each with an explorer link and a copy widget. Serve
+the repo root and open it, or open the file directly in a browser:
+```bash
+python3 -m http.server 8000   # then http://localhost:8000/index.html
+```
+The week is shown Mon → Sun by default or Thu → Wed (the FeeCollector epoch)
+with a local/UTC time toggle; the RPC provider in the header (public, dRPC,
+Ankr, Alchemy with their keys, or a custom URL and logs span) is kept in the
+browser's localStorage, the collapsed panels (contracts and configuration,
+tokens on the FeeCollector not staged this week) load when opened, and
+`#network/YYYY-MM-DD` in the URL deep-links to a network and week.
+
 ## CowSwap (legacy CowSwapBurner)
 Orders for the deprecated `CowSwapBurner` were posted by running
 [WatchTower](https://github.com/cowprotocol/watch-tower); the setup is kept in
