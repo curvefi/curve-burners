@@ -67,12 +67,16 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `cow.app_data_document` | none | Full appData JSON whose keccak is `CowAdapter.app_data()`; registered with the orderbook once. |
 | `auction_taker` | none | `AuctionTaker` address for route executions. |
 | `state_path` | `auction_keeper_state.json` | Published orders and scan cursor. Losing it costs at most one extra post per lot. |
+| `bebop.api_key_env` | `BEBOP_API_KEY` | Optional bearer key for the JAM API. |
+| `bebop.enabled`, `bebop.post` | `true`, `true` | Serve `BebopJamAdapter`; `post: false` publishes standing asks only. |
+| `bebop.api_url`, `bebop.chain` | `https://api.bebop.xyz`, by chain id | API base and chain slug (ethereum, polygon, arbitrum, base, bsc, optimism, hyperevm, avalanche; set `chain` for others, e.g. robinhood). |
 
 Adapters are never configured: each cycle the keeper reads the auction's
 `AdapterRegistry`, takes the active adapters, and matches their
-`ADAPTER_VERSION()` to a publisher (`CowAdapter` → `CowPublisher`). A rail
-section with `enabled: false` skips its adapters. Adding a rail is one class
-in `keepers/auction_keeper/rails/`.
+`ADAPTER_VERSION()` to a publisher (`CowAdapter` → `CowPublisher`,
+`BebopJamAdapter` → `BebopJamPublisher`). A rail section with `enabled:
+false` skips its adapters. Adding a rail is one class in
+`keepers/auction_keeper/rails/`.
 
 ## Run
 
@@ -144,6 +148,30 @@ window so the order is reposted before it expires and never past the lot
 end. Every (re)post uses a fresh salt or nonce. The shared steps live in
 `AdapterPublisher` (`valid_to`, `validate_signature`, `ensure_allowance`);
 the rail's feed is reached through `adapters/common.py`'s `JsonClient`.
+
+### Bebop rail (`bebop`)
+
+Executor: the JAM balance manager. Feed mode (`post: true`): every poll,
+`GET {api_url}/jam/{chain}/v2/quote?sell_tokens=<lot>&buy_tokens=<want>&sell_amounts=<available>&taker_address=<auction>&receiver_address=<FeeCollector>&approval_type=Standard&gasless=true`
+(bearer key when configured; a quote for a contract taker worked without
+one on 2026-11-02). The answer's `toSign` is checked against the lot —
+taker, receiver, the token pair, the sell amount within the available
+amount, `buyAmounts[0]` at or above the curve quote for that amount (a JAM
+quote below the curve is skipped: it cannot be signed, `check_order` would
+reject it), no hooks, expiry inside the lot window — signed as `adapter ++
+abi_encode(toSign)`, validated on-chain, and `POST
+{api_url}/jam/{chain}/v2/order` sends `{quote_id, signature, sign_scheme:
+"EIP1271"}`. The winning solver settles right away; the record expires with
+the quote (about a minute), so the next poll quotes again while the lot is
+live. API-level errors arrive as HTTP 200 `{"error": {errorCode,
+message}}` and are logged. Note that `toSign.buyAmounts[0]` is the quote's
+`minimumAmount` (the API's default slippage applied), which is what the
+settlement enforces. The order endpoint's body was verified structurally
+in an earlier probe (`sign_scheme` must be one of `EIP712`, `EIP1271`,
+`ETHSIGN`); its success response shape is not documented and is recorded
+as returned. Standing-ask mode (`post: false`, or no chain slug): the
+permissionless `order_for` order (any executor, no fees), expiry shortened
+to the scheduled validity, validated and logged as `settle(order, sig)`.
 
 Run it as a long-lived service (systemd, docker); it is stateless beyond the
 state file and safe to restart.
