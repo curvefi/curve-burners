@@ -1,7 +1,6 @@
 import boa
 
-
-from ..conftest import ETH_ADDRESS, Epoch
+from tests.conftest import ETH_ADDRESS, Epoch
 
 
 def test_version(burner):
@@ -25,8 +24,11 @@ def test_burn_remained(fee_collector, burner, coins, set_epoch, arve, burle):
     payouts = [coin.balanceOf(burle) for coin in coins]
     for coin, amount, payout in zip(coins, amounts, payouts):
         assert coin.balanceOf(burner) == 0
-        assert amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10 ** 18) <= payout <= \
-               amount * fee_collector.max_fee(Epoch.COLLECT) // 10 ** 18
+        assert (
+            amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10**18)
+            <= payout
+            <= amount * fee_collector.max_fee(Epoch.COLLECT) // 10**18
+        )
         assert payout + coin.balanceOf(fee_collector) == amount
 
     # Check double spend
@@ -48,8 +50,11 @@ def test_burn_remained(fee_collector, burner, coins, set_epoch, arve, burle):
         assert payout_sum >= 2 * payout  # might be greater since Dutch auction for fee
 
         assert coin.balanceOf(burner) == 0
-        assert 2 * amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10 ** 18) <= payout_sum <= \
-               2 * amount * fee_collector.max_fee(Epoch.COLLECT) // 10 ** 18
+        assert (
+            2 * amount * fee_collector.max_fee(Epoch.COLLECT) // (2 * 10**18)
+            <= payout_sum
+            <= 2 * amount * fee_collector.max_fee(Epoch.COLLECT) // 10**18
+        )
         assert payout_sum + coin.balanceOf(fee_collector) == 2 * amount
 
     # only_revise
@@ -96,7 +101,7 @@ def test_admin(burner, admin, emergency_admin, arve):
 def test_recover_balance(burner, fee_collector, admin, emergency_admin, arve, coins):
     for coin in coins:
         coin._mint_for_testing(burner, 10 ** coin.decimals())
-    boa.env.set_balance(burner.address, 10 ** 18)
+    boa.env.set_balance(burner.address, 10**18)
 
     with boa.env.prank(admin):
         burner.recover(coins + [ETH_ADDRESS])
@@ -105,4 +110,4 @@ def test_recover_balance(burner, fee_collector, admin, emergency_admin, arve, co
         assert coin.balanceOf(burner) == 0
         assert coin.balanceOf(fee_collector) == 10 ** coin.decimals()
     assert boa.env.get_balance(burner.address) == 0
-    assert boa.env.get_balance(fee_collector.address) == 10 ** 18
+    assert boa.env.get_balance(fee_collector.address) == 10**18

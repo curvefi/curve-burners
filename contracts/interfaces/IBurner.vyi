@@ -1,0 +1,27 @@
+"""
+@title IBurner
+@author Curve Finance
+@license MIT
+@notice Minimal FeeCollector burner interface.
+@dev The XOR of these selectors is the protocol's BURNER_INTERFACE_ID.
+"""
+
+from ethereum.ercs import IERC20
+
+from contracts.utils import constants as c
+
+
+@external
+def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
+    ...
+
+
+@external
+def push_target() -> uint256:
+    ...
+
+
+@external
+@view
+def VERSION() -> String[20]:
+    ...

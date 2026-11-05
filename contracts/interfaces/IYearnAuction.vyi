@@ -1,0 +1,82 @@
+"""
+@title IYearnAuction
+@author Curve Finance
+@license MIT
+@notice The Yearn Auction-compatible selector subset: want/available/price/
+        getAmountNeeded/take from the core plus isActive/auctionLength/
+        auctions from the yearn_auction module.
+@dev Only these selectors from Yearn Auction (yearn/
+     tokenized-strategy-periphery, src/Auctions/Auction.sol) are implemented.
+     Vyper default arguments export every Yearn overload of them: the
+     timestamped available/price/getAmountNeeded, the single-argument
+     getAmountNeeded (everything available), and the shortened take forms
+     (everything available, to the caller, no callback). auctions() returns
+     Yearn's record shape (kicked, scaler, initialAvailable) with scaler = 1,
+     so Yearn's `amount * scaler * price / 1e18` reproduces getAmountNeeded()
+     up to rounding. The rest of Yearn's surface — kick/kickable/kicked and
+     the governance setters — is absent; Yearn tooling relying on it will
+     not work unchanged. Yearn's code is AGPL-3.0: only the selectors and
+     their intended semantics were copied, the implementation behind this
+     interface is independent.
+"""
+
+from ethereum.ercs import IERC20
+
+
+# Yearn Auction's record shape (its `auctions(address)` getter).
+struct AuctionInfo:
+    kicked: uint64
+    scaler: uint64
+    initialAvailable: uint128
+
+
+@external
+@view
+def want() -> IERC20:
+    ...
+
+
+@external
+@view
+def isActive(_from: address) -> bool:
+    ...
+
+
+@external
+@view
+def auctionLength() -> uint256:
+    ...
+
+
+@external
+@view
+def auctions(_from: address) -> AuctionInfo:
+    ...
+
+
+@external
+@view
+def available(_from: address) -> uint256:
+    ...
+
+
+@external
+@view
+def price(_from: address, _ts: uint256 = ...) -> uint256:
+    ...
+
+
+@external
+@view
+def getAmountNeeded(_from: address, amountToTake: uint256 = ..., _ts: uint256 = ...) -> uint256:
+    ...
+
+
+@external
+def take(
+    _from: address,
+    maxAmount: uint256 = ...,
+    takerReceiver: address = ...,
+    data: Bytes[...] = ...,
+) -> uint256:
+    ...
