@@ -103,6 +103,8 @@ KNOWN_ERRORS: dict[bytes, str] = {
         # for shape failures.
         "OrderNotValid(string)",
         "NothingToSell()",
+        # UniswapX adapter (order_for)
+        "ExceedsAvailable()",
         # AuctionTaker
         "ZeroAuction()",
         "OnlyActiveAuction()",

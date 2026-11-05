@@ -67,12 +67,16 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `cow.app_data_document` | none | Full appData JSON whose keccak is `CowAdapter.app_data()`; registered with the orderbook once. |
 | `auction_taker` | none | `AuctionTaker` address for route executions. |
 | `state_path` | `auction_keeper_state.json` | Published orders and scan cursor. Losing it costs at most one extra post per lot. |
+| `uniswapx.enabled` | `true` | Serve `UniswapXAdapter`. |
+| `uniswapx.post` | `false` | Also attempt the order-service POST and record its rejection (see below). |
+| `uniswapx.order_service_url` | `https://api.uniswap.org/v2/order` | Where the attempt goes. |
 
 Adapters are never configured: each cycle the keeper reads the auction's
 `AdapterRegistry`, takes the active adapters, and matches their
-`ADAPTER_VERSION()` to a publisher (`CowAdapter` → `CowPublisher`). A rail
-section with `enabled: false` skips its adapters. Adding a rail is one class
-in `keepers/auction_keeper/rails/`.
+`ADAPTER_VERSION()` to a publisher (`CowAdapter` → `CowPublisher`,
+`UniswapXAdapter` → `UniswapXPublisher`). A rail section with `enabled:
+false` skips its adapters. Adding a rail is one class in
+`keepers/auction_keeper/rails/`.
 
 ## Run
 
@@ -144,6 +148,22 @@ window so the order is reposted before it expires and never past the lot
 end. Every (re)post uses a fresh salt or nonce. The shared steps live in
 `AdapterPublisher` (`valid_to`, `validate_signature`, `ensure_allowance`);
 the rail's feed is reached through `adapters/common.py`'s `JsonClient`.
+
+### UniswapX rail (`uniswapx`)
+
+Executor: Permit2. `UniswapXAdapter.order_for` builds a fixed-price
+fill-or-kill `ExclusiveDutchOrder` for the whole available amount with a
+fresh Permit2 nonce; the deadline is shortened to the scheduled validity;
+the pair `(abi_encode(order), adapter ++ abi_encode(order))` is validated
+against the Permit2 witness digest and logged as
+`reactor.execute(SignedOrder(order, sig))` for fillers, and recorded by
+order hash. **Known limitation**: the public Uniswap order service accepts
+only 65-byte ECDSA signatures and only orders it quoted itself, so the
+ERC-1271 signature cannot be posted to the public feed; the publisher is
+"build + validate + log". With `uniswapx.post: true` it also POSTs
+`{encodedOrder, signature, chainId}` (the `uniswapx-service` body) to
+`uniswapx.order_service_url` and records the backend's answer or rejection
+under `details.orderService` without failing the publish.
 
 Run it as a long-lived service (systemd, docker); it is stateless beyond the
 state file and safe to restart.

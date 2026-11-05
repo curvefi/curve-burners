@@ -75,6 +75,13 @@ networks:
     # registry; each rail's section (named after it) switches the rail off
     # (`enabled: false`), picks feed or log-only mode (`post`) and sets its
     # API key env var and URLs.
+    uniswapx:                       # UniswapXAdapter
+      enabled: true
+      # The Uniswap order service takes only 65-byte ECDSA signatures on its own
+      # quotes: orders are built, validated and logged for fillers. true also
+      # attempts the POST and records the backend's rejection.
+      post: false
+      # order_service_url: https://api.uniswap.org/v2/order
 
   gnosis:
     rpc: https://lb.drpc.org/ogrpc?network=gnosis&dkey=${DRPC_API_KEY}

@@ -138,9 +138,11 @@ def publisher_classes() -> dict[str, type[AdapterPublisher]]:
     """Every publisher by the ``ADAPTER_VERSION`` it serves. A new rail adds
     its class to the list."""
     from keepers.auction_keeper.rails.cow import CowPublisher
+    from keepers.auction_keeper.rails.uniswapx import UniswapXPublisher
 
     classes: list[type[AdapterPublisher]] = [
         CowPublisher,
+        UniswapXPublisher,
     ]
     return {cls.version: cls for cls in classes}
 
