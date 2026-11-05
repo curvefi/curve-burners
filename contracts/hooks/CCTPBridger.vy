@@ -3,7 +3,16 @@
 @title CCTPBridger
 @license MIT
 @author Curve Finance
-@notice Circle CCTP bridge wrapper
+@notice Circle CCTP (v1 TokenMessenger) bridge wrapper
+@dev Stateless: pulls the burn token from the caller and deposits it for burn
+     toward DESTINATION_DOMAIN, capped by the minter's per-message burn limit.
+     Tokens left on the contract (donations, failed earlier calls) are swept
+     along within the same cap. Delivery on the destination needs Circle's
+     attestation plus a permissionless `receiveMessage` there.
+@custom:kill Nothing to pause: holds no funds between calls and has no owner.
+             Retire it by removing the hook from the Hooker.
+@custom:security Trusts the TokenMessenger pinned at deployment; CCTP v2
+                 messengers have a different ABI and need a new deployment.
 """
 
 
@@ -28,8 +37,8 @@ interface TokenMessenger:
     ) -> uint64: nonpayable
 
 
-TOKEN_MESSENGER: immutable(TokenMessenger)
-DESTINATION_DOMAIN: immutable(uint32)
+TOKEN_MESSENGER: public(immutable(TokenMessenger))
+DESTINATION_DOMAIN: public(immutable(uint32))
 
 
 @deploy
@@ -41,7 +50,7 @@ def __init__(_token_messenger: TokenMessenger, _destination_domain: uint32):
 
 
 @external
-def bridge(_token: address, _to: address, _amount: uint256, _min_amount: uint256=0) -> uint256:
+def bridge(_token: address, _to: address, _amount: uint256, _min_amount: uint256 = 0) -> uint256:
     """
     @notice Bridge a CCTP burn token
     @param _token CCTP burn token address
@@ -60,7 +69,7 @@ def bridge(_token: address, _to: address, _amount: uint256, _min_amount: uint256
     burn_limit: uint256 = staticcall minter.burnLimitsPerMessage(_token)
     assert burn_limit > 0, "Unsupported token"
     amount = min(amount, burn_limit)
-    if amount < _min_amount:
+    if amount == 0 or amount < _min_amount:
         return 0
 
     assert extcall token.transferFrom(msg.sender, self, amount, default_return_value=True)
@@ -68,7 +77,9 @@ def bridge(_token: address, _to: address, _amount: uint256, _min_amount: uint256
     if staticcall token.allowance(self, TOKEN_MESSENGER.address) < amount:
         assert extcall token.approve(TOKEN_MESSENGER.address, max_value(uint256), default_return_value=True)
 
-    amount = staticcall token.balanceOf(self)
+    # Sweep whatever sits here, but never above the per-message limit: a
+    # donation must not be able to push the deposit over it.
+    amount = min(staticcall token.balanceOf(self), burn_limit)
     extcall TOKEN_MESSENGER.depositForBurn(
         amount,
         DESTINATION_DOMAIN,
