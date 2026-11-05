@@ -29,4 +29,4 @@ jobs:
           python scripts/bootstrap_test_compilers.py
 
       - name: Run test suite (fork test excluded)
-        run: python -m pytest tests/ -q --ignore=tests/burners/test_dutch_auction_fork.py
+        run: python -m pytest tests/ -q --ignore=tests/burners/test_dutch_auction_fork.py --ignore=tests/burners/test_bebop_jam_fork.py

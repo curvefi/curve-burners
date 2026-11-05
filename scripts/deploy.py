@@ -33,6 +33,11 @@ COMPOSABLE_COW = (
 COW_VAULT_RELAYER = (
     "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"  # ALTER: VaultRelayer (CowSwapBurner only)
 )
+# Bebop JAM dependency (verify against the target chain before deploy): the
+# JamSettlement v2 (the same address on every supported chain but zkSync Era;
+# the `settlementAddress` of a JAM quote); BebopJamAdapter checks its EIP-712
+# domain at deploy and reads the balance manager (the `approvalTarget`) from it.
+BEBOP_JAM_SETTLEMENT = "0xbeb0b0623f66bE8cE162EbDfA2ec543A522F4ea6"  # ALTER
 
 
 def deploy():
@@ -106,6 +111,18 @@ def deploy_burner(fee_collector):
             print(f"CowAdapter: {cow_adapter.address}")
             registry.set_adapter(cow_adapter.address, cow_adapter.vault_relayer())
             registry.activate_adapter(cow_adapter.address)
+
+        bebop_enabled = True  # ALTER: False on chains without Bebop JAM
+        if bebop_enabled:
+            # Registry-managed; keepers run sync_executor_approvals(balance_manager, tokens) after collect.
+            bebop_adapter = boa.load(
+                "contracts/burners/adapters/bebop/BebopJamAdapter.vy",
+                BEBOP_JAM_SETTLEMENT,
+            )
+            # bebop_adapter = boa.load_partial("contracts/burners/adapters/bebop/BebopJamAdapter.vy").at("")
+            print(f"BebopJamAdapter: {bebop_adapter.address}")
+            registry.set_adapter(bebop_adapter.address, bebop_adapter.balance_manager())
+            registry.activate_adapter(bebop_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 

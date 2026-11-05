@@ -94,8 +94,10 @@ lives in `interfaces/IDutchAuction.vyi`, Yearn's `AuctionInfo` in
 `interfaces/IYearnAuction.vyi`, `AdapterConfig` in
 `interfaces/IAdapterRegistry.vyi`, and the ERC-165 ids, the burner interface
 id, and the ERC-1271 magic value in `utils/constants.vy`; the GPv2 constants
-in `adapters/cow/gpv2.vy` are keccak256-derived. Peers (`CowAdapter`, the resolver)
-read the burner through `IDutchAuction` alone.
+in `adapters/cow/gpv2.vy` and the JAM order type hash and partnerInfo layout
+in `adapters/bebop/jam.vy` are keccak256-derived. Peers (`CowAdapter`,
+`BebopJamAdapter`, the resolver) read the burner through `IDutchAuction`
+alone.
 
 ### Adapter signature format
 
@@ -161,6 +163,129 @@ runbook batches the registry disable with the burner's
 stragglers afterwards. `available` never exceeds the snapshot; a balance
 restored by donations sells again along the same curve, always in the
 FeeCollector's favor.
+
+### Bebop rail: `BebopJamAdapter`
+
+Bebop JAM v2 (bebop-dex/bebop-jam-contracts, deployed as `JamSettlement` at
+`0xbeb0b0623f66bE8cE162EbDfA2ec543A522F4ea6` with its `JamBalanceManager` at
+`0xC5a350853E4e36b73EB0C24aaA4b8816C9A3579a` on every chain Bebop supports
+but zkSync Era, Ethereum and Polygon included; the verified source is the
+same on both, solc 0.8.27, and the API's `settlementAddress` and
+`approvalTarget` name them) is the next rail, built the same way. JAM is a
+solver auction: a taker (here the burner, the one selling) signs a
+`JamOrder`, the winning solver settles it on-chain. Only JAM is covered;
+Bebop's RFQ-M/RFQA `BebopSettlement` (`0xbbbbbBB520d69a9775E85b458C58c648259FAD5F`,
+market-maker orders settled through Permit2 witnesses) is a separate
+contract with its own order types and is not implemented. Economic
+principle, verified against the settlement source: **the signed `buyAmount`
+is the floor the FeeCollector is paid for the signed `sellAmount`**. Every
+JAM order is fill-or-kill: `settle` pulls the whole `sellAmount` from the
+taker through the balance manager, runs the solver's interactions, and
+hands the receiver the settlement's whole balance of the buy token after
+partner and protocol fees, requiring it to be at least `buyAmount`
+(`InvalidOutputBalance` otherwise); `settleInternal` (a maker paying from
+its own balance) and `settleBatch` enforce the same floor after fees; the
+nonce is burnt on the fill, so no order settles twice and there is no
+partial-fill state to reason about. Fees (`partnerInfo`) therefore only
+reduce the solver's surplus above the floor and pass through.
+
+`adapters/bebop/jam.vy` holds the signed order type (the twelve EIP-712
+fields with `hooksHash` last — exactly the `toSign` object the JAM API
+returns; the protocol's unsigned `usingPermit2` flag is not part of it),
+the type hash, the domain (name `JamSettlement`, version `2`), the
+hashStruct with arrays hashed as packed words (`JamOrderLib.hash`), the
+protocol's calldata shape, and the `partnerInfo` packing of `JamPartner`
+(`[partner address | partner fee bps | protocol fee bps]`, fees below 100%,
+a partner address only with a partner fee). `BebopJamAdapter.vy` is
+stateless and immutable and pinned to the chain's settlement: at deploy it
+rebuilds the domain from the fixed name and version, the chain and the
+settlement address, checks it against the settlement's `DOMAIN_SEPARATOR`
+and its own `hashJamOrder` on a probe order (so a wrong address, a proxy or
+fork with another domain, another protocol version or a different order
+type fails the deployment), and reads the balance manager. The registry
+entry is `adapter = BebopJamAdapter, executor = balance manager`: a fill
+pulls the sell tokens with a plain `transferFrom` from the taker through the
+balance manager, which is what `sync_executor_approvals(balance_manager,
+tokens)` approves; the settlement itself must never be approved (Bebop's
+own warning, and the balance manager only moves funds when the settlement
+asks). A solver calls `settle(order, sig, interactions, hooksData,
+balanceRecipient)` or `settleInternal(order, sig, filledAmounts, hooksData)`
+with `sig = BebopJamAdapter ++ abi.encode(toSign)`; the settlement forwards
+`sig` verbatim to the taker's `isValidSignature` with the EIP-712 digest
+(`JamValidation.validateSignature` routes any taker with code to ERC-1271,
+no length constraint), the burner strips the adapter prefix, and the adapter
+recomputes the digest from the bare order and checks the shape: canonical
+encoding, the burner as taker, no hooks (hooks are calls the settlement
+makes on the taker's behalf), exactly one sell and one buy token, a nonzero
+nonce, a `partnerInfo` the settlement accepts (`NonCanonical`,
+`InvalidHash`, `BadTaker`, `BadHooks`, `BadTokenCount`, `ZeroNonce`,
+`InvalidFeePercentage`, `InvalidPartnerAddress`), then hands the tuple to
+the auction's `check_order` — buy token is the target, the receiver is the
+FeeCollector, sell amount within the snapshot, buy amount at or above the
+live quote, `expiry` no later than the lot end (the settlement's expiry is
+exclusive, the auction's bound inclusive, so a fill stops one second
+earlier; a limit order's infinite expiry fails the bound). The native-coin
+placeholder is never a lot nor the payment token, so it fails there too.
+`executor` and `exclusivityDeadline` pass through: they only restrict who
+fills (the API sets the winning solver as exclusive executor until the
+quote's expiry). Orders pulled through Permit2 never reach this check with a
+matching digest: flipping the unsigned `usingPermit2` routes the signature
+to Permit2's witness digest, which differs from the settlement's
+(`InvalidHash`), and the burner grants Permit2 no allowance anyway. Shape
+failures revert with `jam.OrderNotValid(reason)`; the auction's typed
+`check_order` revert bubbles unchanged through the burner, and — unlike
+1inch — through the settlement too: a Solidity high-level call lets the
+callee's revert data through, so a solver's failed fill carries the typed
+reason, while a non-magic answer (the router's `0xffffffff` for a disabled
+adapter) is reported as the settlement's own `InvalidContractSignature`.
+The settlement checks the contract signature on every fill, so disabling
+the adapter stops every unfilled order at once; the allowance sync is
+hygiene here, not the step that stops fills.
+
+`BebopJamAdapter.order_for(burner, token, nonce, sell_amount)` returns the
+publishable pair for a live lot: the whole available amount by default,
+priced at the current block, to the FeeCollector, any executor, no
+exclusivity, no fees, no hooks, expiring at the lot end, and the signature
+`adapter ++ abi.encode(order)`. A published order is a standing ask like the
+CoW one: the burner keeps accepting it as the curve decays below it, and a
+publisher re-posts lower with a fresh nonce (the settlement tracks nonces
+per taker, one bit each). Anyone may publish and anyone may fill on-chain
+(`executor = 0`), so the rail works without the Bebop feed; `describe(partnerInfo)`
+unpacks the fee field for publishers. Keeper flow through the feed: `GET
+/jam/{chain}/v2/quote?sell_tokens=<lot>&buy_tokens=<target>&sell_amounts=<n>&taker_address=<burner>&receiver_address=<FeeCollector>&approval_type=Standard&gasless=true`
+returns `toSign` (the order, executor = the winning solver, `hooksHash =
+0`, `partnerInfo` as configured, expiry about a minute out); the keeper
+checks `toSign.buyAmounts[0] >= getAmountNeeded(token, n)` (or just
+`eth_call`s the burner's `isValidSignature` on the digest), then `POST
+/jam/{chain}/v2/order` with `quote_id`, `signature = adapter ++
+abi.encode(toSign)` and `sign_scheme = "EIP1271"`, and the solver settles.
+Verified here against the live API without a key: a quote for a contract
+taker returns `toSign`, and the order endpoint accepts a 692-byte signature
+with the default scheme and with `EIP1271` (it rejected the probe on the
+taker's token balance, before any signature check; `ERC1271` is not a
+known scheme). Open question, not verifiable without inventory on a
+contract taker: whether the backend eth_calls the taker's ERC-1271 before
+relaying the order to the solver (the on-chain path needs nothing else).
+The quote endpoint answered without an API key; the docs list bearer auth.
+JAM quotes expire in about a minute and the solver fills right after the
+signature arrives, so the feed path is "quote, check against the curve,
+sign, done" — no standing orders, no re-posting; the fallback is the
+permissionless `order_for` ask. Bebop is not deployed on Fraxtal, so this
+rail is for Polygon and Ethereum.
+
+Limitations: one token per side (the lot against the target; JAM's
+many-to-many orders are rejected, `BadTokenCount`); hooks are rejected
+outright; the arrays' decoding bound (`jam.MAX_TOKENS`, eight) only matters
+for the library's vectors; fees are whatever the publisher or the API
+encoded and never reduce what the FeeCollector gets below the signed
+amount; the API-side acceptance of ERC-1271 signatures is the open
+question above.
+
+Emergency procedure is the CoW one with `executor = balance manager`:
+`registry.disable_adapter(BebopJamAdapter)` batched with
+`sync_executor_approvals(balance_manager, tokens)`
+(`scripts/emergency_cow_disable.py` takes the executor as an argument);
+the disable alone already stops every fill, as the mainnet fork test shows.
 
 ### Payment token and resync
 
