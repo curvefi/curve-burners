@@ -20,7 +20,7 @@ from keepers.auction_keeper.rails.hashflow import (
     HashflowPublisher,
     HashflowQuote,
 )
-from tests.burners.test_hashflow_module import quote_digest_reference, sign_maker
+from tests.burners.adapters.hashflow.test_module import quote_digest_reference, sign_maker
 from tests.keeper.conftest import LOT_AMOUNT, WAD, by_adapter, timestamp
 
 # The Hashflow market maker's key: the pool recovers quotes to its address.
@@ -29,7 +29,7 @@ OTHER_KEY_SEED = b"not the hashflow market maker"
 
 
 def _forget_stale_storage_trace(contract) -> None:
-    """boa artifact (see tests/burners/test_hashflow_adapter.py): anchor()
+    """boa artifact (see tests/burners/adapters/hashflow/test_adapter.py): anchor()
     rolls the chain back but not boa's global sstore trace, so a contract
     deployed at an address another suite used inherits foreign slots in the
     storage dump boa renders for a revert of this contract."""

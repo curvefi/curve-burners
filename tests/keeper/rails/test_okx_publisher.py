@@ -29,7 +29,7 @@ from keepers.auction_keeper.rails.okx import (
     OKXIntentPublisher,
     OKXOrder,
 )
-from tests.burners.test_okx_module import order_digest_reference, order_uid_reference
+from tests.burners.adapters.okx.test_module import order_digest_reference, order_uid_reference
 from tests.keeper.conftest import LOT_AMOUNT, by_adapter, timestamp
 
 ZERO = "0x0000000000000000000000000000000000000000"

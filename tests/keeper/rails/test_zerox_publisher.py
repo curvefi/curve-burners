@@ -34,7 +34,7 @@ from keepers.auction_keeper.rails.zerox import (
     hash_actions,
     transfer_from_action,
 )
-from tests.burners.test_zerox_module import hash_actions_reference, permit_digest_reference
+from tests.burners.adapters.zerox.test_module import hash_actions_reference, permit_digest_reference
 from tests.keeper.conftest import LOT_AMOUNT, by_adapter, timestamp
 
 PERMIT2_DOMAIN = keccak(b"PERMIT2_KEEPER_TEST_DOMAIN")

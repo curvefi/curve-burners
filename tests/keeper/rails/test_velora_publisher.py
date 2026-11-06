@@ -27,7 +27,7 @@ from keepers.auction_keeper.rails.velora import (
     gross_up,
     pack_partner_and_fee,
 )
-from tests.burners.test_velora_delta_module import order_digest_reference
+from tests.burners.adapters.velora.test_module import order_digest_reference
 from tests.keeper.conftest import LOT_AMOUNT, by_adapter, timestamp
 
 PARTNER = to_checksum_address("0x" + "fe" * 20)

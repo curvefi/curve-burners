@@ -18,7 +18,7 @@ from keepers.auction_keeper.chain.contracts import (
 from keepers.auction_keeper.config import TokenFilter, UniswapXSettings
 from keepers.auction_keeper.rails.common import ApiError
 from keepers.auction_keeper.rails.uniswapx import ExclusiveDutchOrder, UniswapXPublisher
-from tests.burners.test_uniswapx_module import permit_digest_reference
+from tests.burners.adapters.uniswapx.test_module import permit_digest_reference
 from tests.keeper.conftest import LOT_AMOUNT, by_adapter, timestamp
 
 PERMIT2_DOMAIN = keccak(b"PERMIT2_KEEPER_TEST_DOMAIN")

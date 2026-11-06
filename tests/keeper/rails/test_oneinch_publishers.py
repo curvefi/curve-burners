@@ -27,9 +27,9 @@ from keepers.auction_keeper.rails.oneinch import (
     track_code,
     whitelist_delays,
 )
-from tests.burners import test_feetaker_module as feetaker_vectors
-from tests.burners import test_fusion_module as fusion_vectors
-from tests.burners.test_oneinch_module import order_digest_reference
+from tests.burners.adapters.oneinch.test_module import order_digest_reference
+from tests.burners.adapters.oneinch_feetaker import test_module as feetaker_vectors
+from tests.burners.adapters.oneinch_fusion import test_module as fusion_vectors
 from tests.keeper.conftest import LOT_AMOUNT, by_adapter, timestamp
 
 ZERO = "0x0000000000000000000000000000000000000000"

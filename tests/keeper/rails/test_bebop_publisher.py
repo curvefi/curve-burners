@@ -18,7 +18,7 @@ from keepers.auction_keeper.chain.contracts import (
 from keepers.auction_keeper.config import BebopSettings, TokenFilter
 from keepers.auction_keeper.rails.bebop import BebopJamPublisher, JamOrder
 from keepers.auction_keeper.rails.common import ApiError
-from tests.burners.test_bebop_jam_module import order_digest_reference
+from tests.burners.adapters.bebop.test_module import order_digest_reference
 from tests.keeper.conftest import LOT_AMOUNT, by_adapter, timestamp
 
 SOLVER = "0xbbf8e7cc7a29af9eb149beb9d83cfe015719f9ef"

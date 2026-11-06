@@ -924,7 +924,7 @@ Keeper flow (orderbook): `GET fee-info` for the pair and amounts, build the
 extension with the SDK (`@1inch/limit-order-sdk`:
 `FeeTakerExtension.new(extensionAddress, fees, whitelist, {customReceiver:
 FeeCollector}).build().encode()`, or `sdk.createOrder` with `receiver =
-FeeCollector`; the Python encoders in `tests/burners/test_feetaker_module.py`
+FeeCollector`; the Python encoders in `tests/burners/adapters/oneinch_feetaker/test_module.py`
 reproduce the SDK bytes), then
 `OneInchFeeTakerAdapter.order_for(burner, token, salt, sell_amount,
 extension)` returns the order (receiver = FeeTaker, amounts at the live

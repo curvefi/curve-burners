@@ -26,7 +26,11 @@ from keepers.auction_keeper.rails.kyber import (
     linear_getters,
     timestamp_below,
 )
-from tests.burners.test_kyber_module import api_predicate, order_digest_reference, pack_fee_config
+from tests.burners.adapters.kyber.test_module import (
+    api_predicate,
+    order_digest_reference,
+    pack_fee_config,
+)
 from tests.keeper.conftest import LOT_AMOUNT, by_adapter, timestamp
 
 FEE_RECIPIENT = "0x" + "fe" * 20

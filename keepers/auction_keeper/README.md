@@ -490,7 +490,7 @@ extension)`. The order's expiration is shortened to the scheduled validity.
   FeeTaker, and its fees, whitelist (promotees), fee receivers and the
   auction's receiver are encoded into the FeeTaker extension exactly as
   `@1inch/limit-order-sdk`'s `Sdk.createOrder` does (byte-identical to the
-  SDK vector in `tests/burners/test_feetaker_module.py`); the `source`
+  SDK vector in `tests/burners/adapters/oneinch_feetaker/test_module.py`); the `source`
   track code lands in salt bits [224, 256) like the SDK's `setSource`.
   `order_for(auction, token, salt, 0, extension)` builds the order,
   `describe(extension)` is logged, and `POST {orderbook_url}/{chainId}`
@@ -511,7 +511,7 @@ extension)`. The order's expiration is shortened to the scheduled validity.
   does (auction from `now + startAuctionIn`, resolvers whitelisted from now,
   an exclusive resolver first, surplus block = market amount and fee when
   the market beats the quote; byte-identical to the SDK vector in
-  `tests/burners/test_fusion_module.py`). The order expires 12 s after the
+  `tests/burners/adapters/oneinch_fusion/test_module.py`). The order expires 12 s after the
   auction (the SDK's delay), the auction length is clipped so that fits
   the scheduled validity and the lot window. Submit: `POST
   {fusion_url}/relayer/v2.0/{chainId}/order/submit` with `{order (8
