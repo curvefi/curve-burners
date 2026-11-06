@@ -11,7 +11,7 @@ import typing
 from dataclasses import dataclass, fields
 from typing import Any
 
-from keepers.auction_keeper.config.common import ConfigError
+from keepers.auction_keeper.config.common import ConfigError, addresses
 
 
 @dataclass(frozen=True)
@@ -107,8 +107,74 @@ class VeloraSettings(RailSettings):
     order_type: str = "LIMIT"
 
 
+# What a MetaTxn publisher does when the Gasless API is not in play (``post``
+# off, no key, or a quote it cannot sign): nothing, log the self-authored
+# relay calldata, or (keeper mode) send it from the keeper account.
+ZEROX_RELAY_MODES = ("none", "log", "self-actions")
+ZEROX_FLAVORS = ("metatxn", "intent")
+
+
+@dataclass(frozen=True)
+class CurveRoute:
+    """One Curve pool hop for a self-authored 0x action list: sell ``token``
+    (coin ``i`` of ``pool``) for coin ``j`` (the auction's payment token)."""
+
+    token: str
+    pool: str
+    i: int
+    j: int
+
+    @classmethod
+    def parse(cls, raw: Any) -> CurveRoute:
+        if not isinstance(raw, dict) or set(raw) != {"token", "pool", "i", "j"}:
+            raise ConfigError("zerox.routes entries are {token, pool, i, j} mappings")
+        (token,) = addresses([raw["token"]], "zerox.routes.token")
+        (pool,) = addresses([raw["pool"]], "zerox.routes.pool")
+        for name in ("i", "j"):
+            if isinstance(raw[name], bool) or not isinstance(raw[name], int) or raw[name] < 0:
+                raise ConfigError(f"zerox.routes.{name} must be a non-negative integer")
+        return cls(token=token, pool=pool, i=raw["i"], j=raw["j"])
+
+
+@dataclass(frozen=True)
+class ZeroExSettings(RailSettings):
+    """0x Settler gasless flows. With a Gasless API key (``post: true``) a
+    SettlerMetaTxn adapter is served through ``/gasless/quote`` and
+    ``/gasless/submit``; otherwise (or when a quote cannot be signed) the
+    publisher authors its own action list through a configured Curve pool and
+    relays it per ``relay``. A SettlerIntent adapter only logs standing asks
+    for 0x's solvers (the API serves ``settler_metatransaction`` only)."""
+
+    api_key_env: str | None = "ZEROX_API_KEY"
+    api_url: str = "https://api.0x.org"
+    # chainId sent to the API; defaults to the connected chain's id.
+    chain_id: int | None = None
+    # Override of the adapter's pinned flavor ("metatxn" | "intent"); the
+    # default reads the adapter's intent() and is what validates on-chain.
+    flavor: str | None = None
+    relay: str = "log"
+    # slippagePpm for the quote; None leaves the API default. Tighter slippage
+    # raises the quote's minAmountOut (the signed floor) towards buyAmount.
+    slippage_ppm: int | None = None
+    # Curve pools for the self-authored action list, one per sell token.
+    routes: tuple[CurveRoute, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.relay not in ZEROX_RELAY_MODES:
+            raise ConfigError(f"zerox.relay must be one of {', '.join(ZEROX_RELAY_MODES)}")
+        if self.flavor is not None and self.flavor not in ZEROX_FLAVORS:
+            raise ConfigError(f"zerox.flavor must be one of {', '.join(ZEROX_FLAVORS)}")
+        routes = tuple(
+            route if isinstance(route, CurveRoute) else CurveRoute.parse(route)
+            for route in self.routes
+        )
+        if len({route.token for route in routes}) != len(routes):
+            raise ConfigError("zerox.routes lists a token twice")
+        object.__setattr__(self, "routes", routes)
+
+
 # Integer rail fields that may be zero (the rest must be positive).
-_NON_NEGATIVE_FIELDS: set[str] = {"partner_fee_bps"}
+_NON_NEGATIVE_FIELDS: set[str] = {"partner_fee_bps", "slippage_ppm"}
 
 
 def parse_cow(raw: dict[str, Any], network: str) -> CowSettings:
@@ -141,10 +207,14 @@ def parse_rail(raw: dict[str, Any], network: str, key: str, cls: type) -> Any:
     for field_name, value in section.items():
         if field_name not in allowed:
             raise ConfigError(f"network {network!r}: {key}.{field_name} is not a setting")
-        types = typing.get_args(hints[field_name]) or (hints[field_name],)
+        hint = hints[field_name]
+        if typing.get_origin(hint) in (tuple, list):
+            types: tuple[type, ...] = (list, tuple)
+        else:
+            types = typing.get_args(hint) or (hint,)
         if isinstance(value, bool) and bool not in types or not isinstance(value, types):
             raise ConfigError(f"network {network!r}: {key}.{field_name} has the wrong type")
-        if int in types and not isinstance(value, bool):
+        if int in types and isinstance(value, int) and not isinstance(value, bool):
             if value < 0 or (value == 0 and field_name not in _NON_NEGATIVE_FIELDS):
                 raise ConfigError(f"network {network!r}: {key}.{field_name} must be positive")
         values[field_name] = value

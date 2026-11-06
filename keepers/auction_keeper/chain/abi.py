@@ -103,6 +103,9 @@ KNOWN_ERRORS: dict[bytes, str] = {
         # for shape failures.
         "OrderNotValid(string)",
         "NothingToSell()",
+        # 0x deployer/registry, through ZeroExSettlerAdapter (fail closed)
+        "NoInstance()",
+        "ERC721NonexistentToken(uint256)",
         # AuctionTaker
         "ZeroAuction()",
         "OnlyActiveAuction()",

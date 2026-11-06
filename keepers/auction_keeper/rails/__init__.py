@@ -141,12 +141,14 @@ def publisher_classes() -> dict[str, type[AdapterPublisher]]:
     from keepers.auction_keeper.rails.kyber import KyberDsloPublisher
     from keepers.auction_keeper.rails.okx import OKXIntentPublisher
     from keepers.auction_keeper.rails.velora import VeloraDeltaPublisher
+    from keepers.auction_keeper.rails.zerox import ZeroExSettlerPublisher
 
     classes: list[type[AdapterPublisher]] = [
         CowPublisher,
         OKXIntentPublisher,
         KyberDsloPublisher,
         VeloraDeltaPublisher,
+        ZeroExSettlerPublisher,
     ]
     return {cls.version: cls for cls in classes}
 

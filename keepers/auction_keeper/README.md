@@ -79,13 +79,21 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `velora.partner_address`, `velora.partner_fee_bps` | none, 0 | A partner fee the order signs away (`partnerAndFee`); the signed `destAmount` is grossed up so the netted floor still covers the curve. |
 | `velora.partially_fillable` | `false` | Sign the `FillableOrder` primary type (pro-rata fills) instead of the fill-or-kill `Order`. |
 | `velora.order_type` | `LIMIT` | ASSUMED: the API's order `type` for a standing ask at the curve floor (the API default is `MARKET`). |
+| `zerox.api_key_env` | `ZEROX_API_KEY` | 0x Gasless API key (`0x-api-key` header); without it MetaTxn orders go the self-relay way. |
+| `zerox.enabled`, `zerox.post` | `true`, `true` | Serve `ZeroExSettlerAdapter`; `post: false` skips the Gasless API. |
+| `zerox.api_url`, `zerox.chain_id` | `https://api.0x.org`, connected chain | API base and the `chainId` sent with the quote and the submit. |
+| `zerox.flavor` | none | Override of the adapter's pinned flavor (`metatxn` or `intent`); the default reads `intent()`. |
+| `zerox.slippage_ppm` | none | `slippagePpm` for the quote (the signed `minAmountOut` is the quote after it); none leaves the API default. |
+| `zerox.relay` | `log` | MetaTxn orders without the API: `none` (skip), `log` (print the `executeMetaTxn` calldata), `self-actions` (keeper mode: simulate and send it from the keeper key). |
+| `zerox.routes` | `[]` | `{token, pool, i, j}` entries: the Curve pool the self-authored action list sells `token` (coin `i`) for the payment token (coin `j`) on. |
 
 Adapters are never configured: each cycle the keeper reads the auction's
 `AdapterRegistry`, takes the active adapters, and matches their
 `ADAPTER_VERSION()` to a publisher (`CowAdapter` → `CowPublisher`,
 `OKXIntentAdapter` → `OKXIntentPublisher`,
 `KyberDsloAdapter` → `KyberDsloPublisher`,
-`VeloraDeltaAdapter` → `VeloraDeltaPublisher`). A rail section with `enabled:
+`VeloraDeltaAdapter` → `VeloraDeltaPublisher`,
+`ZeroExSettlerAdapter` → `ZeroExSettlerPublisher`). A rail section with `enabled:
 false` skips its adapters. Adding a rail is one class in
 `keepers/auction_keeper/rails/`.
 
@@ -292,6 +300,86 @@ is `MARKET`). Only Velora's registered agents can settle.
 Standing-ask mode (`post: false`): the same order without the price call
 (`expectedAmount` = `destAmount`), validated and logged as
 `swapSettle(order, signature)`; a log, not a permissionless fallback.
+
+### 0x rail (`zerox`)
+
+Executor: Permit2 (`adapter.permit2()`; the Settler's first action pulls the
+lot through `permitWitnessTransferFrom`). One adapter deployment pins one
+Settler and its flavor, read from `intent()`: a `SettlerMetaTxn` adapter is
+served through the Gasless API or a self-authored relay, a `SettlerIntent`
+adapter publishes standing asks for 0x's solvers. The signed object is
+always the Permit2 witness digest of `Order{permit(token, amount, nonce,
+deadline), slippage(recipient, buyToken, minAmountOut), actions_hash}`
+(signature `adapter ++ abi_encode(order)`, 276 bytes; `actions_hash` is the
+Settler's hash of the action list for a MetaTxn and zero for an Intent),
+the permit nonce is random per publish (Permit2 burns it on settlement) and
+the record is keyed by that digest. The adapter also pins the 0x
+deployer/registry and signs only while its Settler is the feature's
+current or previous instance there; the publisher asks the registry
+(`ownerOf` / `prev`) before every quote and, on a `SettlerRetired` answer
+from either the registry or the auction router, logs once and stops
+publishing for that adapter for good (0x retired the Settler: a new
+adapter deployment follows the registry's current one).
+
+**Gasless API** (`post: true`, a key in `api_key_env`, MetaTxn flavor):
+every poll, `GET {api_url}/gasless/quote?chainId&sellToken=<lot>&buyToken=
+<want>&sellAmount=<available>&taker=<auction>&recipient=<FeeCollector>
+[&slippagePpm]` with the `0x-api-key` and `0x-version: v2` headers
+(parameters, headers and the answer — `trade{type:
+"settler_metatransaction", hash, eip712{types, domain, primaryType,
+message}}`, `minBuyAmount`, `liquidityAvailable`, `zid` — from the v2
+reference, docs.0x.org/api-reference/evm-ap-is/gasless/getquote, and the
+sample response at docs.0x.org/evm/gasless-api/introduction). The
+`message` is the Permit2 `PermitWitnessTransferFrom` the taker must sign:
+`permitted{token, amount}`, `spender` (the Settler), `nonce`, `deadline`,
+`slippageAndActions{recipient, buyToken, minAmountOut, actions}`, amounts
+and the nonce as decimal strings. The publisher checks `primaryType`, the
+domain (`verifyingContract` = the adapter's Permit2, `chainId`), `spender`
+= the pinned Settler, the token pair, `recipient` = the FeeCollector, the
+amount within the available amount, `minAmountOut` at or above the curve
+quote for it (a quote below the curve is skipped: it cannot be signed,
+`check_order` would reject it — `slippage_ppm` moves `minAmountOut` towards
+`buyAmount`), the deadline inside the lot window and
+`METATXN_TRANSFER_FROM` as the first action; rebuilds the order with the
+Settler hash of the quote's actions, requires the quote's `trade.hash` to
+equal the adapter's digest, validates `adapter ++ abi_encode(order)` on-chain,
+then `POST {api_url}/gasless/submit` with `{chainId, trade{type, eip712
+(verbatim), signature{signatureType: 5, signatureBytes}}}` and no `approval`
+(the burner's allowance to Permit2 is a plain approval). The body, the
+`signatureType` enum (2 EIP712 / 3 EthSign with `v, r, s`; 5 Raw with
+`signatureBytes` only, "for smart contract wallets (e.g., ERC-1271)") and
+the answer `{tradeHash, type, zid}` are from
+docs.0x.org/api-reference/evm-ap-is/gasless/submit; `tradeHash` becomes the
+record id. Unverified (no key was available, 401 on a keyless probe):
+whether the backend accepts a plain ERC-1271 contract as `taker` (the quote
+endpoint lists a `SMART_WALLET_NOT_SUPPORTED` error) and relays the long
+raw signature verbatim to Permit2 (`INVALID_SIGNATURE` / `INVALID_SIGNER`
+on submit would say no). API errors are HTTP 4xx `{name, message, data}`
+and are logged; a quote that cannot be signed falls through to the
+self-relay path below unless `relay: none`.
+
+**Self-relay** (MetaTxn flavor, `post: false`, no key, or a quote that
+could not be signed): the publisher authors the action list of the fork
+test — `METATXN_TRANSFER_FROM(settler, permit)` then `BASIC(token, 1e6 ppm,
+pool, 68, exchange(i, j, 0, 0))` through the Curve pool configured for the
+token in `zerox.routes` (`min_dy` 0: the Settler's slippage check is the
+floor, and it pays the recipient its whole buy-token balance, so the pool's
+surplus goes to the FeeCollector) — computes `actions_hash`, builds the
+order through `order_for(auction, token, nonce, 0, <the scheduled validity>,
+actions_hash)`, validates it, checks the Permit2 allowance and
+then, per `zerox.relay`: `none` publishes nothing, `log` logs
+`executeMetaTxn(slippage, actions, zid = 0, msgSender = auction, sig)` with
+its calldata for anyone but the auction to send, `self-actions` in keeper
+mode simulates that call from the keeper account (the signer may not relay
+its own order; the keeper EOA is fine) and sends it, a revert being logged
+(the auction's typed reason bubbles through the Settler and Permit2); in
+offline mode it logs like `log`. A token without a route is skipped.
+
+**Intent** (`intent()` true): the Gasless API serves
+`settler_metatransaction` trades only, so the `order_for` order (no action
+hash, deadline at the scheduled validity) is validated and logged for 0x's
+allow-listed solvers (`getSolvers()`), who route and call `executeMetaTxn`
+themselves; a log, not a permissionless fallback.
 
 Run it as a long-lived service (systemd, docker); it is stateless beyond the
 state file and safe to restart.

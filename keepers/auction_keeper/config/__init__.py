@@ -55,6 +55,13 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
           enabled: true
           post: true                 # price -> build locally -> validate -> POST /v2/delta/orders
           # partner: curve           # partner string for the price and the order
+        zerox:                       # ZeroExSettlerAdapter (0x Settler gasless flows)
+          api_key_env: ZEROX_API_KEY # Gasless API key (quote + submit); without it: self-relay
+          enabled: true
+          post: true
+          relay: log                 # MetaTxn without the API: none | log | self-actions
+          routes:                    # Curve pools for the self-authored action list
+            - {token: "0x...", pool: "0x...", i: 0, j: 1}
 
 Every other settlement rail gets a section named after it (``oneinch``,
 ``bebop``, ...) parsed by ``parse_rail`` (``config/rails.py``) into a
@@ -94,10 +101,12 @@ from keepers.auction_keeper.config.pricing import (
 )
 from keepers.auction_keeper.config.rails import (
     CowSettings,
+    CurveRoute,
     KyberSettings,
     OKXSettings,
     RailSettings,
     VeloraSettings,
+    ZeroExSettings,
 )
 
 __all__ = [
@@ -122,6 +131,8 @@ __all__ = [
     "OKXSettings",
     "KyberSettings",
     "VeloraSettings",
+    "CurveRoute",
+    "ZeroExSettings",
     "TokenFilter",
     "TtlSettings",
     "expand_env",

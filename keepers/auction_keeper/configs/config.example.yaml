@@ -103,6 +103,21 @@ networks:
       # partner_fee_bps: 0
       # partially_fillable: false     # FillableOrder (pro-rata fills) instead of fill-or-kill
       # order_type: LIMIT             # ASSUMED API order type for a standing ask (default MARKET)
+    zerox:                          # ZeroExSettlerAdapter (0x Settler v2 gasless flows)
+      api_key_env: ZEROX_API_KEY    # Gasless API key (quote + submit, SettlerMetaTxn adapters only)
+      enabled: true
+      post: true                    # quote -> check -> sign -> /gasless/submit every poll
+      # api_url: https://api.0x.org
+      # chain_id: 1                   # chainId sent to the API; defaults to the connected chain
+      # flavor: metatxn               # override of the adapter's pinned flavor (metatxn | intent)
+      # slippage_ppm: 1000            # quote slippage; the signed minAmountOut is the quote after it
+      # Without the API (post false, no key, or a quote below the curve) a
+      # MetaTxn order is authored here through a Curve pool and relayed per
+      # `relay`: none (skip), log (print the executeMetaTxn calldata), or
+      # self-actions (keeper mode: simulate and send it from the keeper key).
+      relay: log
+      # routes:                       # one Curve pool hop per sell token (coin i -> coin j = want)
+      #   - {token: "0x...", pool: "0x...", i: 0, j: 1}
 
   gnosis:
     rpc: https://lb.drpc.org/ogrpc?network=gnosis&dkey=${DRPC_API_KEY}

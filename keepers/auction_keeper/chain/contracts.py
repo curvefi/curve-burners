@@ -396,6 +396,120 @@ class VeloraDeltaAdapterContract(AdapterContract):
         return to_checksum_address(partner), fee_bps, takes_surplus, cap_surplus
 
 
+# 0x Settler gasless order (adapters/zerox/settler.vy): the Permit2 permit
+# (token, amount, nonce, deadline), the AllowedSlippage (recipient, buyToken,
+# minAmountOut) and the Settler's hash of the signed action list.
+ZEROX_PERMIT_ABI = "(address,uint256,uint256,uint256)"
+ZEROX_SLIPPAGE_ABI = "(address,address,uint256)"
+ZEROX_ORDER_ABI = f"({ZEROX_PERMIT_ABI},{ZEROX_SLIPPAGE_ABI},bytes32)"
+
+
+class ZeroExSettlerAdapterContract(AdapterContract):
+    SETTLER = Function("settler()", ("address",))
+    INTENT = Function("intent()", ("bool",))
+    PERMIT2 = Function("permit2()", ("address",))
+    DEPLOYER = Function("deployer()", ("address",))
+    FEATURE = Function("feature()", ("uint256",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    HASH_ACTIONS = Function("hash_actions(bytes[])", ("bytes32",))
+    ORDER_FOR = Function(
+        "order_for(address,address,uint256,uint256,uint256,bytes32)", (ZEROX_ORDER_ABI, "bytes")
+    )
+    DESCRIBE = Function("describe(bytes)", (ZEROX_ORDER_ABI, "bytes32"))
+
+    def settler(self) -> str:
+        return to_checksum_address(self._read_one(self.SETTLER))
+
+    def intent(self) -> bool:
+        """True for a SettlerIntent adapter (Slippage witness), False for SettlerMetaTxn."""
+        return bool(self._read_one(self.INTENT))
+
+    def permit2(self) -> str:
+        return to_checksum_address(self._read_one(self.PERMIT2))
+
+    def deployer(self) -> str:
+        """The 0x Settler deployer/registry the adapter checks its Settler against."""
+        return to_checksum_address(self._read_one(self.DEPLOYER))
+
+    def feature(self) -> int:
+        """The registry feature (ERC-721 token id) of the pinned flavor: 3 MetaTxn, 4 Intent."""
+        return int(self._read_one(self.FEATURE))
+
+    def domain_separator(self) -> bytes:
+        """Permit2's EIP-712 domain separator, as pinned by the adapter."""
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def hash_actions(self, actions: list[bytes]) -> bytes:
+        """The Settler's hash of an action list (the actions_hash of a MetaTxn order)."""
+        return bytes(self._read_one(self.HASH_ACTIONS, actions))
+
+    def order_for(
+        self,
+        auction: str,
+        token: str,
+        nonce: int,
+        sell_amount: int = 0,
+        deadline: int = 0,
+        actions_hash: bytes = bytes(32),
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(
+            self.ORDER_FOR, auction, token, nonce, sell_amount, deadline, actions_hash
+        )
+        return tuple(order), bytes(signature)
+
+    def describe(self, payload: bytes) -> tuple[tuple, bytes]:
+        """(order, Permit2 digest) of a bare ``abi_encode(order)`` payload."""
+        order, digest = self._read(self.DESCRIBE, payload)
+        return tuple(order), bytes(digest)
+
+
+class ZeroExDeployerRegistry(Contract):
+    """The 0x Settler deployer/registry: whether a Settler is still its
+    feature's current (``ownerOf``) or previous (``prev``) instance, 0x's
+    ``requireGenuineSettler`` and the adapter's own liveness check. A
+    reverting view (no instance left) counts as not listed."""
+
+    OWNER_OF = Function("ownerOf(uint256)", ("address",))
+    PREV = Function("prev(uint128)", ("address",))
+
+    def owner_of(self, feature: int) -> str | None:
+        try:
+            return to_checksum_address(self._read_one(self.OWNER_OF, feature))
+        except CallReverted:
+            return None
+
+    def prev(self, feature: int) -> str | None:
+        try:
+            return to_checksum_address(self._read_one(self.PREV, feature))
+        except CallReverted:
+            return None
+
+    def lists(self, feature: int, settler: str) -> bool:
+        """One call while the Settler is current, two once it is the previous one."""
+        settler = to_checksum_address(settler)
+        if self.owner_of(feature) == settler:
+            return True
+        return self.prev(feature) == settler
+
+
+class ZeroExSettlerContract(Contract):
+    """A 0x Settler (MetaTxn or Intent flavor): the relay entrypoint's calldata."""
+
+    EXECUTE_META_TXN = Function(
+        "executeMetaTxn((address,address,uint256),bytes[],bytes32,address,bytes)", ("bool",)
+    )
+
+    def execute_meta_txn_calldata(
+        self,
+        slippage: tuple[str, str, int],
+        actions: list[bytes],
+        zid: bytes,
+        msg_sender: str,
+        sig: bytes,
+    ) -> bytes:
+        return self.EXECUTE_META_TXN.encode(slippage, actions, zid, msg_sender, sig)
+
+
 class AuctionTaker(Contract):
     """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route."""
 
@@ -425,6 +539,7 @@ __all__ = [
     "ERC1271_MAGIC_VALUE",
     "LOT_STAGED_TOPIC",
     "OKX_ORDER_ABI",
+    "ZEROX_ORDER_ABI",
     "AdapterConfig",
     "AdapterContract",
     "AdapterRegistry",
@@ -437,6 +552,9 @@ __all__ = [
     "LotView",
     "OKXIntentAdapterContract",
     "VeloraDeltaAdapterContract",
+    "ZeroExDeployerRegistry",
+    "ZeroExSettlerAdapterContract",
+    "ZeroExSettlerContract",
     "address_word",
     "lot_staged_token",
 ]
