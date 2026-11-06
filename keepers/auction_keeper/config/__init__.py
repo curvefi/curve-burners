@@ -68,6 +68,10 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
           post: true                 # RFQ-m quote -> check -> sign -> relay tradeRFQM (keeper mode)
           # source: api              # the `source` identity sent with every RFQ
           # chunk: 1000000000000000000000   # base amount per quote; default: everything available
+        oneinch:                     # plain LOP, FeeTaker orderbook and Fusion publishers
+          api_key_env: ONEINCH_API_KEY
+          enabled: true
+          post: false                # plain orders: log only (the public orderbook rejects them)
 
 Every other settlement rail gets a section named after it (``oneinch``,
 ``bebop``, ...) parsed by ``parse_rail`` (``config/rails.py``) into a
@@ -111,6 +115,7 @@ from keepers.auction_keeper.config.rails import (
     HashflowSettings,
     KyberSettings,
     OKXSettings,
+    OneInchSettings,
     RailSettings,
     VeloraSettings,
     ZeroExSettings,
@@ -141,6 +146,7 @@ __all__ = [
     "CurveRoute",
     "ZeroExSettings",
     "HashflowSettings",
+    "OneInchSettings",
     "TokenFilter",
     "TtlSettings",
     "expand_env",

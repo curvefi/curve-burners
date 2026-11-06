@@ -141,6 +141,11 @@ def publisher_classes() -> dict[str, type[AdapterPublisher]]:
     from keepers.auction_keeper.rails.hashflow import HashflowPublisher
     from keepers.auction_keeper.rails.kyber import KyberDsloPublisher
     from keepers.auction_keeper.rails.okx import OKXIntentPublisher
+    from keepers.auction_keeper.rails.oneinch import (
+        OneInchFeeTakerPublisher,
+        OneInchFusionPublisher,
+        OneInchPublisher,
+    )
     from keepers.auction_keeper.rails.velora import VeloraDeltaPublisher
     from keepers.auction_keeper.rails.zerox import ZeroExSettlerPublisher
 
@@ -151,6 +156,9 @@ def publisher_classes() -> dict[str, type[AdapterPublisher]]:
         VeloraDeltaPublisher,
         ZeroExSettlerPublisher,
         HashflowPublisher,
+        OneInchPublisher,
+        OneInchFeeTakerPublisher,
+        OneInchFusionPublisher,
     ]
     return {cls.version: cls for cls in classes}
 

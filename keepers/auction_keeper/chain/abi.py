@@ -106,6 +106,8 @@ KNOWN_ERRORS: dict[bytes, str] = {
         # 0x deployer/registry, through ZeroExSettlerAdapter (fail closed)
         "NoInstance()",
         "ERC721NonexistentToken(uint256)",
+        # 1inch adapters (order_for)
+        "BadExpiration()",
         # AuctionTaker
         "ZeroAuction()",
         "OnlyActiveAuction()",

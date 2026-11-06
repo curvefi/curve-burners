@@ -90,6 +90,12 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `hashflow.enabled`, `hashflow.post` | `true`, `true` | Serve `HashflowAdapter`; `post: false` (or no credential) logs the quote-request template only, there are no standing asks. |
 | `hashflow.api_url`, `hashflow.source` | `https://api.hashflow.com`, `api` | API base and the RFQ `source` identity (`api` for an API wallet trader, else the aggregator name Hashflow registered). |
 | `hashflow.chunk` | none | Base-token amount requested per quote (an RFQ-m fill is exact); default: everything available. |
+| `oneinch.api_key_env` | `ONEINCH_API_KEY` | Developer Portal key for the orderbook and Fusion endpoints. |
+| `oneinch.enabled` | `true` | Serve the three 1inch adapters. |
+| `oneinch.post` | `true` | Plain `OneInchAdapter` orders only: `false` logs and records them for direct fills instead of POSTing (the public orderbook rejects plain orders). |
+| `oneinch.orderbook_url`, `oneinch.fusion_url` | `https://api.1inch.dev/orderbook/v4.0`, `https://api.1inch.dev/fusion` | Base URLs; `/{chainId}/...` is appended. |
+| `oneinch.fusion_auction_duration` | 180 | Fusion resolver auction length (s), clipped to `order_ttl`. |
+| `oneinch.fusion_start_premium_bps` | 100 | Fusion auction start amount above the curve quote (the end amount). |
 
 Adapters are never configured: each cycle the keeper reads the auction's
 `AdapterRegistry`, takes the active adapters, and matches their
@@ -98,7 +104,9 @@ Adapters are never configured: each cycle the keeper reads the auction's
 `KyberDsloAdapter` → `KyberDsloPublisher`,
 `VeloraDeltaAdapter` → `VeloraDeltaPublisher`,
 `ZeroExSettlerAdapter` → `ZeroExSettlerPublisher`,
-`HashflowAdapter` → `HashflowPublisher`). A rail section with `enabled:
+`HashflowAdapter` → `HashflowPublisher`,
+`OneInchAdapter` / `OneInchFeeTakerAdapter` / `OneInchFusionAdapter` → the
+three 1inch publishers). A rail section with `enabled:
 false` skips its adapters. Adding a rail is one class in
 `keepers/auction_keeper/rails/`.
 
@@ -453,6 +461,61 @@ without a valid credential) and are logged.
 No credential was available here, so nothing was exercised against the
 live API; the test fixtures copy the docs' shapes and settle through the
 router and pool mocks of the adapter tests.
+
+### 1inch rail (`oneinch`)
+
+Executor: the Limit Order Protocol v4 host (AggregationRouterV6), whose
+allowance is checked/synced. Signature: `adapter ++ abi_encode(order,
+extension)`. The order's expiration is shortened to the scheduled validity.
+
+* **`OneInchAdapter` (plain orders)**: `order_for` output, no extension.
+  The public orderbook only relays orders with the standard FeeTaker
+  extension, so with `oneinch.post: false` the publisher logs
+  `fillContractOrder(order, signature)` and records the order hash for
+  direct on-chain fills (anyone may fill). `post: true` POSTs the SDK body
+  (`{orderHash, signature, data{...order, extension: "0x"}}`) to
+  `oneinch.orderbook_url/{chainId}` — for a private feed; the public one is
+  expected to reject it.
+* **`OneInchFeeTakerAdapter` (orderbook)**: `GET
+  {orderbook_url}/{chainId}/fee-info?makerAsset&takerAsset&makerAmount&takerAmount`
+  (bearer key), the answer's `extensionAddress` must be the adapter's
+  FeeTaker, and its fees, whitelist (promotees), fee receivers and the
+  auction's receiver are encoded into the FeeTaker extension exactly as
+  `@1inch/limit-order-sdk`'s `Sdk.createOrder` does (byte-identical to the
+  SDK vector in `tests/burners/test_feetaker_module.py`); the `source`
+  track code lands in salt bits [224, 256) like the SDK's `setSource`.
+  `order_for(auction, token, salt, 0, extension)` builds the order,
+  `describe(extension)` is logged, and `POST {orderbook_url}/{chainId}`
+  sends `{orderHash, signature, data{salt, maker, receiver, makerAsset,
+  takerAsset, makingAmount, takingAmount, makerTraits, extension}}` (the
+  SDK's `submitOrder` body; the SDK master points at `orderbook/v4.1`, the
+  default here is `v4.0` — override `orderbook_url` if the portal moves).
+* **`OneInchFusionAdapter` (Fusion)**: `POST
+  {fusion_url}/quoter/v2.0/{chainId}/quote/receive?fromTokenAddress&toTokenAddress&amount&walletAddress=<auction>&surplus=true`
+  with body `{customPreset: {auctionDuration, auctionStartAmount,
+  auctionEndAmount}}` where the end amount is the curve quote now and the
+  start amount is `fusion_start_premium_bps` above it (the
+  `QuoterApi.getQuoteWithCustomPreset` request). The answer's
+  `settlementAddress` must be the adapter's settlement; `presets.custom`,
+  `whitelist`, `fee`, `surplusFee`, `marketAmount`, the integrator fields
+  and `source` are encoded into the Fusion extension the way
+  `quote.createFusionOrder({receiver: FeeCollector, preset: "custom"})`
+  does (auction from `now + startAuctionIn`, resolvers whitelisted from now,
+  an exclusive resolver first, surplus block = market amount and fee when
+  the market beats the quote; byte-identical to the SDK vector in
+  `tests/burners/test_fusion_module.py`). The order expires 12 s after the
+  auction (the SDK's delay), the auction length is clipped so that fits
+  the scheduled validity and the lot window. Submit: `POST
+  {fusion_url}/relayer/v2.0/{chainId}/order/submit` with `{order (8
+  fields), signature, quoteId, extension}` (`RelayerApi.submit`).
+
+Request and body shapes were taken from the SDK sources
+(`limit-order-sdk/src/api/api.ts`, `fusion-sdk/src/api/{quoter,relayer}`)
+and the extension encoders from the SDK vectors already in the contract
+tests; no Developer Portal key was available here, so neither endpoint was
+exercised live, and whether the backends accept a non-65-byte ERC-1271
+signature from a contract maker remains the open question noted in
+`contracts/burners/README.md`.
 
 Run it as a long-lived service (systemd, docker); it is stateless beyond the
 state file and safe to restart.

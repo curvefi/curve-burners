@@ -96,11 +96,13 @@ lives in `interfaces/IDutchAuction.vyi`, Yearn's `AuctionInfo` in
 id, and the ERC-1271 magic value in `utils/constants.vy`; the GPv2 constants
 in `adapters/cow/gpv2.vy`, the OKX order type hash, domain and commission
 rules in `adapters/okx/intent_swap.vy`, the 0x Settler and Permit2 type
-hashes in `adapters/zerox/settler.vy`, and the Hashflow quote type hash and
-domain in `adapters/hashflow/hashflow.vy` are keccak256-derived. Peers
-(`CowAdapter`, `OKXIntentAdapter`, `ZeroExSettlerAdapter`,
-`HashflowAdapter`, the resolver) read the burner through `IDutchAuction`
-alone.
+hashes in `adapters/zerox/settler.vy`, the Hashflow quote type hash and
+domain in `adapters/hashflow/hashflow.vy`, and the 1inch LOP v4 type hash
+and traits layout in `adapters/oneinch/oneinch.vy` are keccak256-derived
+(the FeeTaker and Fusion extension layouts live in
+`adapters/oneinch/feetaker.vy` and `fusion.vy`). Peers (`CowAdapter`,
+`OKXIntentAdapter`, `ZeroExSettlerAdapter`, `HashflowAdapter`, the three
+1inch adapters, the resolver) read the burner through `IDutchAuction` alone.
 
 ### Adapter signature format
 
@@ -777,6 +779,234 @@ Emergency procedure is the CoW one with `executor = router`:
 `registry.disable_adapter(HashflowAdapter)` batched with
 `sync_executor_approvals(router, tokens)`; the disable alone already stops
 every fill, as the mainnet fork test shows.
+
+### 1inch rail: `OneInchAdapter`, `OneInchFeeTakerAdapter`, `OneInchFusionAdapter`
+
+The 1inch Limit Order Protocol v4 (hosted by `AggregationRouterV6`,
+`0x111111125421cA6dc452d289314280a0f8842A65` on every chain 1inch supports,
+Ethereum and Polygon included, with identical verified source) is the second
+rail, built the same way, and comes as a family of three adapters: the
+plain-order `OneInchAdapter`, and two that accept the order formats the
+1inch off-chain feeds carry, `OneInchFeeTakerAdapter` (orders with the
+standard `FeeTaker` extension, the only format the public orderbook API
+relays) and `OneInchFusionAdapter` (Fusion orders settled through 1inch's
+`SimpleSettlement`, itself a `FeeTaker` with a resolver auction). 1inch was
+chosen over the other candidates (OKX intent swap, Bebop JAM) because the
+settlement contracts are open, verified and unchanged across chains, a
+contract maker is a first-class citizen on-chain
+(`fillContractOrder[Args]` forwards the signature bytes verbatim to the
+maker's ERC-1271 `isValidSignature` with the EIP-712 order digest), and any
+taker may fill a plain order permissionlessly, so the rail works without an
+off-chain feed. All three share one economic principle: **the signed
+`takingAmount` is the floor the FeeCollector is paid for `makingAmount`**.
+Without amount getters the protocol prices every fill linearly from the
+order amounts, rounding the taking amount up; the FeeTaker fee gross-up and
+the Fusion rate bump only raise what the taker pays, and the custom
+receiver gets at least the linear base in every branch and at every
+rounding (see below), so each adapter validates the shape of its extension
+and then hands the same tuple to the auction's `check_order` — taker asset
+is the target, the resolved receiver is the FeeCollector, making amount
+within the snapshot, taking amount at or above the live quote, the 40-bit
+`makerTraits` expiration no later than the lot end (a never-expiring order
+fails it) — exactly like a plain order. The bump curve is not replicated on
+chain: it depends on `block.basefee` and only adds surplus.
+
+Shared mechanics. Every 1inch adapter is stateless and immutable and pinned
+to the chain's router: at deploy it rebuilds the EIP-712 domain from the
+router's ERC-5267 `eip712Domain()` and cross-checks it against the router's
+own `hashOrder` on a probe order, so a wrong address, a proxy with another
+domain or a different order type fails the deployment. The registry entry
+of each is `adapter = <adapter>, executor = router`, because a fill pulls
+the maker asset with a plain `transferFrom` from the maker: the router is
+what `sync_executor_approvals(router, tokens)` approves (orders with the
+`USE_PERMIT2` trait are rejected, so Permit2 is never involved), and the
+executor reference count keeps
+the allowance while any of the three is active. A taker calls
+`router.fillContractOrder(order, sig, amount, takerTraits)` (or
+`fillContractOrderArgs` with the extension in `args`) with `sig = <adapter>
+++ abi.encode(order, extension)`; the router forwards `sig` to the burner's
+`isValidSignature` with the order digest, the burner strips the adapter
+prefix, and the adapter recomputes the digest from the bare pair
+(`adapters/oneinch/oneinch.vy` holds the order type, the type hash, the
+`makerTraits` bit layout and the extension binding and field layout of
+`OrderLib`/`ExtensionLib`) and runs the checks all three share — canonical
+encoding, the burner as maker, neither `USE_PERMIT2` nor `UNWRAP_WETH`,
+the extension bound to the order exactly as the protocol binds it (flag and
+salt) and carrying no asset suffixes (`NonCanonical`, `InvalidHash`,
+`BadMaker`, `BadMakerTraits`, `MissingOrderExtension`,
+`UnexpectedOrderExtension`, `InvalidExtensionHash`, `BadExtensionOffsets`,
+`BadAssetSuffix`). `OneInchAdapter` hosts these checks and the lot quoting
+as internals, and the two fee-taking adapters import it as a module
+(`initializes: base`, exporting its `limit_order_protocol` and
+`domain_separator`), adding their extension policy on top. Shape failures
+revert with `oneinch.OrderNotValid(reason)`; the auction's typed
+`check_order` revert bubbles unchanged through the burner. The router
+itself, however, swallows every revert of a contract signature check into
+its own `BadSignature()`, so a publisher classifies an order by `eth_call`
+against the burner's `isValidSignature`, not against a fill. Two protocol
+facts shape every 1inch rail. The router checks a contract signature on
+the first fill of an order only: a partially filled order keeps filling at
+its signed unit price (at or above the curve at validation time, which
+only decays) until it expires, without asking the burner again — fine
+economically, but it means that disabling an adapter does not stop the
+remainder of an already started order; only the allowance does. And a
+published order is a standing ask like the CoW one: the burner keeps
+accepting it as the curve decays below it, and a publisher re-posts lower
+with a fresh salt (the router tracks fills per order hash). 1inch is not
+deployed on Fraxtal, so this rail is for Polygon and Ethereum.
+
+#### Plain orders: `OneInchAdapter`
+
+`adapters/oneinch/OneInchAdapter.vy` accepts orders without amount getters
+(predicates, maker permits and interactions only restrict or decorate a
+fill and pass through; getters are `BadAmountGetter`), so the protocol
+prices every fill linearly from the order amounts and the resolved receiver
+(an empty one means the maker) must be the FeeCollector.
+`OneInchAdapter.order_for(burner, token, salt, sell_amount)` returns the
+publishable pair for a live lot: a plain order (no extension) for the whole
+available amount by default, priced at the current block, open to every
+taker, partially and multiply fillable, expiring at the lot end. Plain
+orders are not what the 1inch off-chain feeds carry, so a publisher hands
+them to takers directly (or through its own feed); the on-chain fill is
+permissionless.
+
+#### Orderbook orders: `OneInchFeeTakerAdapter`
+
+The public 1inch orderbook (`POST /orderbook/v4.0/{chain}`, Developer
+Portal key required) relays only orders carrying the standard FeeTaker
+extension: `contracts/extensions/FeeTaker.sol` with
+`AmountGetterWithFee.sol` in 1inch/limit-order-protocol, deployed at
+`0xc0DFdB9E7a392c3dBBE7c6FBe8FBC1789C9FE05e` on Ethereum and Polygon (the
+verified source is identical on both chains and matches master up to the
+`orderHash` plumbing added in 2026-08, which does not touch the layout;
+`GET /orderbook/v4.0/{chain}/fee-info` returns it as `extensionAddress`
+together with the fees, the protocol fee receiver and the resolver
+whitelist). `adapters/oneinch/feetaker.vy` pins the layout. How the
+FeeTaker works: the amount getters gross the linear taking amount up by
+`(1e5 + integratorFee + resolverFee) / 1e5` (rounded up) and scale the
+making amount down by the same factor (rounded down), with the resolver
+fee discounted for whitelisted takers; `postInteraction`, which the router
+calls only when the `makerTraits` ask for it and which splits only when
+`order.receiver` is the FeeTaker itself (else `InconsistentFee` for any
+fee), keeps `floor(T * fee / denominator)` per fee for the integrator and
+protocol receivers and sends the rest to the custom receiver (flag `0x01`,
+20 bytes after the two fee receivers) or to the maker; and it refuses
+takers that are neither whitelisted nor holders of the Resolver Access
+Token (`0xAcce5500000f71A32B5E5514D1577E14b7aacC4a`): orderbook orders
+are filled by 1inch resolvers, not by anyone. Receiver floor: for a fill
+of making amount `m` the taker pays `T >= ceil(T0 * m / M0) * D / 1e5`
+with `D = 1e5 + fees`, the receiver gets `T - floor(T * iF / D) - floor(T *
+rF / D) >= T * 1e5 / D >= ceil(T0 * m / M0)`, the linear base, with no
+wei-level leak (the base is an integer); taking-amount fills deliver fewer
+maker tokens for the same payment. The floor holds only if the getters and
+the post-interaction read the same fees for the same taker, so the adapter
+requires identical fee bytes and whitelists on both sides.
+`OneInchFeeTakerAdapter.vy` checks, after the shared ones: the order
+receiver is the FeeTaker (`BadOrderReceiver`), the post-interaction flag is
+set and the pre-interaction flag is not (`BadMakerTraits`), no
+pre-interaction data (`BadPreInteraction`), both amount getters target the
+pinned FeeTaker with identical extraData (`BadAmountGetter`), the
+post-interaction targets it (`BadPostInteraction`), the fee data parses
+with the getter's bounds and is the same on both sides (`BadFeeData`), the
+whitelists parse and list the same takers (`BadWhitelist`), and neither
+side has a tail (a tail of 20 bytes or more chains another amount getter
+or `IPostInteraction`: `BadGetterTail`, `BadInteractionTail`). The custom
+receiver (the maker when none is flagged) is handed to `check_order`,
+which rejects anything but the FeeCollector. Fee values, fee receivers and
+whitelists are not bounded: the API dictates them and they are the taker's
+cost; `describe(extension)` returns them for publishers.
+
+Keeper flow (orderbook): `GET fee-info` for the pair and amounts, build the
+extension with the SDK (`@1inch/limit-order-sdk`:
+`FeeTakerExtension.new(extensionAddress, fees, whitelist, {customReceiver:
+FeeCollector}).build().encode()`, or `sdk.createOrder` with `receiver =
+FeeCollector`; the Python encoders in `tests/burners/test_feetaker_module.py`
+reproduce the SDK bytes), then
+`OneInchFeeTakerAdapter.order_for(burner, token, salt, sell_amount,
+extension)` returns the order (receiver = FeeTaker, amounts at the live
+quote, partial and multiple fills, post-interaction call, expiring at the
+lot end, salt bound like `LimitOrder.buildSalt`) and the signature
+`adapter ++ abi.encode(order, extension)`; submit `POST
+/orderbook/v4.0/{chain}` with `orderHash, signature, data{...order,
+extension}`. The SDK's own order over the same extension validates too.
+
+#### Fusion orders: `OneInchFusionAdapter`
+
+Fusion orders are settled through `contracts/SimpleSettlement.sol` in
+1inch/limit-order-settlement (`is FeeTaker`), deployed at
+`0x2Ad5004c60e16E54d5007C80CE329Adde5B51Ef5` on Ethereum (as `Settlement`,
+the same contract with a priority-fee cap on fills relative to
+`block.basefee`) and Polygon (`SimpleSettlement`); the verified source is
+identical to master up to the pragma on both chains, and the quote API
+returns the address as `settlementAddress`. `adapters/oneinch/fusion.vy`
+pins what it adds to the FeeTaker layout: the getter extraData opens with
+the auction details (`bytes3 gasBumpEstimate, bytes4 gasPriceEstimate,
+bytes4 auctionStartTime, bytes3 auctionDuration, bytes3 initialRateBump,
+uint8 N, (bytes3 rateBump, bytes2 timeDelta)[N]`) before the FeeTaker fee
+data and getter whitelist; the post-interaction reads the whitelist as
+`bytes4 allowedTime, uint8 N, (bytes10 addressHalf, bytes2 timeDelta)[N]`
+(the halves of the getter whitelist, with resolver timing) and then a
+surplus block (`bytes32 estimatedTakingAmount, uint8 protocolSurplusFee` in
+1e2). Economics: the getter applies `rateBump = max(auctionBump -
+gasBump, 0)` after the fee gross-up, taking amount up and making amount
+down by `(1e7 + rateBump) / 1e7`, so no fill pays less than the FeeTaker
+amount; after the auction ends the bump is zero and the order stands at
+its linear price until it expires. The surplus fee takes at most the whole
+excess of the net taking amount over the estimate scaled to the fill
+(rounded up), and the settlement requires the estimate to be at least the
+order's taking amount (`InvalidEstimatedTakingAmount`), so the receiver
+still gets at least the linear base. `OneInchFusionAdapter.vy` runs the
+FeeTaker checks against the pinned settlement, with the post whitelist in
+its Fusion shape, plus: the auction details parse (`BadAuctionDetails`),
+the auction ends no later than the order expiration
+(`AuctionPastExpiration`; afterwards the standing ask is the floor, which
+is fine), the surplus block closes the post-interaction with a fee of at
+most 100% (`BadSurplus`), and the estimate covers the order's taking amount
+(`InvalidEstimatedTakingAmount`, mirrored so publishers get a typed
+reason). Allowed times and delays are the settlement's concern (a fill
+before them reverts `AllowedTimeViolation`), and on Ethereum so is the
+priority-fee cap; `describe(extension)` returns the fees, receivers,
+whitelist size, auction details and surplus block.
+
+Keeper flow (Fusion): `POST /fusion/quoter/v2.0/{chain}/quote/receive` with
+`walletAddress = burner`, the pair and amount, and a `customPreset` whose
+`auctionEndAmount` is our quote at post time and `auctionStartAmount` above
+it (the auction must end by the lot end; the SDK adds a 12-second
+expiration delay after it, so start it early enough); the quote carries
+the settlement address (must equal the pinned one), the resolver whitelist,
+the fees and the surplus estimate, and
+`quote.createFusionOrder({receiver: FeeCollector, preset: custom})` builds
+the order and `order.extension.encode()`; then either sign the SDK's order
+as is (`adapter ++ abi.encode(order, extension)`; its traits and salt are
+what the adapter expects) or feed the extension to
+`OneInchFusionAdapter.order_for(burner, token, salt, sell_amount,
+extension)` for an order priced at the current block, and submit `POST
+/fusion/orders/v2.0/{chain}/order/submit` with `order, signature, quoteId,
+extension`. Both feeds need a Developer Portal key. Open question, not
+verifiable here (no key in this environment): whether the 1inch backends
+accept a non-65-byte ERC-1271 signature from a contract maker; the known
+datapoint is that Safe's 130-byte signatures work on Fusion.
+
+Limitations shared by the two fee-taking rails: only whitelisted resolvers
+and access-token holders can fill, so these rails are feeds for 1inch's
+resolver network rather than permissionless venues; the extension decoding
+bound (`oneinch.MAX_EXTENSION`, 2048 bytes) covers a Fusion extension with
+a few dozen whitelisted resolvers; the taking tokens pass through the
+extension contract within the fill transaction, whose verified layout the
+adapters trust (each deploy probes its extension's `getTakingAmount` on a
+known vector, so a FeeTaker pinned as a settlement or vice versa fails the
+deployment); and fee receivers are whatever the publisher encoded — the
+API dictates them for relayed orders, and they never reduce what the
+FeeCollector gets below the linear base.
+
+Emergency procedure is the CoW one with `executor = router`, for all three
+adapters: `registry.disable_adapter(<adapter>)` batched with
+`sync_executor_approvals(router, tokens)` (`scripts/emergency_cow_disable.py`
+takes the executor as an argument). Here the allowance sync is not optional
+hygiene but the step that actually stops fills of orders validated before
+the disable (the first-fill-only signature check applies to all three), as
+the mainnet fork tests demonstrate; and because the three share the router
+as executor, the allowance only clears once the last of them is disabled.
 
 ### Payment token and resync
 
