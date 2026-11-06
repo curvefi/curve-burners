@@ -463,18 +463,26 @@ holds the types, the OIF and Permit2 type hashes and the output settler's
 context shapes), checks the shape — canonical encoding, the burner as
 user, this chain as origin, exactly one input and one output, clean
 identifiers, the pinned output settler as the order's input oracle and as
-the output's oracle and settler on this chain, no callback, a context the
-output settler resolves to the signed amount (none, limit, exclusive
-limit) — and delegates the economics to `check_order` (output token is the
-target, recipient is the FeeCollector, input within the snapshot, output
-amount at or above the live quote, `fillDeadline` no later than the lot
-end). The oracle pin is what makes the floor real: the escrow releases the
+the output's oracle and settler on this chain, no callback, a plain
+limit-order context (none or limit; an exclusive one would let the opener
+lock every other solver out until a start time it picks), `expires` equal
+to `fillDeadline` (the escrow refunds an opened but unfilled intent only
+after `expires`, so a later `expires` would let any opener park the lot in
+the escrow past the lot end), and `fillDeadline` at most 15 minutes past
+the open (`MAX_FILL_WINDOW`: anyone may `openFor` a burner intent, which
+moves the lot into the escrow before anything is paid, so this bounds how
+long an unpaid open can keep the lot from every other rail) — and
+delegates the economics to `check_order` (output token is the target,
+recipient is the FeeCollector, input within the snapshot, output amount at
+or above the live quote, `fillDeadline` no later than the lot end). The
+oracle pin is what makes the floor real: the escrow releases the
 input only against the input oracle's attestation, and the pinned output
 settler attests only its own fills, which pay `output.amount` to the
 recipient. Shape failures revert with `oif.OrderNotValid(reason)`
 (`NonCanonical`, `InvalidHash`, `BadUser`, `BadChain`, `BadInputs`,
 `BadOutputs`, `BadInputOracle`, `BadOutputChain`, `BadOutputSettler`,
-`BadIdentifier`, `BadCallback`, `BadContext`); the auction's typed
+`BadIdentifier`, `BadCallback`, `BadContext`, `BadExpires`,
+`BadFillDeadline`); the auction's typed
 `check_order` revert bubbles unchanged, through the real escrow and Permit2
 included, and a disabled adapter surfaces as Permit2's
 `InvalidContractSignature`.
@@ -482,7 +490,8 @@ included, and a disabled adapter surfaces as Permit2's
 `OifEscrowAdapter.order_for(burner, token, nonce, sell_amount,
 fill_deadline)` returns the publishable pair for a live lot: a limit intent
 for the whole available amount by default, priced at the current block,
-open to every solver, `expires = fillDeadline` (the lot end by default).
+open to every solver, `expires = fillDeadline` (15 minutes from now by
+default, never past the lot end).
 Three escrow facts shape publishing. Intents are fill-or-kill and
 nonce-burning (Permit2 unordered nonces, burnt on open), so every re-post
 as the curve decays needs a fresh nonce. An intent is settled either
