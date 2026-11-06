@@ -434,6 +434,79 @@ Emergency procedure is the CoW one with `executor = Delta`:
 `registry.disable_adapter(VeloraDeltaAdapter)` batched with
 `sync_executor_approvals(delta, tokens)`.
 
+### OIF escrow rail (LI.FI Intents): `OifEscrowAdapter`
+
+The Open Intents Framework escrow input settler, as deployed by LI.FI for
+LI.FI Intents (`InputSettlerEscrowLIFI`
+`0x00fC00edbe7C003b006f870068c548940000223e` with `OutputSettlerSimple`
+`0x75220B7600c300005038432a0000f308e0000068` on Ethereum; the reference
+`InputSettlerEscrow` `0x1CC9260E285C2C8AC8D2E7102F3978056Ec1d0a8` has the
+same signing scheme), is a third adapter, built the same way.
+`adapters/oif/OifEscrowAdapter.vy` is stateless and immutable, pinned to
+the escrow, the same-chain output settler and Permit2 (whose EIP-712 domain
+separator is read at deploy); its registry entry is `adapter =
+OifEscrowAdapter, executor = Permit2`, because the escrow opens a sponsored
+intent through `Permit2.permitWitnessTransferFrom`: Permit2 is what pulls
+the sold tokens, so Permit2 is what `sync_executor_approvals(permit2,
+tokens)` approves (shared with every other Permit2-based adapter through
+the executor reference count). A solver calls
+`escrow.openForAndFinalise(order, sponsor = burner, signature = 0x00 ++
+OifEscrowAdapter ++ abi.encode(StandardOrder), destination, call)` (or
+anyone calls `openFor` with the same bytes); the escrow strips its
+signature-type byte and Permit2 forwards the rest verbatim to the burner's
+`isValidSignature` with the `PermitBatchWitnessTransferFrom` digest (permit
+= the input token and amount, `order.nonce`, deadline = `fillDeadline`;
+spender = the escrow; witness = the `Permit2Witness` hash of user, expires,
+input oracle and outputs). The burner strips the adapter prefix and the
+adapter recomputes that digest from the bare order (`adapters/oif/oif.vy`
+holds the types, the OIF and Permit2 type hashes and the output settler's
+context shapes), checks the shape — canonical encoding, the burner as
+user, this chain as origin, exactly one input and one output, clean
+identifiers, the pinned output settler as the order's input oracle and as
+the output's oracle and settler on this chain, no callback, a context the
+output settler resolves to the signed amount (none, limit, exclusive
+limit) — and delegates the economics to `check_order` (output token is the
+target, recipient is the FeeCollector, input within the snapshot, output
+amount at or above the live quote, `fillDeadline` no later than the lot
+end). The oracle pin is what makes the floor real: the escrow releases the
+input only against the input oracle's attestation, and the pinned output
+settler attests only its own fills, which pay `output.amount` to the
+recipient. Shape failures revert with `oif.OrderNotValid(reason)`
+(`NonCanonical`, `InvalidHash`, `BadUser`, `BadChain`, `BadInputs`,
+`BadOutputs`, `BadInputOracle`, `BadOutputChain`, `BadOutputSettler`,
+`BadIdentifier`, `BadCallback`, `BadContext`); the auction's typed
+`check_order` revert bubbles unchanged, through the real escrow and Permit2
+included, and a disabled adapter surfaces as Permit2's
+`InvalidContractSignature`.
+
+`OifEscrowAdapter.order_for(burner, token, nonce, sell_amount,
+fill_deadline)` returns the publishable pair for a live lot: a limit intent
+for the whole available amount by default, priced at the current block,
+open to every solver, `expires = fillDeadline` (the lot end by default).
+Three escrow facts shape publishing. Intents are fill-or-kill and
+nonce-burning (Permit2 unordered nonces, burnt on open), so every re-post
+as the curve decays needs a fresh nonce. An intent is settled either
+atomically (the solver fills the output and attests on the output settler,
+then `openForAndFinalise` pulls the input and hands it to the solver in the
+same block) or in two steps (`openFor` moves the input into the escrow
+first; the solver then fills, attests and `finalise`s): in the second shape
+the input sits in the escrow until the fill or, after `expires`, a
+permissionless `refund` back to the burner, so a publisher opening intents
+itself keeps `fill_deadline` short. And distribution: LI.FI's order server
+(`order.li.fi`, no API key) quotes same-chain intents and fills the ones
+opened on-chain, but as of this writing accepts only user-opened orders
+(`oif-user-open-v0`), not sponsored escrow orders, so a sponsored intent
+reaches a solver directly or through a keeper that opens it on-chain for
+the server's solver to fill. A governance fee the escrow owner may set is
+taken from the input on release and is the solver's cost, never the
+FeeCollector's.
+
+Emergency procedure is the CoW one with `executor = Permit2`:
+`registry.disable_adapter(OifEscrowAdapter)` batched with
+`sync_executor_approvals(permit2, tokens)` (Permit2 stays approved while
+another Permit2-based adapter is active). An intent already opened keeps
+its input in the escrow until it is filled or refunded.
+
 ### Payment token and resync
 
 The payment token (`want`, no `target()` alias) mirrors

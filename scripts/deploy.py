@@ -53,6 +53,13 @@ KYBER_DSLO_PROTOCOL = "0xcab2FA2eeab7065B45CBcF6E3936dDE2506b4f6C"  # ALTER
 # EIP-712 domain at deploy; the Delta contract itself is the executor.
 VELORA_DELTA = "0x0000000000bbf5c5fd284e657f01bd000933c96d"  # ALTER
 
+# OIF escrow dependencies (verify against the target chain before deploy): the
+# escrow input settler (LI.FI's InputSettlerEscrowLIFI on Ethereum), the
+# same-chain OutputSettlerSimple it attests with, and Permit2 (the executor).
+OIF_INPUT_SETTLER = "0x00fC00edbe7C003b006f870068c548940000223e"  # ALTER
+OIF_OUTPUT_SETTLER = "0x75220B7600c300005038432a0000f308e0000068"  # ALTER
+PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"  # ALTER: canonical Permit2
+
 
 def deploy():
     fee_collector = boa.load(
@@ -161,6 +168,20 @@ def deploy_burner(fee_collector):
             print(f"VeloraDeltaAdapter: {velora_adapter.address}")
             registry.set_adapter(velora_adapter.address, velora_adapter.settlement())
             registry.activate_adapter(velora_adapter.address)
+
+        oif_enabled = True  # ALTER: False on chains without an OIF escrow deployment
+        if oif_enabled:
+            # Registry-managed; keepers run sync_executor_approvals(permit2, tokens) after collect.
+            oif_adapter = boa.load(
+                "contracts/burners/adapters/oif/OifEscrowAdapter.vy",
+                OIF_INPUT_SETTLER,
+                OIF_OUTPUT_SETTLER,
+                PERMIT2,
+            )
+            # oif_adapter = boa.load_partial("contracts/burners/adapters/oif/OifEscrowAdapter.vy").at("")
+            print(f"OifEscrowAdapter: {oif_adapter.address}")
+            registry.set_adapter(oif_adapter.address, oif_adapter.permit2())
+            registry.activate_adapter(oif_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 
