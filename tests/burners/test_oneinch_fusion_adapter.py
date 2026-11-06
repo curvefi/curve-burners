@@ -481,7 +481,11 @@ def test_auction_must_end_within_the_order_and_estimate_cover_the_order(
 
 
 def test_custom_receiver_is_the_auction_receiver(make_fields, make_order, validate):
+    # No custom receiver: the settlement pays the maker, the auction itself, an
+    # accepted receiver (push_target forwards); a third party still fails.
     extension = build_extension(make_fields(custom_receiver=None))
+    assert validate(make_order(extension), extension) == ERC1271_MAGIC_VALUE
+    extension = build_extension(make_fields(custom_receiver=boa.env.generate_address("thief")))
     with boa.reverts(custom_err("BadReceiver()")):
         validate(make_order(extension), extension)
 

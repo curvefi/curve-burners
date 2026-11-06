@@ -420,10 +420,11 @@ def test_wrong_taker_asset_or_receiver_invalid(harness, adapter, make_order, sel
         validate(make_order(taker_asset=sell_token.address))
     with boa.reverts(custom_err("BadReceiver()")):
         validate(make_order(receiver=boa.env.generate_address("thief")))
-    # An empty receiver resolves to the maker (the auction itself), which is
-    # not the proceeds receiver either.
     with boa.reverts(custom_err("BadReceiver()")):
-        validate(make_order(receiver=ZERO_ADDRESS))
+        validate(make_order(receiver=adapter.address))
+    # An empty receiver resolves to the maker, the auction itself, which is an
+    # accepted receiver (push_target forwards).
+    assert validate(make_order(receiver=ZERO_ADDRESS)) == ERC1271_MAGIC_VALUE
 
 
 def test_partial_fills_are_priced_against_the_snapshot(

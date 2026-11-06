@@ -476,10 +476,10 @@ def test_whitelist_and_fee_values_are_not_bounded(make_fields, make_order, valid
 
 
 def test_custom_receiver_is_the_auction_receiver(make_fields, make_order, validate):
-    # No custom receiver: the FeeTaker pays the maker (the auction itself).
+    # No custom receiver: the FeeTaker pays the maker, the auction itself, an
+    # accepted receiver (push_target forwards).
     extension = build_extension(make_fields(custom_receiver=None))
-    with boa.reverts(custom_err("BadReceiver()")):
-        validate(make_order(extension), extension)
+    assert validate(make_order(extension), extension) == ERC1271_MAGIC_VALUE
     extension = build_extension(make_fields(custom_receiver=boa.env.generate_address("thief")))
     with boa.reverts(custom_err("BadReceiver()")):
         validate(make_order(extension), extension)
