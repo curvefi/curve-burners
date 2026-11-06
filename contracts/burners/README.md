@@ -95,10 +95,12 @@ lives in `interfaces/IDutchAuction.vyi`, Yearn's `AuctionInfo` in
 `interfaces/IAdapterRegistry.vyi`, and the ERC-165 ids, the burner interface
 id, and the ERC-1271 magic value in `utils/constants.vy`; the GPv2 constants
 in `adapters/cow/gpv2.vy`, the OKX order type hash, domain and commission
-rules in `adapters/okx/intent_swap.vy` and the 0x Settler and Permit2 type
-hashes in `adapters/zerox/settler.vy` are keccak256-derived. Peers
-(`CowAdapter`, `OKXIntentAdapter`, `ZeroExSettlerAdapter`, the resolver)
-read the burner through `IDutchAuction` alone.
+rules in `adapters/okx/intent_swap.vy`, the 0x Settler and Permit2 type
+hashes in `adapters/zerox/settler.vy`, and the Hashflow quote type hash and
+domain in `adapters/hashflow/hashflow.vy` are keccak256-derived. Peers
+(`CowAdapter`, `OKXIntentAdapter`, `ZeroExSettlerAdapter`,
+`HashflowAdapter`, the resolver) read the burner through `IDutchAuction`
+alone.
 
 ### Adapter signature format
 
@@ -652,6 +654,129 @@ but leaves the burner's allowance to Permit2 in place for the others. 0x's
 own pause (removing the Settler from its registry) needs no action on our
 side: the adapter rejects every order for a Settler the registry no longer
 lists.
+
+### Hashflow rail: `HashflowAdapter`
+
+Hashflow RFQ-m (hashflownetwork/x-protocol; `HashflowRouter` at
+`0x55084eE0fEf03f14a305cd24286359A35D735151` on Ethereum, not a proxy, solc
+0.8.18, with its `HashflowFactory` at
+`0xdE828fdc3F497F16416D1bB645261C7C6a62DAb5`; the Etherscan-verified sources
+are byte-identical to the repository) is the rail without a receiver field,
+the case the previous section exists for. Hashflow is a market-maker RFQ: a
+taker asks the Hashflow API for a quote and a market maker's pool signs it.
+In RFQ-t the taker then sends the transaction itself (`tradeRFQT`: the base
+token is pulled from `msg.sender`, there is no taker signature), which a
+passive contract cannot do; in RFQ-m both sides sign the quote and any
+relayer submits `tradeRFQM(quote)`. Only RFQ-m is covered. Economic
+principle, verified against the router and pool sources: **the signed
+`quoteTokenAmount` is paid in full to `quote.trader` for the signed
+`baseTokenAmount`, pulled in full.** `RFQMQuote` has no
+`effectiveBaseTokenAmount` (no partial consumption), no fee fields and no
+hooks; the router pulls `baseTokenAmount` from the trader with a plain
+`safeTransferFrom` (no Permit2) to the pool or to its external account and
+calls the pool, which recovers the maker's EIP-191 signature and transfers
+`quoteTokenAmount` to the trader from its own balance or from that external
+account; the router marks the `txid` used before anything moves (a
+router-global key, no per-trader nonce for RFQ-m), so no quote settles
+twice. `quote.trader` is both the debited and the credited account and the
+quote names no other address of ours: the burner is the trader, the proceeds
+land on the burner, and the economic check runs with the auction itself as
+receiver. The taker signature is verified with OpenZeppelin's
+`SignatureChecker`, which reaches a contract trader's ERC-1271
+`isValidSignature` with the EIP-712 digest under the domain `("Hashflow -
+Router", "1.0", chainId, router)` of the type `Quote(bytes32 txid,address
+trader,address pool,address externalAccount,address baseToken,address
+quoteToken,uint256 baseTokenAmount,uint256 quoteTokenAmount,uint256
+quoteExpiry)`.
+
+`adapters/hashflow/hashflow.vy` holds the signed `Quote` (the nine fields in
+type order), the protocol's `RFQMQuote` calldata shape (calldata order plus
+both signatures), the type hash, the domain, the trader digest and the
+maker's EIP-191 digest (`HashflowPool._hashQuoteRFQM`: used by the pool mock
+and by a keeper verifying a maker's signature). `HashflowAdapter.vy` is
+stateless and immutable and pinned to the chain's router: at deploy it reads
+the router's `eip712Domain()` (ERC-5267) and requires exactly the fixed name
+and version, this chain, the router as verifying contract, no salt and no
+extensions (`BadDomain` otherwise), then rebuilds the separator from them.
+The registry entry is `adapter = HashflowAdapter, executor = router`: a fill
+pulls the base token from the trader by the router's own `transferFrom`, so
+the router is what `sync_executor_approvals(router, tokens)` approves. A
+relayer submits `tradeRFQM(quote)` with `takerSignature = HashflowAdapter ++
+abi.encode(Quote)`; the router forwards the bytes verbatim to the trader's
+`isValidSignature` with the digest, the burner strips the prefix, and the
+adapter recomputes the digest from the bare quote and checks the shape: one
+encoded quote (`NonCanonical`; a longer payload fails ABI decoding), the
+digest (`InvalidHash`), the burner as trader (`BadTrader`), then hands
+`(baseToken, quoteToken, burner, baseTokenAmount, quoteTokenAmount,
+quoteExpiry)` to the auction's `check_order` — buy token is the target, the
+receiver the auction itself, the sell amount within the snapshot, the quote
+amount at or above the live quote, `quoteExpiry` no later than the lot end
+(inclusive on both sides, like the router's own `quoteExpiry >=
+block.timestamp`). The native coin (address zero on Hashflow) is never a lot
+nor the payment token, and the router rejects it as base token anyway.
+`pool`, `externalAccount` and `txid` pass through: they only decide which
+market-maker account pays (each paying the full `quoteTokenAmount`) and the
+replay key. Unlike the CoW settlement, the router does not let a
+signature-check revert through: `SignatureChecker` staticcalls and reports
+any revert or non-magic answer as its own
+`HashflowRouter::_validateRFQMSignature Invalid signer.`, so a typed reason
+(an underpriced quote's `BadBuyAmount`, a disabled adapter's `0xffffffff`)
+is read by an `eth_call` of the burner's `isValidSignature` before
+submitting, not from the failed fill. The router checks the contract
+signature on every fill, so disabling the adapter stops every unfilled quote
+at once; the allowance sync is hygiene.
+
+Keeper flow (the protocol's RFQ-m flow): `HashflowAdapter.order_for(burner,
+token, sell_amount)` returns the trader side of a quote request — `trader =
+burner`, `baseToken` = the lot, `quoteToken` = the target,
+`baseTokenAmount` (everything available by default), `quoteTokenAmount` =
+the auction's quote now (the least a maker's quote may pay), `quoteExpiry` =
+the lot end (the latest expiry the auction accepts), the maker's fields
+zero. The keeper requests a quote from the Hashflow API with `trader =
+burner` (RFQ-m, `rfqType = 1` in the taker SDK); the market maker fills
+`pool`, `externalAccount` and `txid`, sets its own `quoteTokenAmount` and a
+short `quoteExpiry`, and signs (`makerSignature`, EIP-191 by the pool's
+signer). The keeper checks the quote against the curve
+(`describe(abi.encode(quote))` gives the digest; an `eth_call` of the
+burner's `isValidSignature(digest, signature_for(quote))` answers with the
+magic value or the typed reason), submits `tradeRFQM(quote)` with
+`takerSignature = signature_for(quote)` itself or hands the quote to any
+relayer, and calls the burner's `push_target()` right after the fill. There
+is no standing-ask mode: a quote lives only until its `quoteExpiry` (seconds
+to minutes), every fill is one exact `txid`, and nothing settles without a
+market maker's signature, so the rail is keeper-driven only.
+
+API facts, verified without a credential: every call to
+`api.hashflow.com/taker/v3/*` needs an `Authorization` header with a
+credential issued by the Hashflow team — `POST /taker/v3/rfq` and `GET
+/taker/v3/market-makers` answer HTTP 403 without it and HTTP 401
+`{"code":72,"message":"Unauthorized access"}` with a dummy one — and the
+public taker documentation covers RFQ-t only (`@hashflow/taker-js` exposes
+`rfqType: 0 | 1` without documenting `1`), so whether market makers quote
+RFQ-m for a contract trader cannot be verified from outside. On-chain,
+RFQ-m has not been observed on Ethereum: of the 6,848 direct router
+transactions since deployment (block 18059492) 5,598 were `tradeRFQT` and
+249 `tradeXChainRFQT`, zero were `tradeRFQM`; a `trace_filter` scan of about
+4.4M of the 8.3M blocks since deployment (169,415 internal calls to the
+router) found no RFQ-m call either, and the remaining blocks were not
+scanned. The rail is therefore built and tested against the verified
+contracts and a mainnet fork (the real router and a pool created through the
+real factory with its owner pranked onto the creator allowlist, the maker
+key held by the test), not against live quotes.
+
+Limitations: the proceeds sit on the burner until `push_target()` (the
+FORWARD step calls it in any case); the router swallows the typed reasons; a
+credential and a quoting market maker are prerequisites; a quote cannot be
+cancelled on-chain by the trader — it expires, and the adapter re-prices it
+against the live curve at settlement, so an unfilled quote is never worse
+than the curve; the `txid` is a router-global key only burnt by a complete
+fill, so nobody can invalidate a quote without filling it, and a market
+maker reusing a `txid` across quotes only blocks its own later ones.
+
+Emergency procedure is the CoW one with `executor = router`:
+`registry.disable_adapter(HashflowAdapter)` batched with
+`sync_executor_approvals(router, tokens)`; the disable alone already stops
+every fill, as the mainnet fork test shows.
 
 ### Payment token and resync
 

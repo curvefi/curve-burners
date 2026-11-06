@@ -68,6 +68,12 @@ OIF_INPUT_SETTLER = "0x00fC00edbe7C003b006f870068c548940000223e"  # ALTER
 OIF_OUTPUT_SETTLER = "0x75220B7600c300005038432a0000f308e0000068"  # ALTER
 PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"  # ALTER: canonical Permit2
 
+# Hashflow dependency (verify against the target chain before deploy): the
+# HashflowRouter (not upgradeable; HashflowAdapter checks its EIP-712 domain
+# through eip712Domain() at deploy). The router is the executor: it pulls the
+# base token from the burner itself, and the proceeds land on the burner.
+HASHFLOW_ROUTER = "0x55084eE0fEf03f14a305cd24286359A35D735151"  # ALTER: Ethereum
+
 
 def deploy():
     fee_collector = boa.load(
@@ -207,6 +213,19 @@ def deploy_burner(fee_collector):
             print(f"ZeroExSettlerAdapter: {zerox_adapter.address}")
             registry.set_adapter(zerox_adapter.address, zerox_adapter.permit2())
             registry.activate_adapter(zerox_adapter.address)
+
+        hashflow_enabled = True  # ALTER: False on chains without Hashflow
+        if hashflow_enabled:
+            # Registry-managed; keepers run sync_executor_approvals(router, tokens) after
+            # collect and push_target() after every fill (proceeds land on the burner).
+            hashflow_adapter = boa.load(
+                "contracts/burners/adapters/hashflow/HashflowAdapter.vy",
+                HASHFLOW_ROUTER,
+            )
+            # hashflow_adapter = boa.load_partial("contracts/burners/adapters/hashflow/HashflowAdapter.vy").at("")
+            print(f"HashflowAdapter: {hashflow_adapter.address}")
+            registry.set_adapter(hashflow_adapter.address, hashflow_adapter.router())
+            registry.activate_adapter(hashflow_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 
