@@ -30,6 +30,12 @@ COW_SETTLEMENT = "0x9008D19f58AAbD9eD0D60971565AA8510560ab41"  # ALTER: GPv2Sett
 COMPOSABLE_COW = (
     "0xfdaFc9d1902f4e0b84f65F49f244b32b31013b74"  # ALTER: ComposableCow (CowSwapBurner only)
 )
+# 0x Settler dependency (verify against the target chain before deploy): the
+# live SettlerMetaTxn is the 0x deployer registry's ownerOf(3)
+# (0x00000000000004533Fe15556B1E086BB1A72cEae), SettlerIntent its ownerOf(4);
+# ZeroExSettlerAdapter pins one Settler and its flavor.
+ZEROX_SETTLER_METATXN = "0x9a6350d532ed83a970d452b736be5847b2856768"  # ALTER
+PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"  # ALTER: canonical Permit2
 COW_VAULT_RELAYER = (
     "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"  # ALTER: VaultRelayer (CowSwapBurner only)
 )
@@ -182,6 +188,22 @@ def deploy_burner(fee_collector):
             print(f"OifEscrowAdapter: {oif_adapter.address}")
             registry.set_adapter(oif_adapter.address, oif_adapter.permit2())
             registry.activate_adapter(oif_adapter.address)
+
+        zerox_enabled = True  # ALTER: False on chains without a 0x Settler
+        if zerox_enabled:
+            # Registry-managed; keepers run sync_executor_approvals(permit2, tokens) after collect.
+            # One deployment per Settler contract: a SettlerIntent adapter is the same call
+            # with ownerOf(4) and intent=True.
+            zerox_adapter = boa.load(
+                "contracts/burners/adapters/zerox/ZeroExSettlerAdapter.vy",
+                ZEROX_SETTLER_METATXN,
+                PERMIT2,
+                False,  # intent
+            )
+            # zerox_adapter = boa.load_partial("contracts/burners/adapters/zerox/ZeroExSettlerAdapter.vy").at("")
+            print(f"ZeroExSettlerAdapter: {zerox_adapter.address}")
+            registry.set_adapter(zerox_adapter.address, zerox_adapter.permit2())
+            registry.activate_adapter(zerox_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 

@@ -94,10 +94,11 @@ lives in `interfaces/IDutchAuction.vyi`, Yearn's `AuctionInfo` in
 `interfaces/IYearnAuction.vyi`, `AdapterConfig` in
 `interfaces/IAdapterRegistry.vyi`, and the ERC-165 ids, the burner interface
 id, and the ERC-1271 magic value in `utils/constants.vy`; the GPv2 constants
-in `adapters/cow/gpv2.vy` and the OKX order type hash, domain and
-commission rules in `adapters/okx/intent_swap.vy` are keccak256-derived.
-Peers (`CowAdapter`, `OKXIntentAdapter`, the resolver) read the burner
-through `IDutchAuction` alone.
+in `adapters/cow/gpv2.vy`, the OKX order type hash, domain and commission
+rules in `adapters/okx/intent_swap.vy` and the 0x Settler and Permit2 type
+hashes in `adapters/zerox/settler.vy` are keccak256-derived. Peers
+(`CowAdapter`, `OKXIntentAdapter`, `ZeroExSettlerAdapter`, the resolver)
+read the burner through `IDutchAuction` alone.
 
 ### Adapter signature format
 
@@ -515,6 +516,92 @@ Emergency procedure is the CoW one with `executor = Permit2`:
 `sync_executor_approvals(permit2, tokens)` (Permit2 stays approved while
 another Permit2-based adapter is active). An intent already opened keeps
 its input in the escrow until it is filled or refunded.
+
+### 0x rail: `ZeroExSettlerAdapter`
+
+0x Settler v2's gasless flows are a further adapter, built the same way.
+`adapters/zerox/ZeroExSettlerAdapter.vy` is stateless and immutable, pinned
+to one Settler contract and its flavor — `SettlerMetaTxn` (the Gasless API
+rail, permissionless relay) or `SettlerIntent` (the solver rail) — and to
+Permit2 (its EIP-712 domain separator is read at deploy). The live
+implementations are the 0x deployer registry's `ownerOf(3)` and `ownerOf(4)`
+(`0x00000000000004533Fe15556B1E086BB1A72cEae`, the same address on every
+chain), previous implementations keep settling, and a flavor mismatch fails
+every digest, so each Settler to be reachable is one adapter deployment. Its
+registry entry is `adapter = ZeroExSettlerAdapter, executor = Permit2`: the
+Settler's first action (`METATXN_TRANSFER_FROM` or another `METATXN_*_VIP`)
+pulls the sold token through `Permit2.permitWitnessTransferFrom`, so Permit2
+is what `sync_executor_approvals(permit2, tokens)` approves. A relayer (for
+`SettlerIntent`, an allow-listed solver) calls
+`settler.executeMetaTxn(slippage, actions, zid, msgSender = burner, sig =
+ZeroExSettlerAdapter ++ abi.encode(order))`; the Settler hands `sig` to
+Permit2 with the digest over the permit (token, amount, nonce, deadline;
+spender = the Settler) and the flavor's witness —
+`SlippageAndActions(address recipient,address buyToken,uint256
+minAmountOut,bytes[] actions)` for `SettlerMetaTxn`, `Slippage(address
+recipient,address buyToken,uint256 minAmountOut)` for `SettlerIntent` — and
+Permit2 forwards it verbatim to the burner's `isValidSignature`. The burner
+strips the adapter prefix, and the adapter recomputes that digest from the
+bare order (`adapters/zerox/settler.vy` holds the order type, the Settler
+and Permit2 type hashes and the Settler's action-list hash), requires the
+permitted amount to be available right now (the fill is atomic and pulls
+exactly it), and delegates the economics to `check_order` (buy token is the
+target, recipient is the FeeCollector, amount within the snapshot,
+`minAmountOut` at or above the live quote, `deadline` no later than the lot
+end). Shape failures revert with `settler.OrderNotValid(reason)`
+(`NonCanonical`, `InvalidHash`, `BadActionsHash`, `ExceedsAvailable`); the
+auction's typed `check_order` revert bubbles unchanged, through the real
+Settler and Permit2 included, and a disabled adapter's `0xffffffff` surfaces
+as Permit2's `InvalidContractSignature`.
+
+The order carries the permit, the slippage and, for `SettlerMetaTxn`, only
+the Settler's hash of the signed action list, not the actions: the digest
+binds them, and nothing in them can lower the floor. After the action list
+has run, `SettlerBase._checkSlippageAndTransfer` requires at least
+`minAmountOut` of `buyToken` on the Settler and pays its whole balance to
+`recipient`; no action reads or rewrites the slippage (`BASIC`, `UNISWAPV3`,
+`POSITIVE_SLIPPAGE` and the rest only move the Settler's own balances), so
+the signed actions (authored by the Gasless API or by the publisher) and, on
+the intent rail, the solver's unsigned ones decide only the margin above the
+floor: the API's fee actions (`BASIC` ppm transfers of the sell token) come
+out of the permitted amount, never out of `minAmountOut`. The pull, the swap
+and the floor check run in one `executeMetaTxn` and nothing is escrowed, so
+unlike an OIF open there is no unpaid state to bound and no fill window: the
+permit deadline (at most the lot end) is the only time limit. A native buy
+token (the Settler's ETH sentinel) is never the target and fails
+`check_order`.
+
+`ZeroExSettlerAdapter.order_for(burner, token, nonce, sell_amount, deadline,
+actions_hash)` returns the publishable pair for a live lot, priced at the
+current block, for the whole available amount and until the lot end by
+default; `hash_actions(actions)` is the Settler's hash of an action list and
+`describe(payload)` returns the decoded order with the digest the adapter
+would accept it for, to compare with the EIP-712 hash a quote asks the
+burner to sign. Three 0x facts shape publishing. Orders are fill-or-kill:
+Permit2 burns the nonce on settlement, every re-post needs a nonce no
+earlier fill has used (the publisher's choice; the adapter neither derives
+nor checks it) and an order for the full amount dies by itself after any
+other fill (`ExceedsAvailable`). Relaying a `SettlerMetaTxn` order is
+permissionless (`metaTx` only forbids the signer relaying its own order); a
+`SettlerIntent` order can only be submitted by one of the Settler's
+`getSolvers()` (about 60 on mainnet, managed by 0x). And routes come from
+off-chain: the Gasless API (`/gasless/quote`, API key required; it returns
+the action list, the slippage and the Permit2 EIP-712 payload) relays through
+`SettlerMetaTxn` after `/gasless/submit`, which accepts `signatureType: 5`
+raw signatures for contract wallets, but whether it accepts a plain ERC-1271
+contract as `taker`, and the long adapter signature as that raw signature, is
+unverified (no key); a publisher may instead author its own action list (the
+fork test sells USDC for crvUSD through a Curve pool with
+`METATXN_TRANSFER_FROM` + `BASIC`) and relay it, or hand a `SettlerIntent`
+order to a solver.
+
+Emergency procedure is the CoW one with `executor = Permit2`:
+`registry.disable_adapter(ZeroExSettlerAdapter)` batched with
+`sync_executor_approvals(permit2, tokens)`. Permit2 is shared by every
+Permit2-based adapter (UniswapX, OIF, 0x): the executor reference count keeps
+the allowance while any of them is active and clears it only when the last
+one is disabled, so disabling the 0x adapter alone stops its routing at once
+but leaves the burner's allowance to Permit2 in place for the others.
 
 ### Payment token and resync
 
