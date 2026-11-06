@@ -38,6 +38,40 @@ class RailSettings:
         return os.environ.get(self.api_key_env) if self.api_key_env else None
 
 
+@dataclass(frozen=True)
+class OKXSettings(RailSettings):
+    """OKX DEX aggregator intent mode (Onchain OS). Every endpoint, the quote
+    included, needs an Onchain OS project key: the key, secret and passphrase
+    sign each request (HMAC headers)."""
+
+    api_key_env: str | None = "OKX_API_KEY"
+    secret_key_env: str = "OKX_SECRET_KEY"
+    passphrase_env: str = "OKX_PASSPHRASE"
+    api_url: str = "https://web3.okx.com"
+    # chainIndex in the API (the chain id on EVM chains); defaults by chain id
+    # for the chains the intent mode lists (Ethereum, BSC, Arbitrum, Base, X Layer).
+    chain_index: str | None = None
+    # Quote parameters: slippagePercent (required by the intent mode; the
+    # signed toTokenAmount is the quote after it) and the order expiration in
+    # seconds (180 default, 300 max on the API side).
+    slippage_percent: str = "0.1"
+    expiration: int = 180
+    # UNVERIFIED: whether the orderbook expects the submitter to send the
+    # on-chain shape `burner ++ adapter ++ abi.encode(order)` (true, what the
+    # settlement's Signing.recoverEip1271Signer reads and what the solver SDK
+    # forwards verbatim) or only `adapter ++ abi.encode(order)` and prefixes
+    # the owner itself (false). One keyed probe settles it; flip here.
+    owner_prefix: bool = True
+
+    @property
+    def secret_key(self) -> str | None:
+        return os.environ.get(self.secret_key_env)
+
+    @property
+    def passphrase(self) -> str | None:
+        return os.environ.get(self.passphrase_env)
+
+
 # Integer rail fields that may be zero (the rest must be positive).
 _NON_NEGATIVE_FIELDS: set[str] = set()
 

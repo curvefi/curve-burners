@@ -75,6 +75,20 @@ networks:
     # registry; each rail's section (named after it) switches the rail off
     # (`enabled: false`), picks feed or log-only mode (`post`) and sets its
     # API key env var and URLs.
+    okx:                            # OKXIntentAdapter (OKX DEX aggregator, intent mode)
+      api_key_env: OKX_API_KEY      # Onchain OS project key; every request is HMAC-signed with
+      # secret_key_env: OKX_SECRET_KEY    # the secret and
+      # passphrase_env: OKX_PASSPHRASE    # the passphrase (all three required, the quote included)
+      enabled: true
+      post: true                    # quote -> check -> sign -> create-order every poll; false: log standing asks
+      # api_url: https://web3.okx.com
+      # chain_index: "1"              # defaults by chain id (Ethereum, BSC, Arbitrum, Base, X Layer)
+      # slippage_percent: "0.1"       # the signed toTokenAmount is the quote after slippage
+      # expiration: 180               # order validity requested from the quote (max 300)
+      # UNVERIFIED against the live API: true posts the on-chain signature shape
+      # `burner ++ adapter ++ abi.encode(order)`; false posts `adapter ++ abi.encode(order)`
+      # and leaves the owner prefix to the orderbook. One keyed probe settles it.
+      owner_prefix: true
 
   gnosis:
     rpc: https://lb.drpc.org/ogrpc?network=gnosis&dkey=${DRPC_API_KEY}

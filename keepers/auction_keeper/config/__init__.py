@@ -42,6 +42,11 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
         cow:
           orderbook_url: https://api.cow.fi/mainnet   # optional: defaults by chain id
           app_data_document: '{"version":"1.1.0","appCode":"Curve","metadata":{}}'
+        okx:
+          api_key_env: OKX_API_KEY   # with OKX_SECRET_KEY and OKX_PASSPHRASE (HMAC headers)
+          enabled: true
+          post: true
+          owner_prefix: true         # UNVERIFIED signature shape for the orderbook, see OKXSettings
 
 Every other settlement rail gets a section named after it (``oneinch``,
 ``bebop``, ...) parsed by ``parse_rail`` (``config/rails.py``) into a
@@ -79,7 +84,7 @@ from keepers.auction_keeper.config.pricing import (
     PricingSettings,
     TtlSettings,
 )
-from keepers.auction_keeper.config.rails import CowSettings, RailSettings
+from keepers.auction_keeper.config.rails import CowSettings, OKXSettings, RailSettings
 
 __all__ = [
     "DEFAULT_LOG_CHUNK",
@@ -100,6 +105,7 @@ __all__ = [
     "NetworkConfig",
     "PricingSettings",
     "RailSettings",
+    "OKXSettings",
     "TokenFilter",
     "TtlSettings",
     "expand_env",

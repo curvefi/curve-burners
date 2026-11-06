@@ -22,7 +22,7 @@ from keepers.auction_keeper.config.pricing import (
     parse_pricing,
     parse_ttl,
 )
-from keepers.auction_keeper.config.rails import CowSettings, parse_cow
+from keepers.auction_keeper.config.rails import CowSettings, OKXSettings, parse_cow, parse_rail
 
 DEFAULT_POLL_INTERVAL = 60
 DEFAULT_ORDER_TTL = 300
@@ -66,6 +66,7 @@ class NetworkConfig:
     max_open_orders: int = DEFAULT_MAX_OPEN_ORDERS
     native: NativeSettings = NativeSettings()
     cow: CowSettings = CowSettings()
+    okx: OKXSettings = OKXSettings()
     # Periphery for custom executions (optional).
     auction_taker: str | None = None
 
@@ -146,6 +147,7 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
     )
 
     cow = parse_cow(raw, name)
+    okx = parse_rail(raw, name, "okx", OKXSettings)
 
     start_block = raw.get("start_block")
     if start_block is not None and (
@@ -190,6 +192,7 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
         ),
         native=native,
         cow=cow,
+        okx=okx,
         auction_taker=taker,
     )
 

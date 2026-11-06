@@ -67,12 +67,18 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `cow.app_data_document` | none | Full appData JSON whose keccak is `CowAdapter.app_data()`; registered with the orderbook once. |
 | `auction_taker` | none | `AuctionTaker` address for route executions. |
 | `state_path` | `auction_keeper_state.json` | Published orders and scan cursor. Losing it costs at most one extra post per lot. |
+| `okx.api_key_env`, `okx.secret_key_env`, `okx.passphrase_env` | `OKX_API_KEY`, `OKX_SECRET_KEY`, `OKX_PASSPHRASE` | Onchain OS project credentials; every request (the quote included) is HMAC-signed with all three. |
+| `okx.enabled`, `okx.post` | `true`, `true` | Serve `OKXIntentAdapter`; `post: false` logs standing asks only. |
+| `okx.api_url`, `okx.chain_index` | `https://web3.okx.com`, by chain id | API base and `chainIndex` (Ethereum, BSC, Arbitrum, Base, X Layer by default). |
+| `okx.slippage_percent`, `okx.expiration` | `"0.1"`, 180 | Quote parameters: slippage (the signed `toTokenAmount` is the quote after it) and order validity in seconds (max 300). |
+| `okx.owner_prefix` | `true` | UNVERIFIED: whether the posted eip1271 signature carries the owner prefix (see below). |
 
 Adapters are never configured: each cycle the keeper reads the auction's
 `AdapterRegistry`, takes the active adapters, and matches their
-`ADAPTER_VERSION()` to a publisher (`CowAdapter` → `CowPublisher`). A rail
-section with `enabled: false` skips its adapters. Adding a rail is one class
-in `keepers/auction_keeper/rails/`.
+`ADAPTER_VERSION()` to a publisher (`CowAdapter` → `CowPublisher`,
+`OKXIntentAdapter` → `OKXIntentPublisher`). A rail section with `enabled:
+false` skips its adapters. Adding a rail is one class in
+`keepers/auction_keeper/rails/`.
 
 ## Run
 
@@ -144,6 +150,61 @@ window so the order is reposted before it expires and never past the lot
 end. Every (re)post uses a fresh salt or nonce. The shared steps live in
 `AdapterPublisher` (`valid_to`, `validate_signature`, `ensure_allowance`);
 the rail's feed is reached through `adapters/common.py`'s `JsonClient`.
+
+### OKX rail (`okx`)
+
+Executor: the OKX DEX `TokenApprove` (`adapter.token_approve()`). Feed
+mode (`post: true` with all three credentials and a `chainIndex`): every
+poll, `GET {api_url}/api/v6/dex/aggregator/quote?chainIndex&mode=intent&swapMode=exactIn&fromTokenAddress=<lot>&toTokenAddress=<want>&amount=<available>&userWalletAddress=<auction>&swapReceiverAddress=<FeeCollector>&signingScheme=eip1271&slippagePercent&expiration`
+(parameters and the `{code, data[{quoteId, signData{domain, message,
+primaryType, types}, toTokenAmount, ...}], msg}` answer from the Onchain OS
+"Get Intent Quotes" page, `web3.okx.com/onchainos/dev-docs/trade/dex-intent-get-quote`).
+The order is `signData.message` as the API dictates it — `appData`,
+`commissionInfos`, `validTo` and the signed `toTokenAmount` (the client
+cannot set amounts: the create-order body must match the message, and its
+`toTokenAmount` is the quoted amount with slippage applied, per the
+"Create Intent Order" page); the publisher checks the domain
+(`verifyingContract` = the adapter's settlement, `chainId`), owner,
+receiver, pair, `exactIn` without partial fills, the sell amount within the
+available amount, `toTokenAmount` at or above the curve quote for it (a
+quote below the curve is skipped: `check_order` would reject it) and
+`validTo` inside the lot window; signs `adapter ++ abi_encode(message)`,
+validates it on-chain, then `POST
+{api_url}/api/v6/dex/aggregator/intent/create-order` with `{chainIndex,
+fromTokenAddress, toTokenAddress, fromTokenAmount, toTokenAmount,
+userWalletAddress, swapReceiverAddress, validTo, quoteId, appData,
+signingScheme: "eip1271", signature, commissionInfos}` (field list from
+`.../trade/dex-intent-create-order`; the answer's `data[0].orderUid` becomes
+the record id, else the on-chain uid `digest ++ owner ++ validTo`). Every
+request carries `OK-ACCESS-KEY`, `OK-ACCESS-SIGN =
+base64(HMAC-SHA256(timestamp + METHOD + requestPath + body, secret))`,
+`OK-ACCESS-TIMESTAMP` (ISO 8601 UTC with milliseconds) and
+`OK-ACCESS-PASSPHRASE` (`.../home/api-access-and-usage`); the page's JS
+example appends the query string to the GET request path, which is what
+is signed here (assumed, the prose example has no query). API-level errors
+arrive as HTTP 200 with a non-zero `code` and are logged.
+
+**UNVERIFIED (`okx.owner_prefix`)**: on-chain the settlement reads the
+owner from the first 20 bytes of an eip1271 signature and forwards the
+rest to the owner's `isValidSignature`, and the OKX intent solver SDK
+(`okxlabs/Web3-DEX-evm-intent-sdk`, `packages/solver`) copies the
+orderbook's `signature` into the settle calldata verbatim — so the bytes
+the orderbook stores must carry the owner prefix. Whether the submitter
+sends `burner ++ adapter ++ abi_encode(order)` (`owner_prefix: true`, the
+default) or only `adapter ++ abi_encode(order)` with the orderbook adding
+the owner (`false`) is not documented (the docs only say an eip1271
+signature is "built per the OKX Intent SDK rules", and the SDK has no
+signing code); one keyed probe settles it. Also unverified: whether the
+orderbook `eth_call`s the owner's ERC-1271 before relaying (the quickstart
+says verification is an on-chain read, so presumably yes). No OKX
+credentials were available here, so nothing was exercised live; the test
+fixtures copy the docs' example shapes.
+
+Standing-ask mode (`post: false`, credentials or `chainIndex` missing):
+the `order_for` order (no commissions, random `appData` as salt, `validTo`
+shortened to the scheduled validity) is validated and logged. Only
+allowlisted OKX solvers can settle, so this is a log, not a permissionless
+fallback.
 
 Run it as a long-lived service (systemd, docker); it is stateless beyond the
 state file and safe to restart.

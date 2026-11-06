@@ -284,6 +284,43 @@ class CowAdapterContract(AdapterContract):
         return bytes(self._read_one(self.APP_DATA))
 
 
+# OKX Intent Swap order as signed (adapters/okx/intent_swap.vy): the eleven
+# EIP-712 fields, commissions (feePercent, referrerWalletAddress, flag) last.
+OKX_COMMISSION_ABI = "(uint256,address,uint256)"
+OKX_ORDER_ABI = (
+    "(address,address,address,address,uint256,uint256,uint32,bytes32,bytes32,bool,"
+    f"{OKX_COMMISSION_ABI}[])"
+)
+
+
+class OKXIntentAdapterContract(AdapterContract):
+    SETTLEMENT = Function("settlement()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    TOKEN_APPROVE = Function("token_approve()", ("address",))
+    ORDER_FOR = Function("order_for(address,address,uint256,bytes32)", (OKX_ORDER_ABI, "bytes"))
+    DESCRIBE = Function("describe(bytes)", (OKX_ORDER_ABI, "bytes32", "bytes"))
+
+    def settlement(self) -> str:
+        return to_checksum_address(self._read_one(self.SETTLEMENT))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def token_approve(self) -> str:
+        return to_checksum_address(self._read_one(self.TOKEN_APPROVE))
+
+    def order_for(
+        self, auction: str, token: str, sell_amount: int = 0, app_data: bytes = bytes(32)
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(self.ORDER_FOR, auction, token, sell_amount, app_data)
+        return tuple(order), bytes(signature)
+
+    def describe(self, payload: bytes) -> tuple[tuple, bytes, bytes]:
+        """(order, digest, uid) of a bare ``abi_encode(order)`` payload."""
+        order, digest, uid = self._read(self.DESCRIBE, payload)
+        return tuple(order), bytes(digest), bytes(uid)
+
+
 class AuctionTaker(Contract):
     """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route."""
 
@@ -310,6 +347,7 @@ __all__ = [
     "ERC1271_INVALID",
     "ERC1271_MAGIC_VALUE",
     "LOT_STAGED_TOPIC",
+    "OKX_ORDER_ABI",
     "AdapterConfig",
     "AdapterContract",
     "AdapterRegistry",
@@ -319,6 +357,7 @@ __all__ = [
     "Erc20",
     "Lot",
     "LotView",
+    "OKXIntentAdapterContract",
     "address_word",
     "lot_staged_token",
 ]
