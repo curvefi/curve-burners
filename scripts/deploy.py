@@ -41,6 +41,12 @@ COW_VAULT_RELAYER = (
 # TokenApprove (the executor).
 OKX_INTENT_SETTLEMENT = "0x25ED72C3f671b626810A6dB597DCFD50F215A423"  # ALTER
 
+# KyberSwap DSLO dependency (verify against the target chain before deploy):
+# DSLOProtocol, the same address on every chain KyberSwap serves (not
+# Fraxtal); KyberDsloAdapter checks its EIP-712 domain and hashOrder at
+# deploy, and the protocol itself is the executor (it pulls the maker asset).
+KYBER_DSLO_PROTOCOL = "0xcab2FA2eeab7065B45CBcF6E3936dDE2506b4f6C"  # ALTER
+
 
 def deploy():
     fee_collector = boa.load(
@@ -125,6 +131,18 @@ def deploy_burner(fee_collector):
             print(f"OKXIntentAdapter: {okx_adapter.address}")
             registry.set_adapter(okx_adapter.address, okx_adapter.token_approve())
             registry.activate_adapter(okx_adapter.address)
+
+        kyber_enabled = True  # ALTER: False on chains without KyberSwap DSLO
+        if kyber_enabled:
+            # Registry-managed; keepers run sync_executor_approvals(protocol, tokens) after collect.
+            kyber_adapter = boa.load(
+                "contracts/burners/adapters/kyber/KyberDsloAdapter.vy",
+                KYBER_DSLO_PROTOCOL,
+            )
+            # kyber_adapter = boa.load_partial("contracts/burners/adapters/kyber/KyberDsloAdapter.vy").at("")
+            print(f"KyberDsloAdapter: {kyber_adapter.address}")
+            registry.set_adapter(kyber_adapter.address, kyber_adapter.protocol())
+            registry.activate_adapter(kyber_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 

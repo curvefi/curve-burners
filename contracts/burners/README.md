@@ -293,6 +293,86 @@ Emergency procedure is the CoW one with `executor = token_approve`:
 (`scripts/emergency_cow_disable.py` takes the executor as an argument); the
 disable alone already stops every fill, as the mainnet fork test shows.
 
+### Kyber rail: `KyberDsloAdapter`
+
+KyberSwap's limit orders settle through `DSLOProtocol` ("Double Signature
+Limit Order", `0xcab2FA2eeab7065B45CBcF6E3936dDE2506b4f6C` on every chain
+KyberSwap serves — Ethereum, Polygon, Arbitrum, Base, BSC and more, with
+identical verified source; not Fraxtal), a fork of the 1inch Limit Order
+Protocol v2 with a packed `feeConfig` added to the order. It is the
+busiest of the limit-order venues reviewed (about 8,700 `OrderFilled`
+events on Ethereum in the 30 days to 2026-11-02, mostly through aggregator
+routes; KyberSwap and OpenOcean/DODO were weighed in the same review, the
+latter two rejected for private-taker and operator-only settlement). The
+protocol is a first-class home for a contract maker: `fillOrderTo` hands
+`signature.orderSignature` verbatim to the maker's ERC-1271
+`isValidSignature` with the EIP-712 order digest (OpenZeppelin's
+`SignatureChecker`, after a failed ECDSA recovery), pulls the maker asset
+with a plain `transferFrom` from the maker, and anyone may call it. The
+"double" signature is the catch: every fill also carries an operator
+co-signature over `DSOrder(orderHash, opExpireTime)` from a KyberSwap-held
+key, issued per fill by the KyberSwap API with a minute-scale expiry. It
+is how gasless cancel works and it means distribution runs through
+KyberSwap's orderbook and co-signing service — the same kind of gate as
+1inch resolvers or Bebop solvers, outside the maker's signature and
+irrelevant to what the maker receives. The API documents ERC-1271 maker
+signatures as accepted (`POST /write/api/v1/orders`), but no live order
+with a contract maker was observed, so the first production order is the
+test of that path; the on-chain fill is proven on a mainnet fork.
+
+`adapters/kyber/KyberDsloAdapter.vy` is stateless and immutable and pinned
+to the chain's protocol: at deploy it rebuilds the EIP-712 domain
+(`"Kyber DSLO Protocol"`, `"1"`, the chain id and the protocol address)
+and checks it against the protocol's `DOMAIN_SEPARATOR()`, then the order
+hashing against its `hashOrder` on a probe order. The registry entry is
+`adapter = KyberDsloAdapter, executor = protocol`, because the protocol
+itself pulls the sold tokens (`sync_executor_approvals(protocol, tokens)`).
+A taker calls `fillOrderTo(params, amounts, sender)` with
+`params.signature.orderSignature = KyberDsloAdapter ++ abi.encode(Order)`;
+the burner strips the prefix and the adapter recomputes the digest from the
+bare order (`adapters/kyber/dslo.vy` holds the order type, the type hash,
+the `feeConfig` layout, the linear getters and the predicate shapes). The
+economic principle is the 1inch one: **the signed `takingAmount` is the
+floor the FeeCollector is paid for `makingAmount`**. The order carries no
+amounts of its own at fill time — `getMakerAmount`/`getTakerAmount` are
+calldata the protocol staticcalls on itself with the swap amount appended
+— so the adapter pins each getter to the protocol's own linear calculator
+over the order's own amounts (`floor(taking * M / T)` maker tokens for a
+taking-amount fill, `ceil(making * T / M)` payment for a making-amount
+fill, both in the maker's favour) or accepts it empty (exact-amount fills
+only); anything else is `BadAmountGetter`. `feeConfig` passes through: a
+taker-asset fee is paid on top by the taker, a maker-asset fee is carved
+out of the taker's maker-asset receipt, and in both branches the maker
+gives `makingAmount` and the FeeCollector receives the full `takingAmount`.
+The order has no expiry field either: the expiry is the `timestampBelow(t)`
+predicate (strict, so the last fillable second is `t - 1`), alone or as an
+entry of the `and(address[], bytes[])` the KyberSwap API signs into every
+order next to `nonceEquals(maker, nonce)` (the burner never advances its
+protocol nonce, so the API's `nonceEquals(burner, 0)` always holds); the
+adapter accepts exactly those shapes (`BadPredicate` otherwise, an empty
+predicate included) and hands `t - 1` to `check_order` as the validity
+bound. Asset data (appended to the `transferFrom` calldata) and the
+interaction (a whitelisted post-fill callback) must be empty
+(`BadAssetData`, `BadInteraction`); `salt` and `allowedSender` pass
+through. The remaining checks are the shared ones — canonical encoding,
+digest, the burner as maker (`NonCanonical`, `InvalidHash`, `BadMaker`) —
+and then `check_order` with the maker asset, the taker asset, the resolved
+receiver (empty means the maker), the order amounts and the predicate
+expiry. `order_for(burner, token, salt, sell_amount)` returns the
+publishable pair for a live lot: the whole available amount by default,
+priced at the current block, linear getters, no fee, any taker, expiring
+with the lot; an order placed through the KyberSwap API instead carries the
+fields its `sign-message` endpoint returns (salt, `feeConfig`, the `and`
+predicate), and the signature is built the same way from them.
+`describe(order)` unpacks the resolved receiver, the fee recipient, percent
+and side, and the expiry. Like the 1inch router, the protocol swallows a
+failed contract signature check into its own `'LOP: bad signature'`, so a
+publisher classifies an order by `eth_call` against the burner's
+`isValidSignature`; and it checks the contract signature on the first fill
+only, so a partially filled order keeps filling at its signed price until
+its predicate expires, and an emergency disable is complete only with
+`sync_executor_approvals(protocol, tokens)`.
+
 ### Payment token and resync
 
 The payment token (`want`, no `target()` alias) mirrors

@@ -26,6 +26,7 @@ DEFAULT_TESTS = [
     "tests/burners/test_auction_taker.py",
     "tests/burners/test_cow_adapter.py",
     "tests/burners/test_okx_adapter.py",
+    "tests/burners/test_kyber_adapter.py",
     "tests/burners/test_adapter_registry.py",
     "tests/burners/test_intent_resolver.py",
 ]
