@@ -47,6 +47,10 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
           enabled: true
           post: true
           owner_prefix: true         # UNVERIFIED signature shape for the orderbook, see OKXSettings
+        kyber:
+          enabled: true
+          post: true                 # sign-message -> validate -> orders; no key needed
+          # client_id: curve         # optional X-Client-Id (fee recipient selection)
 
 Every other settlement rail gets a section named after it (``oneinch``,
 ``bebop``, ...) parsed by ``parse_rail`` (``config/rails.py``) into a
@@ -84,7 +88,12 @@ from keepers.auction_keeper.config.pricing import (
     PricingSettings,
     TtlSettings,
 )
-from keepers.auction_keeper.config.rails import CowSettings, OKXSettings, RailSettings
+from keepers.auction_keeper.config.rails import (
+    CowSettings,
+    KyberSettings,
+    OKXSettings,
+    RailSettings,
+)
 
 __all__ = [
     "DEFAULT_LOG_CHUNK",
@@ -106,6 +115,7 @@ __all__ = [
     "PricingSettings",
     "RailSettings",
     "OKXSettings",
+    "KyberSettings",
     "TokenFilter",
     "TtlSettings",
     "expand_env",

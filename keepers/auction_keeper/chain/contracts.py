@@ -321,6 +321,47 @@ class OKXIntentAdapterContract(AdapterContract):
         return tuple(order), bytes(digest), bytes(uid)
 
 
+# KyberSwap DSLO order (adapters/kyber/dslo.vy): nine static fields, then
+# makerAssetData, takerAssetData, getMakerAmount, getTakerAmount, predicate,
+# interaction.
+DSLO_ORDER_ABI = (
+    "(uint256,address,address,address,address,address,uint256,uint256,uint256,"
+    "bytes,bytes,bytes,bytes,bytes,bytes)"
+)
+
+
+class KyberDsloAdapterContract(AdapterContract):
+    PROTOCOL = Function("protocol()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function("order_for(address,address,uint256,uint256)", (DSLO_ORDER_ABI, "bytes"))
+    DESCRIBE = Function(
+        f"describe({DSLO_ORDER_ABI})", ("address", "address", "uint256", "bool", "uint256")
+    )
+
+    def protocol(self) -> str:
+        return to_checksum_address(self._read_one(self.PROTOCOL))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(
+        self, auction: str, token: str, salt: int, sell_amount: int = 0
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(self.ORDER_FOR, auction, token, salt, sell_amount)
+        return tuple(order), bytes(signature)
+
+    def describe(self, order: tuple) -> tuple[str, str, int, bool, int]:
+        """(receiver, fee recipient, fee percent 1e-5, taker-asset fee, last fillable timestamp)."""
+        receiver, fee_recipient, fee_percent, taker_fee, valid_to = self._read(self.DESCRIBE, order)
+        return (
+            to_checksum_address(receiver),
+            to_checksum_address(fee_recipient),
+            fee_percent,
+            taker_fee,
+            valid_to,
+        )
+
+
 class AuctionTaker(Contract):
     """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route."""
 
@@ -344,6 +385,7 @@ class AuctionTaker(Contract):
 
 
 __all__ = [
+    "DSLO_ORDER_ABI",
     "ERC1271_INVALID",
     "ERC1271_MAGIC_VALUE",
     "LOT_STAGED_TOPIC",
@@ -355,6 +397,7 @@ __all__ = [
     "AuctionTaker",
     "CowAdapterContract",
     "Erc20",
+    "KyberDsloAdapterContract",
     "Lot",
     "LotView",
     "OKXIntentAdapterContract",

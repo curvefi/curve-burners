@@ -72,6 +72,17 @@ class OKXSettings(RailSettings):
         return os.environ.get(self.passphrase_env)
 
 
+@dataclass(frozen=True)
+class KyberSettings(RailSettings):
+    """KyberSwap limit orders (DSLO): the maker API needs no key; an optional
+    ``X-Client-Id`` selects the fee recipient the API packs into the signed
+    ``feeConfig`` (sent to both calls)."""
+
+    api_key_env: str | None = None
+    api_url: str = "https://limit-order.kyberswap.com"
+    client_id: str | None = None
+
+
 # Integer rail fields that may be zero (the rest must be positive).
 _NON_NEGATIVE_FIELDS: set[str] = set()
 

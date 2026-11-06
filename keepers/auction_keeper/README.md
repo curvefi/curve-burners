@@ -72,11 +72,14 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `okx.api_url`, `okx.chain_index` | `https://web3.okx.com`, by chain id | API base and `chainIndex` (Ethereum, BSC, Arbitrum, Base, X Layer by default). |
 | `okx.slippage_percent`, `okx.expiration` | `"0.1"`, 180 | Quote parameters: slippage (the signed `toTokenAmount` is the quote after it) and order validity in seconds (max 300). |
 | `okx.owner_prefix` | `true` | UNVERIFIED: whether the posted eip1271 signature carries the owner prefix (see below). |
+| `kyber.enabled`, `kyber.post` | `true`, `true` | Serve `KyberDsloAdapter`; `post: false` logs standing asks only. |
+| `kyber.api_url`, `kyber.client_id` | `https://limit-order.kyberswap.com`, none | Maker API base (no key) and the optional `X-Client-Id` (fee recipient selection; also sent with the `kyber` price source). |
 
 Adapters are never configured: each cycle the keeper reads the auction's
 `AdapterRegistry`, takes the active adapters, and matches their
 `ADAPTER_VERSION()` to a publisher (`CowAdapter` → `CowPublisher`,
-`OKXIntentAdapter` → `OKXIntentPublisher`). A rail section with `enabled:
+`OKXIntentAdapter` → `OKXIntentPublisher`,
+`KyberDsloAdapter` → `KyberDsloPublisher`). A rail section with `enabled:
 false` skips its adapters. Adding a rail is one class in
 `keepers/auction_keeper/rails/`.
 
@@ -204,6 +207,41 @@ Standing-ask mode (`post: false`, credentials or `chainIndex` missing):
 the `order_for` order (no commissions, random `appData` as salt, `validTo`
 shortened to the scheduled validity) is validated and logged. Only
 allowlisted OKX solvers can settle, so this is a log, not a permissionless
+
+### Kyber rail (`kyber`)
+
+Executor: the DSLO protocol itself (`adapter.protocol()`; it does the
+`transferFrom`). Feed mode (`post: true`): the maker API's two calls, no
+key (pages: docs.kyberswap.com → Developer guide → Limit Order API →
+"Maker API" reference and the "Place a Limit Order" how-to). `POST
+{api_url}/write/api/v1/orders/sign-message` with `{chainId, makerAsset,
+takerAsset, maker: <auction>, receiver: <FeeCollector>, makingAmount:
+<available>, takingAmount: <curve quote>, expiredAt: the scheduled
+validity, never past the window end}` returns `data{domain, types,
+primaryType, message}`, the message carrying the API's `salt`, `feeConfig`
+(the server-computed fee, selected by the optional `X-Client-Id` header),
+`allowedSender`, the linear getters and the `and([nonceEquals(maker, 0),
+timestampBelow(expiredAt)])` predicate; the publisher checks
+`domain.verifyingContract` (the adapter's protocol) and `chainId`, maker,
+receiver, pair and amounts against the lot, asks the adapter's `describe`
+for the predicate's last fillable second (`expiredAt - 1`,
+`timestampBelow` is strict; never past the requested bound, which never
+passes the lot end), signs `adapter ++ abi_encode(message)`, validates it
+on-chain, then `POST {api_url}/write/api/v1/orders` with the sign-message
+body plus `salt` and `signature` (the reference says `data.id` comes back,
+the how-to says `orderId`; both are logged). The reference states that
+ERC-1271 and ERC-6492 smart-wallet signatures are accepted, so no `maker`
+prefix is added; this was verified from the docs only, no order was
+submitted here. Fills carry KyberSwap's per-fill operator co-signature
+(not the maker's concern) and the maker signature is checked on the first
+fill only, so disabling the adapter stops nothing already validated: run
+the allowance sync. The record is keyed by the order digest; a repost at a
+lower quote is a new order (the API issues a fresh salt).
+
+Standing-ask mode (`post: false`): the `order_for` order (no fee, any
+taker) with a bare `timestampBelow(valid_to + 1)` predicate, validated and
+logged as `fillOrderTo(order, orderSignature)`; every fill still needs the
+operator co-signature, so this is a log rather than a permissionless
 fallback.
 
 Run it as a long-lived service (systemd, docker); it is stateless beyond the

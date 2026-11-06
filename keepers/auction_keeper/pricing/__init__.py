@@ -231,7 +231,11 @@ def build_sources(
                 )
             sources.append(CowQuoteSource(url, http=http))
         elif name == "kyber":
-            sources.append(KyberQuoteSource(_slug(config, name, chain_id), http=http))
+            sources.append(
+                KyberQuoteSource(
+                    _slug(config, name, chain_id), http=http, client_id=config.kyber.client_id
+                )
+            )
         elif name == "velora":
             if chain_id not in VELORA_CHAINS:
                 raise ConfigError(
