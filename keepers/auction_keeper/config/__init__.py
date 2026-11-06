@@ -62,6 +62,12 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
           relay: log                 # MetaTxn without the API: none | log | self-actions
           routes:                    # Curve pools for the self-authored action list
             - {token: "0x...", pool: "0x...", i: 0, j: 1}
+        hashflow:
+          api_key_env: HASHFLOW_API_KEY   # credential issued by Hashflow (every taker call)
+          enabled: true
+          post: true                 # RFQ-m quote -> check -> sign -> relay tradeRFQM (keeper mode)
+          # source: api              # the `source` identity sent with every RFQ
+          # chunk: 1000000000000000000000   # base amount per quote; default: everything available
 
 Every other settlement rail gets a section named after it (``oneinch``,
 ``bebop``, ...) parsed by ``parse_rail`` (``config/rails.py``) into a
@@ -102,6 +108,7 @@ from keepers.auction_keeper.config.pricing import (
 from keepers.auction_keeper.config.rails import (
     CowSettings,
     CurveRoute,
+    HashflowSettings,
     KyberSettings,
     OKXSettings,
     RailSettings,
@@ -133,6 +140,7 @@ __all__ = [
     "VeloraSettings",
     "CurveRoute",
     "ZeroExSettings",
+    "HashflowSettings",
     "TokenFilter",
     "TtlSettings",
     "expand_env",

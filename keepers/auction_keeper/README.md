@@ -61,7 +61,7 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `tokens.whitelist` | `[]` | Non-empty: sell only these. |
 | `tokens.blacklist` | `[]` | Never sell these (wins over the whitelist). |
 | `start_block` | none | Where the `LotStaged` scan starts (burner deployment block). Without it only lots staged after start-up and the whitelist are known. |
-| `mode` | `offline` | `offline`: reads the chain and posts orders, never sends a transaction (no key is loaded). `keeper`: also sends the on-chain housekeeping, today the executor allowance sync; needs `keeper_key_env`. |
+| `mode` | `offline` | `offline`: reads the chain and posts orders, never sends a transaction (no key is loaded). `keeper`: also sends the on-chain housekeeping (the executor allowance sync, the Hashflow `tradeRFQM` relay and `push_target()`); needs `keeper_key_env`. |
 | `keeper_key_env` | none | Env var with the private key used in `keeper` mode and by custom executions. |
 | `cow.orderbook_url` | by chain id | mainnet, gnosis, arbitrum, base, polygon, avalanche, bnb, sepolia have defaults. |
 | `cow.app_data_document` | none | Full appData JSON whose keccak is `CowAdapter.app_data()`; registered with the orderbook once. |
@@ -86,6 +86,10 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `zerox.slippage_ppm` | none | `slippagePpm` for the quote (the signed `minAmountOut` is the quote after it); none leaves the API default. |
 | `zerox.relay` | `log` | MetaTxn orders without the API: `none` (skip), `log` (print the `executeMetaTxn` calldata), `self-actions` (keeper mode: simulate and send it from the keeper key). |
 | `zerox.routes` | `[]` | `{token, pool, i, j}` entries: the Curve pool the self-authored action list sells `token` (coin `i`) for the payment token (coin `j`) on. |
+| `hashflow.api_key_env` | `HASHFLOW_API_KEY` | The credential Hashflow issues; every taker call sends it as `Authorization`. |
+| `hashflow.enabled`, `hashflow.post` | `true`, `true` | Serve `HashflowAdapter`; `post: false` (or no credential) logs the quote-request template only, there are no standing asks. |
+| `hashflow.api_url`, `hashflow.source` | `https://api.hashflow.com`, `api` | API base and the RFQ `source` identity (`api` for an API wallet trader, else the aggregator name Hashflow registered). |
+| `hashflow.chunk` | none | Base-token amount requested per quote (an RFQ-m fill is exact); default: everything available. |
 
 Adapters are never configured: each cycle the keeper reads the auction's
 `AdapterRegistry`, takes the active adapters, and matches their
@@ -93,7 +97,8 @@ Adapters are never configured: each cycle the keeper reads the auction's
 `OKXIntentAdapter` → `OKXIntentPublisher`,
 `KyberDsloAdapter` → `KyberDsloPublisher`,
 `VeloraDeltaAdapter` → `VeloraDeltaPublisher`,
-`ZeroExSettlerAdapter` → `ZeroExSettlerPublisher`). A rail section with `enabled:
+`ZeroExSettlerAdapter` → `ZeroExSettlerPublisher`,
+`HashflowAdapter` → `HashflowPublisher`). A rail section with `enabled:
 false` skips its adapters. Adding a rail is one class in
 `keepers/auction_keeper/rails/`.
 
@@ -380,6 +385,74 @@ offline mode it logs like `log`. A token without a route is skipped.
 hash, deadline at the scheduled validity) is validated and logged for 0x's
 allow-listed solvers (`getSolvers()`), who route and call `executeMetaTxn`
 themselves; a log, not a permissionless fallback.
+
+### Hashflow rail (`hashflow`)
+
+Executor: the `HashflowRouter` (`adapter.router()`; it pulls the base token
+from the trader with a plain `transferFrom`). The rail is keeper-driven
+only: an RFQ-m quote lives seconds to minutes, every fill is one exact
+`txid`, nothing settles without a market maker's signature, and the pool
+pays `quote.trader` — the burner — so the proceeds land on the burner and
+the keeper calls the permissionless `push_target()` to move them to the
+FeeCollector (`FeeCollector.forward()` calls it too at the FORWARD step).
+
+Feed mode (`post: true` with a credential): every poll, `POST
+{api_url}/taker/v3/rfq` with the header `Authorization: <credential>` and
+the body `{source, baseChain: {chainType: "evm", chainId}, quoteChain:
+{same}, rfqs: [{baseToken: <lot>, quoteToken: <want>, baseTokenAmount:
+<available or chunk>, trader: <auction>, rfqType: 1}]}`. The URL, header,
+body and the answer `{status, error?, rfqId, internalRfqIds?, quotes:
+[{quoteData: {baseChain, quoteChain, baseToken, baseTokenAmount,
+quoteToken, quoteTokenAmount, trader, effectiveTrader, txid, pool,
+dstPool, quoteExpiry, nonce, externalAccount, dstExternalAccount},
+signature, xChainFeeEstimate, targetContract, calldata, value,
+hftTradingRewards}]}` are from the taker page "Getting Started - API v3"
+(`docs.hashflow.com/hashflow/taker/getting-started-api-v3`), which
+documents RFQ-t only (execution through `tradeRFQT` by the trader). The
+`rfqType: 1` request field is ASSUMED: RFQ-m appears in the public material
+only as `QuoteData.rfqType: 0 | 1` of `@hashflow/taker-js` and as
+`"rfqType": 1` in an error example of the market-maker page
+(`.../market-making/getting-started-api-v3`), neither of which says how a
+taker asks for it; the maker page also fixes the RFQ-t maker hash (it
+includes `effectiveTrader` and `nonce`), which differs from the pool's
+RFQ-m hash, so an RFQ-t quote answered to an RFQ-m request fails the
+signer check below instead of being relayed. The trader side of the request
+comes from `HashflowAdapter.order_for(auction, token, amount)` (typed
+reverts surface at build time; its `quoteTokenAmount` is the curve floor).
+
+The quote is checked before anything is signed: this chain, `rfqType` 1
+when present, the auction as `trader`, the lot pair, a pool, the base
+amount exactly as requested and within the available amount,
+`quoteTokenAmount` at or above the curve quote for it (below: skipped, the
+auction's `check_order` would reject it), `quoteExpiry` inside the lot
+window, and the maker's 65-byte signature recovering, under the pool's
+EIP-191 digest (`HashflowPool._hashQuoteRFQM`), to the signer the pool's
+`signerConfiguration()` reports, with the pool enabled. Then the trader
+signature `adapter ++ abi_encode(Quote)` (the nine EIP-712 fields) is
+validated through the auction's `isValidSignature` on the router's digest
+(an `eth_call`: the router itself reports every signature failure as its
+own `Invalid signer.`, hiding the typed reason), and the router's allowance
+is checked (synced in keeper mode).
+
+Submission: there is no public endpoint to hand a maker-signed RFQ-m quote
+back to Hashflow (the taker docs name only `tradeRFQT`), while
+`HashflowRouter.tradeRFQM` takes the quote with both signatures from any
+sender (`IHashflowRouter`: "the 3rd party can be the Market Maker itself").
+So in keeper mode the keeper relays `tradeRFQM(RFQMQuote{pool,
+externalAccount, trader, baseToken, quoteToken, baseTokenAmount,
+quoteTokenAmount, quoteExpiry, txid, takerSignature, makerSignature})` from
+its own EOA and calls `push_target()` on the burner right after (a revert
+of the relay is logged, nothing is recorded, the `txid` stays unburnt); in
+offline mode the calldata is logged for any relayer and a `want` balance on
+the burner is reported. Target already on the burner is pushed at the start
+of every poll in keeper mode. The record is keyed by `txid` and expires
+with the quote, so the next poll quotes again while the lot is live. API
+failures arrive as `status: "fail"` with an `error` string (or HTTP 401/403
+without a valid credential) and are logged.
+
+No credential was available here, so nothing was exercised against the
+live API; the test fixtures copy the docs' shapes and settle through the
+router and pool mocks of the adapter tests.
 
 Run it as a long-lived service (systemd, docker); it is stateless beyond the
 state file and safe to restart.

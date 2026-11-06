@@ -109,6 +109,7 @@ class Auction(Contract):
     )
     IS_VALID_SIGNATURE = Function("isValidSignature(bytes32,bytes)", ("bytes4",))
     SYNC_EXECUTOR_APPROVALS = Function("sync_executor_approvals(address,address[])")
+    PUSH_TARGET = Function("push_target()", ("uint256",))
     TAKE = Function("take(address,uint256,address,bytes)", ("uint256",))
     TAKE_WITH_LIMITS = Function(
         "take_with_limits(address,uint256,uint256,uint256,address,uint256,bytes)",
@@ -196,6 +197,10 @@ class Auction(Contract):
 
     def sync_executor_approvals_calldata(self, executor: str, tokens: list[str]) -> bytes:
         return self.SYNC_EXECUTOR_APPROVALS.encode(executor, tokens)
+
+    def push_target_calldata(self) -> bytes:
+        """The permissionless forward of ``want`` held by the burner to the FeeCollector."""
+        return self.PUSH_TARGET.encode()
 
     def take_calldata(self, token: str, max_amount: int, receiver: str, data: bytes = b"") -> bytes:
         return self.TAKE.encode(token, max_amount, receiver, data)
@@ -510,6 +515,64 @@ class ZeroExSettlerContract(Contract):
         return self.EXECUTE_META_TXN.encode(slippage, actions, zid, msg_sender, sig)
 
 
+# Hashflow RFQ-m quote as signed by the trader (adapters/hashflow/hashflow.vy
+# Quote): the nine EIP-712 fields, txid first; and the protocol's RFQMQuote
+# calldata (calldata order, then the taker and maker signatures).
+HASHFLOW_QUOTE_ABI = "(bytes32,address,address,address,address,address,uint256,uint256,uint256)"
+HASHFLOW_RFQM_CALLDATA_ABI = (
+    "(address,address,address,address,address,uint256,uint256,uint256,bytes32,bytes,bytes)"
+)
+
+
+class HashflowAdapterContract(AdapterContract):
+    ROUTER = Function("router()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function("order_for(address,address,uint256)", (HASHFLOW_QUOTE_ABI,))
+    SIGNATURE_FOR = Function(f"signature_for({HASHFLOW_QUOTE_ABI})", ("bytes",))
+    DESCRIBE = Function("describe(bytes)", (HASHFLOW_QUOTE_ABI, "bytes32"))
+
+    def router(self) -> str:
+        return to_checksum_address(self._read_one(self.ROUTER))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(self, auction: str, token: str, sell_amount: int = 0) -> tuple:
+        """The trader side of a quote request (maker fields zero); typed reverts bubble."""
+        return tuple(self._read_one(self.ORDER_FOR, auction, token, sell_amount))
+
+    def signature_for(self, quote: tuple) -> bytes:
+        return bytes(self._read_one(self.SIGNATURE_FOR, quote))
+
+    def describe(self, payload: bytes) -> tuple[tuple, bytes]:
+        """(quote, digest) of a bare ``abi_encode(quote)`` payload."""
+        quote, digest = self._read(self.DESCRIBE, payload)
+        return tuple(quote), bytes(digest)
+
+
+class HashflowRouter(Contract):
+    """``HashflowRouter``: the RFQ-m settlement entrypoint and the txid replay map."""
+
+    TRADE_RFQM = Function(f"tradeRFQM({HASHFLOW_RFQM_CALLDATA_ABI})")
+    USED_TXIDS = Function("usedTxids(bytes32)", ("bool",))
+
+    def trade_rfqm_calldata(self, quote: tuple) -> bytes:
+        return self.TRADE_RFQM.encode(quote)
+
+    def used_txid(self, txid: bytes) -> bool:
+        return self._read_one(self.USED_TXIDS, txid)
+
+
+class HashflowPool(Contract):
+    """``HashflowPool``: the market maker's signer and killswitch (IHashflowPool)."""
+
+    SIGNER_CONFIGURATION = Function("signerConfiguration()", ("address", "bool"))
+
+    def signer_configuration(self) -> tuple[str, bool]:
+        signer, enabled = self._read(self.SIGNER_CONFIGURATION)
+        return to_checksum_address(signer), bool(enabled)
+
+
 class AuctionTaker(Contract):
     """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route."""
 
@@ -537,6 +600,8 @@ __all__ = [
     "DSLO_ORDER_ABI",
     "ERC1271_INVALID",
     "ERC1271_MAGIC_VALUE",
+    "HASHFLOW_QUOTE_ABI",
+    "HASHFLOW_RFQM_CALLDATA_ABI",
     "LOT_STAGED_TOPIC",
     "OKX_ORDER_ABI",
     "ZEROX_ORDER_ABI",
@@ -547,6 +612,9 @@ __all__ = [
     "AuctionTaker",
     "CowAdapterContract",
     "Erc20",
+    "HashflowAdapterContract",
+    "HashflowPool",
+    "HashflowRouter",
     "KyberDsloAdapterContract",
     "Lot",
     "LotView",

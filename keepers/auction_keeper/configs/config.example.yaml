@@ -118,6 +118,15 @@ networks:
       relay: log
       # routes:                       # one Curve pool hop per sell token (coin i -> coin j = want)
       #   - {token: "0x...", pool: "0x...", i: 0, j: 1}
+    hashflow:                       # HashflowAdapter (Hashflow RFQ-m; credential from the Hashflow team)
+      api_key_env: HASHFLOW_API_KEY # sent as the Authorization header of every taker call
+      enabled: true
+      # RFQ-m quote -> check -> sign -> relay tradeRFQM from the keeper EOA (mode: keeper;
+      # offline mode logs the calldata). No standing asks: false logs the request template only.
+      post: true
+      # api_url: https://api.hashflow.com
+      # source: api                   # RFQ `source`: "api" for an API wallet trader, else the registered aggregator name
+      # chunk: 1000000000000000000000 # base amount per quote (an RFQ-m fill is exact); default: everything available
 
   gnosis:
     rpc: https://lb.drpc.org/ogrpc?network=gnosis&dkey=${DRPC_API_KEY}

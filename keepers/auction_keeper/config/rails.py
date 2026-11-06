@@ -173,6 +173,25 @@ class ZeroExSettings(RailSettings):
         object.__setattr__(self, "routes", routes)
 
 
+@dataclass(frozen=True)
+class HashflowSettings(RailSettings):
+    """Hashflow RFQ-m: every taker API call needs the credential Hashflow
+    issues (``Authorization`` header). There is no standing-ask mode and no
+    public submit endpoint for a maker-signed RFQ-m quote: ``post: true``
+    requests quotes, and the keeper relays ``tradeRFQM`` itself in keeper
+    mode (offline mode logs the calldata for any relayer)."""
+
+    api_key_env: str | None = "HASHFLOW_API_KEY"
+    api_url: str = "https://api.hashflow.com"
+    # The `source` identity of the RFQ body: "api" for an API wallet trader
+    # (the docs' term for a wallet quoting through the API), else the
+    # aggregator name Hashflow registered.
+    source: str = "api"
+    # Base-token amount requested per quote; None asks for everything
+    # available (an RFQ-m fill is exact, so this bounds the fill size).
+    chunk: int | None = None
+
+
 # Integer rail fields that may be zero (the rest must be positive).
 _NON_NEGATIVE_FIELDS: set[str] = {"partner_fee_bps", "slippage_ppm"}
 

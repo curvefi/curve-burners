@@ -99,6 +99,16 @@ def tradeRFQM(_quote: hashflow.RFQMQuote):
 
 
 @external
+@view
+def signerConfiguration() -> (address, bool):
+    """
+    @notice IHashflowPool.signerConfiguration: the signer and whether the
+            pool is enabled (what a keeper reads before relaying).
+    """
+    return self.signer, self.enabled
+
+
+@external
 def updateSigner(_signer: address):
     assert (
         msg.sender == self.operations
