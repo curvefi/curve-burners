@@ -121,13 +121,46 @@ with the burner's `check_order` view. `check_order` returns `true` for a
 fillable order and otherwise reverts with a typed auction error
 (`BadBuyToken`, `BadReceiver`, `LotInactive`, `NothingAvailable`,
 `BadSellAmount`, `BadValidTo`, `BadBuyAmount`), so an `eth_call` classifies
-an order by error selector without decoding a reason string. Signature bytes
+an order by error selector without decoding a reason string. Its receiver
+rule: the buy token must go to the auction's `receiver` (the FeeCollector)
+or to the auction itself (see "Receiver on the auction" below); any other
+receiver, the zero address included, is `BadReceiver`. Signature bytes
 therefore carry no authority — they only transport the order to the adapter —
 and every fill is priced against the live curve at settlement time. Bytes
 without a known prefix select no adapter and are invalid. The template is
 transparent to the protocols themselves: for a contract signer they forward
 the signature bytes verbatim (GPv2Settlement after stripping the owner), so a
 publisher simply prepends the adapter address when composing the bytes.
+
+### Receiver on the auction
+
+Some protocols credit the proceeds to the signer itself and carry no
+receiver field (Hashflow RFQ-m is one: the pool pays `quote.trader`), so the
+only account such an order can name is the burner. `check_order` therefore
+accepts the auction itself as the order receiver next to the configured
+`receiver`; nothing else changes, and the configured receiver can still
+never be the auction (`_set_receiver`): native takes always pay out of the
+auction, and the native `take` path does not know the second receiver.
+Proceeds credited to the burner are not stranded. `push_target()` is
+permissionless: it reads the burner's whole `want` balance, transfers it to
+the FeeCollector in one `transfer` when it is nonzero, and returns the
+amount moved (0 for an empty balance, never a revert). `FeeCollector.forward()`
+calls `burner.push_target()` before reading its own balance, so target
+credited to the burner during the EXCHANGE week reaches the FeeCollector by
+the FORWARD step without any keeper action; a keeper may call `push_target()`
+earlier at any time (the keeper of such a rail should do so right after a
+fill, so the proceeds do not sit on the burner for the rest of the week).
+Target held on the burner between the fill and the push touches no
+accounting: the target is never a lot (`_stage_lot` rejects `want`, and the
+FeeCollector keeps the target coin killed for COLLECT, so a collect never
+pulls it), `available(want)`, `price(want)` and `getAmountNeeded(want)` read
+0, and `check_order` rejects it as a sell token (`LotInactive`). `resync_target`
+is unaffected: after a target migration the old target becomes regular
+inventory and a leftover balance is snapshotted at the next collect like any
+other token, which already held for the native rail's leftovers. Adapters
+whose protocol has a receiver field keep publishing the FeeCollector
+(`order_for` of CoW and the others), but an order naming the burner now
+validates on them too.
 
 ### CoW rail: `CowAdapter`
 
@@ -649,7 +682,8 @@ FeeCollector (an evacuation batches it with `FeeCollector.set_killed`, or a
 permissionless collect in the same COLLECT frame restages the token). The
 FeeCollector's emergency owner acts on the burner only through the
 FeeCollector kill masks and `registry.disable_adapter`. `push_target` stays
-permissionless and returns held target tokens to the FeeCollector.
+permissionless and returns held target tokens to the FeeCollector (see
+"Receiver on the auction": `FeeCollector.forward()` calls it too).
 
 ### Periphery: resolver and taker
 

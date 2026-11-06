@@ -296,6 +296,17 @@ def test_check_order_wrong_buy_token(harness, sell_token, lot):
 def test_check_order_wrong_receiver(harness, sell_token, lot, solver):
     with boa.reverts(custom_err("BadReceiver()")):
         _check(harness, sell_token, receiver=solver)
+    with boa.reverts(custom_err("BadReceiver()")):
+        _check(harness, sell_token, receiver=ZERO_ADDRESS)
+
+
+def test_check_order_accepts_the_auction_itself_as_receiver(harness, sell_token, lot):
+    # Protocols without a receiver field credit the signer: a signed order may
+    # name the auction as its receiver (the importer forwards the proceeds on).
+    # The configured receiver can still never be the auction, see
+    # test_router_approvals: native takes always pay out of the auction.
+    assert _check(harness, sell_token, receiver=harness.address) is True
+    assert harness.receiver() != harness.address
 
 
 def test_check_order_unstaged_token_inactive(harness, sell_token, erc20_deployer):

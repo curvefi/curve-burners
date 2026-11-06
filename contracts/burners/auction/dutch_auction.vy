@@ -43,7 +43,9 @@ error WantNotSellable:
     pass
 
 
-# Zero, or the auction itself: proceeds always leave the auction.
+# The configured receiver: zero, or the auction itself (native takes always
+# pay out of the auction). A signed order's receiver: anything but the
+# configured receiver or the auction itself (see check_order).
 error BadReceiver:
     pass
 
@@ -588,7 +590,10 @@ def check_order(
          other quote view.
     @param _sell_token Lot token the order sells.
     @param _buy_token Token the order buys; must be want.
-    @param _receiver Receiver of the buy token; must be the auction's receiver.
+    @param _receiver Receiver of the buy token: the auction's receiver, or the
+           auction itself for protocols that credit the signer and carry no
+           receiver field (the importer is expected to forward held payment
+           tokens to its receiver, e.g. the burner's push_target).
     @param _sell_amount Total sell amount of the order; at most the lot's
            initial_amount.
     @param _min_buy_amount Minimum buy amount of the order; at least the live
@@ -602,7 +607,7 @@ def check_order(
     # sell != buy is implied: the buy token must equal want and _is_active
     # rejects want as a lot token.
     assert _buy_token == self.want.address, BadBuyToken()
-    assert _receiver == self.receiver, BadReceiver()
+    assert _receiver == self.receiver or _receiver == self, BadReceiver()
     assert self._is_active(token, lot, block.timestamp), LotInactive()
     # The availability term also establishes initial_amount > 0 before the
     # quote divides by it.
