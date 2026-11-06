@@ -397,9 +397,12 @@ def test_auction_economics_revert_bubbles_through_adapter(harness, adapter, make
     assert _validate(harness, adapter, make_order(dest_amount=quote + 1)) == ERC1271_MAGIC_VALUE
 
 
-def test_zero_beneficiary_means_the_owner_and_fails_as_receiver(harness, adapter, make_order):
+def test_zero_beneficiary_means_the_owner_and_validates(harness, adapter, make_order):
+    # The owner is the auction itself, an accepted receiver (push_target
+    # forwards); a third-party beneficiary still fails.
+    assert _validate(harness, adapter, make_order(beneficiary=ZERO_ADDRESS)) == ERC1271_MAGIC_VALUE
     with boa.reverts(custom_err("BadReceiver()")):
-        _validate(harness, adapter, make_order(beneficiary=ZERO_ADDRESS))
+        _validate(harness, adapter, make_order(beneficiary=adapter.address))
 
 
 def test_deadline_past_the_window_invalid(harness, adapter, make_order):

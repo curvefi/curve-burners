@@ -467,10 +467,11 @@ def test_wrong_tokens_or_receiver_invalid(harness, adapter, make_order, sell_tok
     with boa.reverts(custom_err("BadReceiver()")):
         validate(make_order(receiver=boa.env.generate_address("thief")))
     with boa.reverts(custom_err("BadReceiver()")):
-        validate(make_order(receiver=harness.address))
-    # An empty receiver resolves to the owner, the auction itself.
-    with boa.reverts(custom_err("BadReceiver()")):
-        validate(make_order(receiver=ZERO_ADDRESS))
+        validate(make_order(receiver=adapter.address))
+    # The auction itself is an accepted receiver (push_target forwards), and
+    # an empty receiver resolves to the owner, the auction itself.
+    assert validate(make_order(receiver=harness.address)) == ERC1271_MAGIC_VALUE
+    assert validate(make_order(receiver=ZERO_ADDRESS)) == ERC1271_MAGIC_VALUE
 
 
 def test_sell_amount_is_bounded_by_the_snapshot(

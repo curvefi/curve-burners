@@ -379,8 +379,9 @@ def test_auction_economics_revert_bubbles_through_adapter(harness, adapter, make
     with boa.reverts(custom_err("BadBuyAmount()")):
         _validate(harness, adapter, make_order(takingAmount=quote - 1))
     assert _validate(harness, adapter, make_order(takingAmount=quote + 1)) == ERC1271_MAGIC_VALUE
-    with boa.reverts(custom_err("BadReceiver()")):
-        _validate(harness, adapter, make_order(receiver=ZERO_ADDRESS))
+    # An empty receiver resolves to the maker, the auction itself, which is an
+    # accepted receiver (push_target forwards).
+    assert _validate(harness, adapter, make_order(receiver=ZERO_ADDRESS)) == ERC1271_MAGIC_VALUE
     with boa.reverts(custom_err("BadReceiver()")):
         _validate(harness, adapter, make_order(receiver=boa.env.generate_address("other")))
     with boa.reverts(custom_err("BadBuyToken()")):
