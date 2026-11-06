@@ -89,6 +89,12 @@ ADAPTER_VERSION: public(constant(String[20])) = "OifEscrowAdapter"
 # strips, then the bare order this contract validates.
 SIGNATURE_TYPE_PERMIT2: constant(bytes1) = 0x00
 SIGNATURE_BOUND: constant(uint256) = 1 + 20 + oif.ENCODED_ORDER_BOUND
+# Anyone may openFor a burner intent, which moves the lot into the escrow
+# before anything is paid; an unfilled one comes back only by refund after
+# expires (= the fill deadline). Capping the fill deadline at this horizon
+# from the open caps how long an unpaid open (overpriced, or one nobody
+# fills) can keep the lot from every other rail.
+MAX_FILL_WINDOW: constant(uint256) = 15 * 60
 
 # Protocol wiring pinned at deploy: the escrow is the Permit2 spender, the
 # output settler is the only oracle whose attestation may release the
@@ -144,9 +150,10 @@ def order_for(
          as the price falls. A limit order (empty context) open to every
          solver, filled and attested by the output settler, input oracle =
          output settler. The fill deadline bounds both the open and the
-         fill and defaults to the lot end; a shorter one limits how long an
-         opened intent can sit in the escrow (expires = fill deadline, so
-         an unfilled intent is refundable right after). Anyone may publish;
+         fill, may be at most MAX_FILL_WINDOW ahead (and no later than the
+         lot end) and defaults to that bound; it limits how long an opened
+         intent can sit in the escrow (expires = fill deadline, so an
+         unfilled intent is refundable right after). Anyone may publish;
          anyone may open it through openFor (paying nothing) and a solver
          settles it atomically through openForAndFinalise.
     @param _auction Auction (DutchAuctionBurner) selling the lot.
@@ -157,7 +164,7 @@ def order_for(
     @param _sell_amount Amount to sell; 0 sells everything available. The
            intent is fill-or-kill, so it must not exceed what is available.
     @param _fill_deadline Last timestamp (inclusive) the output may be
-           filled; 0 means the lot end.
+           filled; 0 means MAX_FILL_WINDOW from now, capped at the lot end.
     @return The order and `0x00 ++ this_adapter ++ abi_encode(order)`.
     """
     sell_amount: uint256 = _sell_amount
@@ -167,10 +174,11 @@ def order_for(
     lot_start: uint256 = 0
     lot_end: uint256 = 0
     lot_start, lot_end = staticcall _auction.window(_token)
+    latest: uint256 = min(lot_end, block.timestamp + MAX_FILL_WINDOW)
     fill_deadline: uint256 = _fill_deadline
     if fill_deadline == 0:
-        fill_deadline = lot_end
-    assert block.timestamp < fill_deadline and fill_deadline <= lot_end, BadFillDeadline()
+        fill_deadline = latest
+    assert block.timestamp < fill_deadline and fill_deadline <= latest, BadFillDeadline()
     buy_amount: uint256 = staticcall _auction.getAmountNeeded(_token, sell_amount)
     output_settler_id: bytes32 = oif._to_identifier(self.output_settler)
 
@@ -219,10 +227,13 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[oif.ENCODED_ORDER_BOUND])
          Shape: the calling auction as user, this chain as origin, exactly
          one input and one output, clean identifiers, the pinned output
          settler as input oracle and as the output's oracle and settler on
-         this chain, no callback, and a context the output settler resolves
-         to the signed amount. The fill deadline is the validity bound: the
-         escrow opens the intent only before it and the output settler
-         fills only up to it. Expires must equal it: the escrow refunds an
+         this chain, no callback, and a plain limit-order context (none or
+         LIMIT_ORDER: an exclusive one would let the opener lock every
+         other solver out until a start time it picks). The fill deadline
+         is the validity bound: the escrow opens the intent only before it,
+         the output settler fills only up to it, and it may be at most
+         MAX_FILL_WINDOW past the open, so an unpaid open returns the lot
+         within that horizon. Expires must equal it: the escrow refunds an
          opened but unfilled intent only after expires, so an expires past
          the fill deadline would let any opener park the lot in the escrow
          beyond the lot end.
@@ -243,6 +254,9 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[oif.ENCODED_ORDER_BOUND])
     assert order.user == msg.sender, oif.OrderNotValid(reason="BadUser")
     assert order.originChainId == chain.id, oif.OrderNotValid(reason="BadChain")
     assert order.expires == order.fillDeadline, oif.OrderNotValid(reason="BadExpires")
+    assert convert(order.fillDeadline, uint256) <= block.timestamp + MAX_FILL_WINDOW, (
+        oif.OrderNotValid(reason="BadFillDeadline")
+    )
     assert len(order.inputs) == 1, oif.OrderNotValid(reason="BadInputs")
     assert len(order.outputs) == 1, oif.OrderNotValid(reason="BadOutputs")
     assert order.inputOracle == self.output_settler, oif.OrderNotValid(reason="BadInputOracle")
@@ -260,7 +274,9 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[oif.ENCODED_ORDER_BOUND])
         and oif._is_clean(convert(output.recipient, uint256))
     ), oif.OrderNotValid(reason="BadIdentifier")
     assert len(output.callbackData) == 0, oif.OrderNotValid(reason="BadCallback")
-    assert oif._resolves_to_signed_amount(output.context), oif.OrderNotValid(reason="BadContext")
+    assert len(output.context) <= 1 and oif._resolves_to_signed_amount(output.context), (
+        oif.OrderNotValid(reason="BadContext")
+    )
 
     # The shared economic check: the calling auction prices the fill against
     # its live curve and reverts with its own typed error on failure. The

@@ -32,6 +32,7 @@ from tests.burners.test_dutch_auction_v2 import (
     _move_to_epoch,
     _move_to_timestamp,
 )
+from tests.burners.test_oif_adapter import MAX_FILL_WINDOW
 from tests.burners.test_oif_module import (
     LIFI_INPUT_SETTLER,
     LIFI_OUTPUT_SETTLER,
@@ -298,7 +299,8 @@ def test_mainnet_real_escrow_settles_published_intents():
         output = order[7][0]
         quote = output[4]
         assert quote == burner.getAmountNeeded(sell_token, quarter)
-        assert order[0] == burner.address and order[4] == lot_end
+        assert order[0] == burner.address
+        assert order[4] == min(lot_end, boa.env.evm.vm.state.timestamp + MAX_FILL_WINDOW)
         assert signature[0] == 0
         digest = permit_digest_reference(order, LIFI_INPUT_SETTLER, PERMIT2_MAINNET_DOMAIN)
         assert bytes(burner.isValidSignature(digest, signature[1:])) == bytes.fromhex("1626ba7e")

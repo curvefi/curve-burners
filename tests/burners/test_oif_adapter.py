@@ -38,6 +38,9 @@ STEP_DURATION = 60
 AUCTION_LENGTH = 24 * 60 * 60
 LOT_AMOUNT = 250 * WAD
 NONCE = 0x5AFE_C0DE
+# OifEscrowAdapter.MAX_FILL_WINDOW: how far past the open a fill deadline
+# may reach.
+MAX_FILL_WINDOW = 15 * 60
 
 PERMIT2_DOMAIN = keccak(b"PERMIT2_TEST_DOMAIN")
 FOREIGN_DOMAIN = keccak(b"FOREIGN_DOMAIN")
@@ -160,7 +163,7 @@ def make_order(harness, sell_token, want, proceeds_receiver, output_settler, lot
         buy_amount = overrides.pop("buy_amount", None)
         if buy_amount is None:
             buy_amount = harness.getAmountNeeded(sell_token.address, min(amount, LOT_AMOUNT))
-        deadline = overrides.pop("fill_deadline", harness.frame_end())
+        deadline = overrides.pop("fill_deadline", _latest_deadline(harness))
         output = {
             "oracle": identifier(output_settler),
             "settler": identifier(output_settler),
@@ -188,6 +191,15 @@ def make_order(harness, sell_token, want, proceeds_receiver, output_settler, lot
         return tuple(order.values())
 
     return _make
+
+
+def _now() -> int:
+    return boa.env.evm.vm.state.timestamp
+
+
+def _latest_deadline(harness) -> int:
+    """The latest fill deadline the adapter accepts for an open right now."""
+    return min(harness.frame_end(), _now() + MAX_FILL_WINDOW)
 
 
 def _prefix(adapter: Any) -> bytes:
@@ -394,7 +406,18 @@ def test_context_not_resolving_to_signed_amount_invalid(harness, adapter, make_o
         _validate(harness, adapter, make_order(context=context))
 
 
-@pytest.mark.parametrize("context", [b"", b"\x00", EXCLUSIVE_CONTEXT])
+def test_exclusive_context_invalid(harness, adapter, make_order):
+    # Regression: an exclusive limit order pays the signed amount, but only
+    # to the named solver until its start time. An opener naming itself with
+    # a start past the fill deadline would hold the escrowed lot as a free
+    # option that no other solver can fill.
+    exclusive = b"\xe0" + b"\x11" * 32 + (2**32 - 1).to_bytes(4, "big")
+    for context in (EXCLUSIVE_CONTEXT, exclusive):
+        with boa.reverts(custom_err("OrderNotValid(string)", "BadContext")):
+            _validate(harness, adapter, make_order(context=context))
+
+
+@pytest.mark.parametrize("context", [b"", b"\x00"])
 def test_signed_amount_contexts_valid(harness, adapter, make_order, context):
     assert _validate(harness, adapter, make_order(context=context)) == ERC1271_MAGIC_VALUE
 
@@ -409,7 +432,7 @@ def test_expires_other_than_the_fill_deadline_invalid(harness, adapter, make_ord
     # an unfilled one only after expires. An expires far past the fill
     # deadline (2**32 - 1 is year 2106) would park the lot in the escrow with
     # nobody able to fill or refund it.
-    deadline = harness.frame_end()
+    deadline = _latest_deadline(harness)
     expires = min(deadline + offset, 2**32 - 1)
     with boa.reverts(custom_err("OrderNotValid(string)", "BadExpires")):
         _validate(harness, adapter, make_order(fill_deadline=deadline, expires=expires))
@@ -437,8 +460,29 @@ def test_other_recipient_or_token_fails_the_auction_check(
 
 
 def test_fill_deadline_past_the_window_invalid(harness, adapter, make_order):
+    # Close enough to the lot end that the horizon allows a later deadline:
+    # the auction's window bound is what rejects it.
+    boa.env.time_travel(seconds=harness.frame_end() - _now() - 60)
     with boa.reverts(custom_err("BadValidTo()")):
         _validate(harness, adapter, make_order(fill_deadline=harness.frame_end() + 1))
+
+
+def test_fill_deadline_past_the_horizon_invalid(harness, adapter, make_order):
+    # Regression: anyone can openFor a burner intent, which moves the lot into
+    # the escrow before any payment, and an unfilled one returns only after
+    # expires (= fill deadline). A deadline far from the open, with an output
+    # nobody fills, would keep the lot from every rail for the whole window.
+    latest = _now() + MAX_FILL_WINDOW
+    assert latest < harness.frame_end()
+    assert _validate(harness, adapter, make_order(fill_deadline=latest)) == ERC1271_MAGIC_VALUE
+    for deadline in (latest + 1, harness.frame_end()):
+        with boa.reverts(custom_err("OrderNotValid(string)", "BadFillDeadline")):
+            _validate(harness, adapter, make_order(fill_deadline=deadline))
+    # An order published earlier is valid only while its deadline stays
+    # within the horizon of the block that opens it.
+    order = make_order(fill_deadline=latest)
+    boa.env.time_travel(seconds=MAX_FILL_WINDOW)
+    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
 
 
 def test_partial_amount_order_valid(harness, adapter, make_order):
@@ -459,7 +503,7 @@ def test_order_for_builds_the_publishable_pair(
     assert order[0] == harness.address
     assert order[1] == NONCE
     assert order[2] == boa.env.evm.chain.chain_id
-    assert order[3] == order[4] == harness.frame_end()
+    assert order[3] == order[4] == _now() + MAX_FILL_WINDOW
     assert order[5] == output_settler
     assert order[6] == [[int(sell_token.address, 16), LOT_AMOUNT]]
     assert order[7] == [
@@ -480,7 +524,7 @@ def test_order_for_builds_the_publishable_pair(
     assert _validate(harness, adapter, order, bytes(signature)[1:]) == ERC1271_MAGIC_VALUE
 
     # A partial amount with a shorter fill deadline is priced proportionally.
-    deadline = harness.frame_end() - 3600
+    deadline = _now() + 600
     partial, partial_signature = adapter.order_for(
         harness.address, sell_token.address, NONCE + 1, LOT_AMOUNT // 4, deadline
     )
@@ -508,6 +552,10 @@ def test_order_for_rejects_empty_lots_and_bad_deadlines(
 ):
     with boa.reverts(custom_err("BadFillDeadline()")):
         adapter.order_for(harness.address, sell_token.address, NONCE, 0, harness.frame_end() + 1)
+    with boa.reverts(custom_err("BadFillDeadline()")):
+        adapter.order_for(
+            harness.address, sell_token.address, NONCE, 0, _now() + MAX_FILL_WINDOW + 1
+        )
     with boa.reverts(custom_err("BadFillDeadline()")):
         adapter.order_for(
             harness.address, sell_token.address, NONCE, 0, boa.env.evm.vm.state.timestamp
