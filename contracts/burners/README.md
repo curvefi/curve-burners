@@ -373,6 +373,67 @@ only, so a partially filled order keeps filling at its signed price until
 its predicate expires, and an emergency disable is complete only with
 `sync_executor_approvals(protocol, tokens)`.
 
+### Velora Delta rail: `VeloraDeltaAdapter`
+
+Velora (ex-ParaSwap) Delta is a second adapter, built the same way.
+`adapters/velora/VeloraDeltaAdapter.vy` is stateless and immutable, pinned
+to the chain's Delta contract (the Portikus V2 adapter,
+`0x0000000000bbf5c5fd284e657f01bd000933c96d` on every supported chain; the
+EIP-712 domain `Portikus` / `2.0.0` / chain / Delta is rebuilt at deploy and
+cross-checked against the contract's `DOMAIN_SEPARATOR`). Its registry entry
+is `adapter = VeloraDeltaAdapter, executor = Delta`, because the settlement
+modules run inside the Delta contract by delegatecall and pull the sold
+tokens with a plain `transferFrom` from the owner (an order with an empty
+`permit`); the Delta contract is what `sync_executor_approvals(delta,
+tokens)` approves. A registered Delta agent settles with `swapSettle`
+(fill-or-kill under the `Order` primary type) or `swapSettleFillable`
+(pro-rata slices under `FillableOrder`), passing `OrderWithSig.signature =
+VeloraDeltaAdapter ++ abi.encode(Order)`; `SignatureLib.verify` forwards
+those bytes verbatim to the burner's `isValidSignature` with the digest of
+the entry point's primary type (contract owners are ERC-1271 signers there;
+the on-chain pre-signature mapping is only an alternative and needs no
+burner state). The burner strips the adapter prefix and the adapter
+recomputes the digest from the bare order (`adapters/velora/delta.vy` holds
+the order type, both primary type hashes, the domain and the fee packing),
+accepting whichever of the two digests matches since the economics are the
+same, checks the shape — canonical encoding, the burner as owner, a sell
+order, an empty permit (a permit routes the pull through Permit2, which the
+burner never approves, or skips it), no bridge (the proceeds must reach the
+beneficiary on this chain), `expectedAmount` at or above `destAmount` — and
+delegates the economics to `check_order` (dest token is the target,
+beneficiary is the FeeCollector, `srcAmount` within the snapshot, the net
+floor at or above the live quote, `deadline` no later than the lot end).
+The net floor is what the beneficiary actually receives after
+`FeeManagerLib.processSellFees`: the protocol's cut and a surplus-taking
+partner's cut come only out of the surplus above `expectedAmount` (hence
+the shape rule), while a partner fee in bps comes off the top and is netted
+out of `destAmount` before pricing, so an order that carries the API's
+partner fee must sign a correspondingly higher `destAmount`. Shape
+failures revert with `delta.OrderNotValid(reason)` (`NonCanonical`,
+`InvalidHash`, `BadOwner`, `BadOrderKind`, `BadPermit`, `BadBridge`,
+`BadExpectedAmount`); the auction's typed `check_order` revert bubbles
+unchanged, through the real Delta contract included, and a disabled adapter
+surfaces as the settlement's own `InvalidSignature`.
+
+`VeloraDeltaAdapter.order_for(burner, token, nonce, sell_amount)` returns
+the publishable pair for a live lot: the whole available amount by default,
+`destAmount = expectedAmount =` the quote at the current block, no partner,
+no permit, no metadata, no bridge, valid until the lot end; either entry
+point may fill it. Two Delta facts shape publishing. Nonces are unordered
+(a bitmap per owner, burnt once the order is filled in full), so every
+re-post as the curve decays needs a fresh nonce; `isNonceUsed(owner,
+nonce)` reads the bitmap. And only agents registered in the Portikus V2
+registry (`getAgents()`) can call the settlement: orders reach them through
+Velora's public Delta API (`POST /v2/delta/orders`, no key required, an
+order built by `/v2/delta/orders/build` for `owner = burner`), whose
+acceptance of an ERC-1271 owner signature of this shape is not documented
+and has not been exercised here, or by handing orders to an agent
+directly.
+
+Emergency procedure is the CoW one with `executor = Delta`:
+`registry.disable_adapter(VeloraDeltaAdapter)` batched with
+`sync_executor_approvals(delta, tokens)`.
+
 ### Payment token and resync
 
 The payment token (`want`, no `target()` alias) mirrors

@@ -47,6 +47,12 @@ OKX_INTENT_SETTLEMENT = "0x25ED72C3f671b626810A6dB597DCFD50F215A423"  # ALTER
 # deploy, and the protocol itself is the executor (it pulls the maker asset).
 KYBER_DSLO_PROTOCOL = "0xcab2FA2eeab7065B45CBcF6E3936dDE2506b4f6C"  # ALTER
 
+# Velora Delta dependency (verify against the target chain before deploy): the
+# Delta contract (Portikus V2 adapter, the same address on every supported
+# chain; the approval target of a Delta order). VeloraDeltaAdapter checks its
+# EIP-712 domain at deploy; the Delta contract itself is the executor.
+VELORA_DELTA = "0x0000000000bbf5c5fd284e657f01bd000933c96d"  # ALTER
+
 
 def deploy():
     fee_collector = boa.load(
@@ -143,6 +149,18 @@ def deploy_burner(fee_collector):
             print(f"KyberDsloAdapter: {kyber_adapter.address}")
             registry.set_adapter(kyber_adapter.address, kyber_adapter.protocol())
             registry.activate_adapter(kyber_adapter.address)
+
+        velora_enabled = True  # ALTER: False on chains without Velora Delta
+        if velora_enabled:
+            # Registry-managed; keepers run sync_executor_approvals(delta, tokens) after collect.
+            velora_adapter = boa.load(
+                "contracts/burners/adapters/velora/VeloraDeltaAdapter.vy",
+                VELORA_DELTA,
+            )
+            # velora_adapter = boa.load_partial("contracts/burners/adapters/velora/VeloraDeltaAdapter.vy").at("")
+            print(f"VeloraDeltaAdapter: {velora_adapter.address}")
+            registry.set_adapter(velora_adapter.address, velora_adapter.settlement())
+            registry.activate_adapter(velora_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 
