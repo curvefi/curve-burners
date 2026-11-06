@@ -431,12 +431,12 @@ def test_wrong_tokens_or_receiver_invalid(harness, adapter, make_order, sell_tok
         validate(make_order(buy_tokens=[NATIVE_TOKEN]))
     with boa.reverts(custom_err("LotInactive()")):
         validate(make_order(sell_tokens=[NATIVE_TOKEN]))
-    with boa.reverts(custom_err("BadReceiver()")):
-        validate(make_order(receiver=boa.env.generate_address("thief")))
-    with boa.reverts(custom_err("BadReceiver()")):
-        validate(make_order(receiver=harness.address))
-    with boa.reverts(custom_err("BadReceiver()")):
-        validate(make_order(receiver=ZERO_ADDRESS))
+    for receiver in (boa.env.generate_address("thief"), adapter.address, ZERO_ADDRESS):
+        with boa.reverts(custom_err("BadReceiver()")):
+            validate(make_order(receiver=receiver))
+    # The auction itself is the one other receiver check_order accepts (the
+    # proceeds are forwarded by push_target); the order is otherwise unchanged.
+    assert validate(make_order(receiver=harness.address)) == ERC1271_MAGIC_VALUE
 
 
 def test_sell_amount_is_bounded_by_the_snapshot(
