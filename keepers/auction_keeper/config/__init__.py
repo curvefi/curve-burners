@@ -75,6 +75,10 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
         uniswapx:
           enabled: true
           post: false                # true: attempt the order-service POST, report its rejection
+        bebop:
+          api_key_env: BEBOP_API_KEY # optional
+          enabled: true
+          post: true
 
 Every other settlement rail gets a section named after it (``oneinch``,
 ``bebop``, ...) parsed by ``parse_rail`` (``config/rails.py``) into a
@@ -113,6 +117,7 @@ from keepers.auction_keeper.config.pricing import (
     TtlSettings,
 )
 from keepers.auction_keeper.config.rails import (
+    BebopSettings,
     CowSettings,
     CurveRoute,
     HashflowSettings,
@@ -152,6 +157,7 @@ __all__ = [
     "HashflowSettings",
     "OneInchSettings",
     "UniswapXSettings",
+    "BebopSettings",
     "TokenFilter",
     "TtlSettings",
     "expand_env",

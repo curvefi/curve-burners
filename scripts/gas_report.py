@@ -35,6 +35,7 @@ DEFAULT_TESTS = [
     "tests/burners/test_oneinch_feetaker_adapter.py",
     "tests/burners/test_oneinch_fusion_adapter.py",
     "tests/burners/test_uniswapx_adapter.py",
+    "tests/burners/test_bebop_jam_adapter.py",
     "tests/burners/test_adapter_registry.py",
     "tests/burners/test_intent_resolver.py",
 ]

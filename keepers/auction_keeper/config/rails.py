@@ -220,6 +220,17 @@ class UniswapXSettings(RailSettings):
     order_service_url: str = "https://api.uniswap.org/v2/order"
 
 
+@dataclass(frozen=True)
+class BebopSettings(RailSettings):
+    """JAM quotes worked without a key for a contract taker; a key, when
+    set, is sent as a bearer token."""
+
+    api_key_env: str | None = "BEBOP_API_KEY"
+    api_url: str = "https://api.bebop.xyz"
+    # Chain slug in the API path; defaults by chain id (BEBOP_CHAINS).
+    chain: str | None = None
+
+
 # Integer rail fields that may be zero (the rest must be positive).
 _NON_NEGATIVE_FIELDS: set[str] = {"partner_fee_bps", "slippage_ppm"}
 

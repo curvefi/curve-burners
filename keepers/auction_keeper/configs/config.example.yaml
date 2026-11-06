@@ -145,6 +145,12 @@ networks:
       # attempts the POST and records the backend's rejection.
       post: false
       # order_service_url: https://api.uniswap.org/v2/order
+    bebop:                          # BebopJamAdapter
+      api_key_env: BEBOP_API_KEY    # optional: quotes for a contract taker worked without one
+      enabled: true
+      post: true                    # quote -> check -> sign -> post every poll; false: standing asks only
+      # api_url: https://api.bebop.xyz
+      # chain: ethereum               # API chain slug; defaults by chain id
 
   gnosis:
     rpc: https://lb.drpc.org/ogrpc?network=gnosis&dkey=${DRPC_API_KEY}

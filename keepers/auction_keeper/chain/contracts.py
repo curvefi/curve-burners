@@ -682,6 +682,41 @@ class UniswapXAdapterContract(AdapterContract):
         return tuple(order), bytes(signature)
 
 
+# Bebop JamOrder as signed (adapters/bebop/jam.vy): the twelve EIP-712 fields.
+JAM_ORDER_ABI = (
+    "(address,address,uint256,uint256,uint256,address,uint256,"
+    "address[],address[],uint256[],uint256[],bytes32)"
+)
+
+
+class BebopJamAdapterContract(AdapterContract):
+    SETTLEMENT = Function("settlement()", ("address",))
+    BALANCE_MANAGER = Function("balance_manager()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function("order_for(address,address,uint256,uint256)", (JAM_ORDER_ABI, "bytes"))
+    DESCRIBE = Function("describe(uint256)", ("address", "uint256", "uint256"))
+
+    def settlement(self) -> str:
+        return to_checksum_address(self._read_one(self.SETTLEMENT))
+
+    def balance_manager(self) -> str:
+        return to_checksum_address(self._read_one(self.BALANCE_MANAGER))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(
+        self, auction: str, token: str, nonce: int, sell_amount: int = 0
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(self.ORDER_FOR, auction, token, nonce, sell_amount)
+        return tuple(order), bytes(signature)
+
+    def describe(self, partner_info: int) -> tuple[str, int, int]:
+        """(partner, partner fee bps, protocol fee bps) of a packed partnerInfo."""
+        partner, partner_fee, protocol_fee = self._read(self.DESCRIBE, partner_info)
+        return to_checksum_address(partner), partner_fee, protocol_fee
+
+
 class AuctionTaker(Contract):
     """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route."""
 
@@ -711,6 +746,7 @@ __all__ = [
     "ERC1271_MAGIC_VALUE",
     "HASHFLOW_QUOTE_ABI",
     "HASHFLOW_RFQM_CALLDATA_ABI",
+    "JAM_ORDER_ABI",
     "LOT_STAGED_TOPIC",
     "OKX_ORDER_ABI",
     "ONEINCH_ORDER_ABI",
@@ -721,6 +757,7 @@ __all__ = [
     "AdapterRegistry",
     "Auction",
     "AuctionTaker",
+    "BebopJamAdapterContract",
     "CowAdapterContract",
     "Erc20",
     "HashflowAdapterContract",

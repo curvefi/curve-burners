@@ -23,6 +23,7 @@ from keepers.auction_keeper.config.pricing import (
     parse_ttl,
 )
 from keepers.auction_keeper.config.rails import (
+    BebopSettings,
     CowSettings,
     HashflowSettings,
     KyberSettings,
@@ -84,6 +85,7 @@ class NetworkConfig:
     hashflow: HashflowSettings = HashflowSettings()
     oneinch: OneInchSettings = OneInchSettings()
     uniswapx: UniswapXSettings = UniswapXSettings()
+    bebop: BebopSettings = BebopSettings()
     # Periphery for custom executions (optional).
     auction_taker: str | None = None
 
@@ -171,6 +173,7 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
     hashflow = parse_rail(raw, name, "hashflow", HashflowSettings)
     oneinch = parse_rail(raw, name, "oneinch", OneInchSettings)
     uniswapx = parse_rail(raw, name, "uniswapx", UniswapXSettings)
+    bebop = parse_rail(raw, name, "bebop", BebopSettings)
 
     start_block = raw.get("start_block")
     if start_block is not None and (
@@ -222,6 +225,7 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
         hashflow=hashflow,
         oneinch=oneinch,
         uniswapx=uniswapx,
+        bebop=bebop,
         auction_taker=taker,
     )
 
