@@ -221,8 +221,11 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[oif.ENCODED_ORDER_BOUND])
          settler as input oracle and as the output's oracle and settler on
          this chain, no callback, and a context the output settler resolves
          to the signed amount. The fill deadline is the validity bound: the
-         escrow opens the intent only before it (and before expires, which
-         is at or after it) and the output settler fills only up to it.
+         escrow opens the intent only before it and the output settler
+         fills only up to it. Expires must equal it: the escrow refunds an
+         opened but unfilled intent only after expires, so an expires past
+         the fill deadline would let any opener park the lot in the escrow
+         beyond the lot end.
     @param _hash Permit2 digest the escrow's permitWitnessTransferFrom is
            verifying.
     @param _signature The abi-encoded StandardOrder, prefixes already
@@ -239,6 +242,7 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[oif.ENCODED_ORDER_BOUND])
     )
     assert order.user == msg.sender, oif.OrderNotValid(reason="BadUser")
     assert order.originChainId == chain.id, oif.OrderNotValid(reason="BadChain")
+    assert order.expires == order.fillDeadline, oif.OrderNotValid(reason="BadExpires")
     assert len(order.inputs) == 1, oif.OrderNotValid(reason="BadInputs")
     assert len(order.outputs) == 1, oif.OrderNotValid(reason="BadOutputs")
     assert order.inputOracle == self.output_settler, oif.OrderNotValid(reason="BadInputOracle")

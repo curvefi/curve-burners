@@ -399,9 +399,20 @@ def test_signed_amount_contexts_valid(harness, adapter, make_order, context):
     assert _validate(harness, adapter, make_order(context=context)) == ERC1271_MAGIC_VALUE
 
 
-def test_expires_and_nonce_pass_through(harness, adapter, make_order):
-    order = make_order(expires=2**32 - 1, nonce=0)
-    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
+def test_nonce_passes_through(harness, adapter, make_order):
+    assert _validate(harness, adapter, make_order(nonce=0)) == ERC1271_MAGIC_VALUE
+
+
+@pytest.mark.parametrize("offset", [1, 2**32 - 1, -1])
+def test_expires_other_than_the_fill_deadline_invalid(harness, adapter, make_order, offset):
+    # Regression: anyone can openFor a burner intent, and the escrow refunds
+    # an unfilled one only after expires. An expires far past the fill
+    # deadline (2**32 - 1 is year 2106) would park the lot in the escrow with
+    # nobody able to fill or refund it.
+    deadline = harness.frame_end()
+    expires = min(deadline + offset, 2**32 - 1)
+    with boa.reverts(custom_err("OrderNotValid(string)", "BadExpires")):
+        _validate(harness, adapter, make_order(fill_deadline=deadline, expires=expires))
 
 
 # Economics: the auction's check_order reverts bubble through the adapter.
