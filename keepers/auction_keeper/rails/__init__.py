@@ -137,10 +137,32 @@ class AdapterPublisher(ABC):
 def publisher_classes() -> dict[str, type[AdapterPublisher]]:
     """Every publisher by the ``ADAPTER_VERSION`` it serves. A new rail adds
     its class to the list."""
+    from keepers.auction_keeper.rails.bebop import BebopJamPublisher
     from keepers.auction_keeper.rails.cow import CowPublisher
+    from keepers.auction_keeper.rails.hashflow import HashflowPublisher
+    from keepers.auction_keeper.rails.kyber import KyberDsloPublisher
+    from keepers.auction_keeper.rails.okx import OKXIntentPublisher
+    from keepers.auction_keeper.rails.oneinch import (
+        OneInchFeeTakerPublisher,
+        OneInchFusionPublisher,
+        OneInchPublisher,
+    )
+    from keepers.auction_keeper.rails.uniswapx import UniswapXPublisher
+    from keepers.auction_keeper.rails.velora import VeloraDeltaPublisher
+    from keepers.auction_keeper.rails.zerox import ZeroExSettlerPublisher
 
     classes: list[type[AdapterPublisher]] = [
         CowPublisher,
+        OKXIntentPublisher,
+        KyberDsloPublisher,
+        VeloraDeltaPublisher,
+        ZeroExSettlerPublisher,
+        HashflowPublisher,
+        OneInchPublisher,
+        OneInchFeeTakerPublisher,
+        OneInchFusionPublisher,
+        UniswapXPublisher,
+        BebopJamPublisher,
     ]
     return {cls.version: cls for cls in classes}
 

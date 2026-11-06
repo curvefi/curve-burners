@@ -22,7 +22,19 @@ from keepers.auction_keeper.config.pricing import (
     parse_pricing,
     parse_ttl,
 )
-from keepers.auction_keeper.config.rails import CowSettings, parse_cow
+from keepers.auction_keeper.config.rails import (
+    BebopSettings,
+    CowSettings,
+    HashflowSettings,
+    KyberSettings,
+    OKXSettings,
+    OneInchSettings,
+    UniswapXSettings,
+    VeloraSettings,
+    ZeroExSettings,
+    parse_cow,
+    parse_rail,
+)
 
 DEFAULT_POLL_INTERVAL = 60
 DEFAULT_ORDER_TTL = 300
@@ -66,6 +78,14 @@ class NetworkConfig:
     max_open_orders: int = DEFAULT_MAX_OPEN_ORDERS
     native: NativeSettings = NativeSettings()
     cow: CowSettings = CowSettings()
+    okx: OKXSettings = OKXSettings()
+    kyber: KyberSettings = KyberSettings()
+    velora: VeloraSettings = VeloraSettings()
+    zerox: ZeroExSettings = ZeroExSettings()
+    hashflow: HashflowSettings = HashflowSettings()
+    oneinch: OneInchSettings = OneInchSettings()
+    uniswapx: UniswapXSettings = UniswapXSettings()
+    bebop: BebopSettings = BebopSettings()
     # Periphery for custom executions (optional).
     auction_taker: str | None = None
 
@@ -146,6 +166,14 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
     )
 
     cow = parse_cow(raw, name)
+    okx = parse_rail(raw, name, "okx", OKXSettings)
+    kyber = parse_rail(raw, name, "kyber", KyberSettings)
+    velora = parse_rail(raw, name, "velora", VeloraSettings)
+    zerox = parse_rail(raw, name, "zerox", ZeroExSettings)
+    hashflow = parse_rail(raw, name, "hashflow", HashflowSettings)
+    oneinch = parse_rail(raw, name, "oneinch", OneInchSettings)
+    uniswapx = parse_rail(raw, name, "uniswapx", UniswapXSettings)
+    bebop = parse_rail(raw, name, "bebop", BebopSettings)
 
     start_block = raw.get("start_block")
     if start_block is not None and (
@@ -190,6 +218,14 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
         ),
         native=native,
         cow=cow,
+        okx=okx,
+        kyber=kyber,
+        velora=velora,
+        zerox=zerox,
+        hashflow=hashflow,
+        oneinch=oneinch,
+        uniswapx=uniswapx,
+        bebop=bebop,
         auction_taker=taker,
     )
 

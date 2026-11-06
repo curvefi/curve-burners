@@ -42,6 +42,43 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
         cow:
           orderbook_url: https://api.cow.fi/mainnet   # optional: defaults by chain id
           app_data_document: '{"version":"1.1.0","appCode":"Curve","metadata":{}}'
+        okx:
+          api_key_env: OKX_API_KEY   # with OKX_SECRET_KEY and OKX_PASSPHRASE (HMAC headers)
+          enabled: true
+          post: true
+          owner_prefix: true         # UNVERIFIED signature shape for the orderbook, see OKXSettings
+        kyber:
+          enabled: true
+          post: true                 # sign-message -> validate -> orders; no key needed
+          # client_id: curve         # optional X-Client-Id (fee recipient selection)
+        velora:
+          enabled: true
+          post: true                 # price -> build locally -> validate -> POST /v2/delta/orders
+          # partner: curve           # partner string for the price and the order
+        zerox:                       # ZeroExSettlerAdapter (0x Settler gasless flows)
+          api_key_env: ZEROX_API_KEY # Gasless API key (quote + submit); without it: self-relay
+          enabled: true
+          post: true
+          relay: log                 # MetaTxn without the API: none | log | self-actions
+          routes:                    # Curve pools for the self-authored action list
+            - {token: "0x...", pool: "0x...", i: 0, j: 1}
+        hashflow:
+          api_key_env: HASHFLOW_API_KEY   # credential issued by Hashflow (every taker call)
+          enabled: true
+          post: true                 # RFQ-m quote -> check -> sign -> relay tradeRFQM (keeper mode)
+          # source: api              # the `source` identity sent with every RFQ
+          # chunk: 1000000000000000000000   # base amount per quote; default: everything available
+        oneinch:                     # plain LOP, FeeTaker orderbook and Fusion publishers
+          api_key_env: ONEINCH_API_KEY
+          enabled: true
+          post: false                # plain orders: log only (the public orderbook rejects them)
+        uniswapx:
+          enabled: true
+          post: false                # true: attempt the order-service POST, report its rejection
+        bebop:
+          api_key_env: BEBOP_API_KEY # optional
+          enabled: true
+          post: true
 
 Every other settlement rail gets a section named after it (``oneinch``,
 ``bebop``, ...) parsed by ``parse_rail`` (``config/rails.py``) into a
@@ -79,7 +116,19 @@ from keepers.auction_keeper.config.pricing import (
     PricingSettings,
     TtlSettings,
 )
-from keepers.auction_keeper.config.rails import CowSettings, RailSettings
+from keepers.auction_keeper.config.rails import (
+    BebopSettings,
+    CowSettings,
+    CurveRoute,
+    HashflowSettings,
+    KyberSettings,
+    OKXSettings,
+    OneInchSettings,
+    RailSettings,
+    UniswapXSettings,
+    VeloraSettings,
+    ZeroExSettings,
+)
 
 __all__ = [
     "DEFAULT_LOG_CHUNK",
@@ -100,6 +149,15 @@ __all__ = [
     "NetworkConfig",
     "PricingSettings",
     "RailSettings",
+    "OKXSettings",
+    "KyberSettings",
+    "VeloraSettings",
+    "CurveRoute",
+    "ZeroExSettings",
+    "HashflowSettings",
+    "OneInchSettings",
+    "UniswapXSettings",
+    "BebopSettings",
     "TokenFilter",
     "TtlSettings",
     "expand_env",

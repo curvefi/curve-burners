@@ -131,6 +131,21 @@ def set_receiver(_receiver: address):
     dutch_auction._set_receiver(_receiver)
 
 
+@external
+def push_target() -> uint256:
+    """
+    @notice DutchAuctionBurner.push_target for the harness: forward the
+            whole want balance (proceeds a rail paid to the auction itself)
+            to the configured receiver.
+    """
+    amount: uint256 = staticcall dutch_auction.want.balanceOf(self)
+    if amount != 0:
+        assert extcall dutch_auction.want.transfer(
+            dutch_auction.receiver, amount, default_return_value=True
+        )
+    return amount
+
+
 # Core hook overrides
 
 

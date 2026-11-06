@@ -231,14 +231,20 @@ def build_sources(
                 )
             sources.append(CowQuoteSource(url, http=http))
         elif name == "kyber":
-            sources.append(KyberQuoteSource(_slug(config, name, chain_id), http=http))
+            sources.append(
+                KyberQuoteSource(
+                    _slug(config, name, chain_id), http=http, client_id=config.kyber.client_id
+                )
+            )
         elif name == "velora":
             if chain_id not in VELORA_CHAINS:
                 raise ConfigError(
                     f"{config.name}: Velora does not serve chain {chain_id}; "
                     "drop 'velora' from pricing.sources"
                 )
-            sources.append(VeloraQuoteSource(chain_id, client, http=http))
+            sources.append(
+                VeloraQuoteSource(chain_id, client, http=http, partner=config.velora.partner)
+            )
         elif name == "router":
             sources.append(CurveRouterSource(curve_router_for(config, client, http=http)))
         elif name == "oneinch":
