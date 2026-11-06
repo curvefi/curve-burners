@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+.DS_Store
+gas-report.json
+auction_keeper_state*.json
+.venv/
+.tmp/
+.vyper-auditor/
+node_modules/
