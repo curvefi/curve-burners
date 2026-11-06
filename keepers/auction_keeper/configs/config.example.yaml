@@ -138,6 +138,13 @@ networks:
       # fusion_url: https://api.1inch.dev/fusion
       # fusion_auction_duration: 180     # resolver auction length (seconds), clipped to order_ttl
       # fusion_start_premium_bps: 100    # auction start amount above the curve quote (end amount)
+    uniswapx:                       # UniswapXAdapter
+      enabled: true
+      # The Uniswap order service takes only 65-byte ECDSA signatures on its own
+      # quotes: orders are built, validated and logged for fillers. true also
+      # attempts the POST and records the backend's rejection.
+      post: false
+      # order_service_url: https://api.uniswap.org/v2/order
 
   gnosis:
     rpc: https://lb.drpc.org/ogrpc?network=gnosis&dkey=${DRPC_API_KEY}

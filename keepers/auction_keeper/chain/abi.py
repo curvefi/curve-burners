@@ -108,6 +108,8 @@ KNOWN_ERRORS: dict[bytes, str] = {
         "ERC721NonexistentToken(uint256)",
         # 1inch adapters (order_for)
         "BadExpiration()",
+        # UniswapX adapter (order_for)
+        "ExceedsAvailable()",
         # AuctionTaker
         "ZeroAuction()",
         "OnlyActiveAuction()",

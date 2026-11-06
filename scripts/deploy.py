@@ -49,6 +49,10 @@ ONEINCH_LIMIT_ORDER_PROTOCOL = "0x111111125421cA6dc452d289314280a0f8842A65"  # A
 # address and layout); each adapter probes its extension at deploy.
 ONEINCH_FEE_TAKER = "0xc0DFdB9E7a392c3dBBE7c6FBe8FBC1789C9FE05e"  # ALTER
 ONEINCH_FUSION_SETTLEMENT = "0x2Ad5004c60e16E54d5007C80CE329Adde5B51Ef5"  # ALTER
+
+# UniswapX dependency (verify against the target chain before deploy): the v1
+# ExclusiveDutchOrderReactor; UniswapXAdapter reads Permit2 from it.
+UNISWAPX_REACTOR = "0x6000da47483062A0D734Ba3dc7576Ce6A0B645C4"  # ALTER
 COW_VAULT_RELAYER = (
     "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"  # ALTER: VaultRelayer (CowSwapBurner only)
 )
@@ -272,6 +276,18 @@ def deploy_burner(fee_collector):
             print(f"OneInchFusionAdapter: {fusion_adapter.address}")
             registry.set_adapter(fusion_adapter.address, fusion_adapter.limit_order_protocol())
             registry.activate_adapter(fusion_adapter.address)
+
+        uniswapx_enabled = True  # ALTER: False on chains without a UniswapX v1 reactor
+        if uniswapx_enabled:
+            # Registry-managed; keepers run sync_executor_approvals(permit2, tokens) after collect.
+            uniswapx_adapter = boa.load(
+                "contracts/burners/adapters/uniswapx/UniswapXAdapter.vy",
+                UNISWAPX_REACTOR,
+            )
+            # uniswapx_adapter = boa.load_partial("contracts/burners/adapters/uniswapx/UniswapXAdapter.vy").at("")
+            print(f"UniswapXAdapter: {uniswapx_adapter.address}")
+            registry.set_adapter(uniswapx_adapter.address, uniswapx_adapter.permit2())
+            registry.activate_adapter(uniswapx_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 

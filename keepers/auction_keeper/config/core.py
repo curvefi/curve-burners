@@ -28,6 +28,7 @@ from keepers.auction_keeper.config.rails import (
     KyberSettings,
     OKXSettings,
     OneInchSettings,
+    UniswapXSettings,
     VeloraSettings,
     ZeroExSettings,
     parse_cow,
@@ -82,6 +83,7 @@ class NetworkConfig:
     zerox: ZeroExSettings = ZeroExSettings()
     hashflow: HashflowSettings = HashflowSettings()
     oneinch: OneInchSettings = OneInchSettings()
+    uniswapx: UniswapXSettings = UniswapXSettings()
     # Periphery for custom executions (optional).
     auction_taker: str | None = None
 
@@ -168,6 +170,7 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
     zerox = parse_rail(raw, name, "zerox", ZeroExSettings)
     hashflow = parse_rail(raw, name, "hashflow", HashflowSettings)
     oneinch = parse_rail(raw, name, "oneinch", OneInchSettings)
+    uniswapx = parse_rail(raw, name, "uniswapx", UniswapXSettings)
 
     start_block = raw.get("start_block")
     if start_block is not None and (
@@ -218,6 +221,7 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
         zerox=zerox,
         hashflow=hashflow,
         oneinch=oneinch,
+        uniswapx=uniswapx,
         auction_taker=taker,
     )
 

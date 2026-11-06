@@ -96,6 +96,9 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `oneinch.orderbook_url`, `oneinch.fusion_url` | `https://api.1inch.dev/orderbook/v4.0`, `https://api.1inch.dev/fusion` | Base URLs; `/{chainId}/...` is appended. |
 | `oneinch.fusion_auction_duration` | 180 | Fusion resolver auction length (s), clipped to `order_ttl`. |
 | `oneinch.fusion_start_premium_bps` | 100 | Fusion auction start amount above the curve quote (the end amount). |
+| `uniswapx.enabled` | `true` | Serve `UniswapXAdapter`. |
+| `uniswapx.post` | `false` | Also attempt the order-service POST and record its rejection (see below). |
+| `uniswapx.order_service_url` | `https://api.uniswap.org/v2/order` | Where the attempt goes. |
 
 Adapters are never configured: each cycle the keeper reads the auction's
 `AdapterRegistry`, takes the active adapters, and matches their
@@ -106,7 +109,8 @@ Adapters are never configured: each cycle the keeper reads the auction's
 `ZeroExSettlerAdapter` → `ZeroExSettlerPublisher`,
 `HashflowAdapter` → `HashflowPublisher`,
 `OneInchAdapter` / `OneInchFeeTakerAdapter` / `OneInchFusionAdapter` → the
-three 1inch publishers). A rail section with `enabled:
+three 1inch publishers,
+`UniswapXAdapter` → `UniswapXPublisher`). A rail section with `enabled:
 false` skips its adapters. Adding a rail is one class in
 `keepers/auction_keeper/rails/`.
 
@@ -516,6 +520,22 @@ tests; no Developer Portal key was available here, so neither endpoint was
 exercised live, and whether the backends accept a non-65-byte ERC-1271
 signature from a contract maker remains the open question noted in
 `contracts/burners/README.md`.
+
+### UniswapX rail (`uniswapx`)
+
+Executor: Permit2. `UniswapXAdapter.order_for` builds a fixed-price
+fill-or-kill `ExclusiveDutchOrder` for the whole available amount with a
+fresh Permit2 nonce; the deadline is shortened to the scheduled validity;
+the pair `(abi_encode(order), adapter ++ abi_encode(order))` is validated
+against the Permit2 witness digest and logged as
+`reactor.execute(SignedOrder(order, sig))` for fillers, and recorded by
+order hash. **Known limitation**: the public Uniswap order service accepts
+only 65-byte ECDSA signatures and only orders it quoted itself, so the
+ERC-1271 signature cannot be posted to the public feed; the publisher is
+"build + validate + log". With `uniswapx.post: true` it also POSTs
+`{encodedOrder, signature, chainId}` (the `uniswapx-service` body) to
+`uniswapx.order_service_url` and records the backend's answer or rejection
+under `details.orderService` without failing the publish.
 
 Run it as a long-lived service (systemd, docker); it is stateless beyond the
 state file and safe to restart.

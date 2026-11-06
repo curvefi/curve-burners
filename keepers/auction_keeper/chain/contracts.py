@@ -648,6 +648,40 @@ class OneInchFusionAdapterContract(OneInchFeeTakerAdapterContract):
         return self.settlement()
 
 
+# UniswapX ExclusiveDutchOrder (adapters/uniswapx/uniswapx.vy): info (reactor,
+# swapper, nonce, deadline, validation contract, validation data), decay
+# window, exclusivity, input, outputs.
+UNISWAPX_ORDER_ABI = (
+    "((address,address,uint256,uint256,address,bytes),uint256,uint256,address,uint256,"
+    "(address,uint256,uint256),(address,uint256,uint256,address)[])"
+)
+
+
+class UniswapXAdapterContract(AdapterContract):
+    REACTOR = Function("reactor()", ("address",))
+    PERMIT2 = Function("permit2()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function(
+        "order_for(address,address,uint256,uint256)", (UNISWAPX_ORDER_ABI, "bytes")
+    )
+
+    def reactor(self) -> str:
+        return to_checksum_address(self._read_one(self.REACTOR))
+
+    def permit2(self) -> str:
+        return to_checksum_address(self._read_one(self.PERMIT2))
+
+    def domain_separator(self) -> bytes:
+        """Permit2's EIP-712 domain separator, as pinned by the adapter."""
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(
+        self, auction: str, token: str, nonce: int, sell_amount: int = 0
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(self.ORDER_FOR, auction, token, nonce, sell_amount)
+        return tuple(order), bytes(signature)
+
+
 class AuctionTaker(Contract):
     """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route."""
 
@@ -680,6 +714,7 @@ __all__ = [
     "LOT_STAGED_TOPIC",
     "OKX_ORDER_ABI",
     "ONEINCH_ORDER_ABI",
+    "UNISWAPX_ORDER_ABI",
     "ZEROX_ORDER_ABI",
     "AdapterConfig",
     "AdapterContract",
@@ -698,6 +733,7 @@ __all__ = [
     "OneInchAdapterContract",
     "OneInchFeeTakerAdapterContract",
     "OneInchFusionAdapterContract",
+    "UniswapXAdapterContract",
     "VeloraDeltaAdapterContract",
     "ZeroExDeployerRegistry",
     "ZeroExSettlerAdapterContract",

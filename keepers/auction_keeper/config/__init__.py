@@ -72,6 +72,9 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
           api_key_env: ONEINCH_API_KEY
           enabled: true
           post: false                # plain orders: log only (the public orderbook rejects them)
+        uniswapx:
+          enabled: true
+          post: false                # true: attempt the order-service POST, report its rejection
 
 Every other settlement rail gets a section named after it (``oneinch``,
 ``bebop``, ...) parsed by ``parse_rail`` (``config/rails.py``) into a
@@ -117,6 +120,7 @@ from keepers.auction_keeper.config.rails import (
     OKXSettings,
     OneInchSettings,
     RailSettings,
+    UniswapXSettings,
     VeloraSettings,
     ZeroExSettings,
 )
@@ -147,6 +151,7 @@ __all__ = [
     "ZeroExSettings",
     "HashflowSettings",
     "OneInchSettings",
+    "UniswapXSettings",
     "TokenFilter",
     "TtlSettings",
     "expand_env",

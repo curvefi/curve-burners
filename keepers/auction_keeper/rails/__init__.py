@@ -146,6 +146,7 @@ def publisher_classes() -> dict[str, type[AdapterPublisher]]:
         OneInchFusionPublisher,
         OneInchPublisher,
     )
+    from keepers.auction_keeper.rails.uniswapx import UniswapXPublisher
     from keepers.auction_keeper.rails.velora import VeloraDeltaPublisher
     from keepers.auction_keeper.rails.zerox import ZeroExSettlerPublisher
 
@@ -159,6 +160,7 @@ def publisher_classes() -> dict[str, type[AdapterPublisher]]:
         OneInchPublisher,
         OneInchFeeTakerPublisher,
         OneInchFusionPublisher,
+        UniswapXPublisher,
     ]
     return {cls.version: cls for cls in classes}
 

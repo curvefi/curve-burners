@@ -209,6 +209,17 @@ class OneInchSettings(RailSettings):
     fusion_start_premium_bps: int = 100
 
 
+@dataclass(frozen=True)
+class UniswapXSettings(RailSettings):
+    """The Uniswap order service accepts only its own quotes with 65-byte
+    ECDSA signatures, so ``post`` defaults to False: orders are built,
+    validated and logged for direct fills; with ``post: true`` the POST is
+    attempted and the backend's rejection is reported."""
+
+    post: bool = False
+    order_service_url: str = "https://api.uniswap.org/v2/order"
+
+
 # Integer rail fields that may be zero (the rest must be positive).
 _NON_NEGATIVE_FIELDS: set[str] = {"partner_fee_bps", "slippage_ppm"}
 
