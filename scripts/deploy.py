@@ -31,9 +31,11 @@ COMPOSABLE_COW = (
     "0xfdaFc9d1902f4e0b84f65F49f244b32b31013b74"  # ALTER: ComposableCow (CowSwapBurner only)
 )
 # 0x Settler dependency (verify against the target chain before deploy): the
-# live SettlerMetaTxn is the 0x deployer registry's ownerOf(3)
-# (0x00000000000004533Fe15556B1E086BB1A72cEae), SettlerIntent its ownerOf(4);
-# ZeroExSettlerAdapter pins one Settler and its flavor.
+# live SettlerMetaTxn is the 0x deployer registry's ownerOf(3), SettlerIntent
+# its ownerOf(4); ZeroExSettlerAdapter pins one Settler and its flavor, checks
+# the registry lists it at deploy (deployInfo and ownerOf/prev, else it
+# reverts) and stops signing once the registry no longer does.
+ZEROX_DEPLOYER = "0x00000000000004533Fe15556B1E086BB1A72cEae"  # the same on every chain
 ZEROX_SETTLER_METATXN = "0x9a6350d532ed83a970d452b736be5847b2856768"  # ALTER
 PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3"  # ALTER: canonical Permit2
 COW_VAULT_RELAYER = (
@@ -197,6 +199,7 @@ def deploy_burner(fee_collector):
             zerox_adapter = boa.load(
                 "contracts/burners/adapters/zerox/ZeroExSettlerAdapter.vy",
                 ZEROX_SETTLER_METATXN,
+                ZEROX_DEPLOYER,
                 PERMIT2,
                 False,  # intent
             )

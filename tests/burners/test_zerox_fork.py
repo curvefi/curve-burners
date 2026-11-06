@@ -106,11 +106,18 @@ SETTLER_ABI = [
 DEPLOYER_ABI = [
     {
         "type": "function",
+        "name": "prev",
+        "stateMutability": "view",
+        "inputs": [{"name": "", "type": "uint128"}],
+        "outputs": [{"name": "", "type": "address"}],
+    },
+    {
+        "type": "function",
         "name": "ownerOf",
         "stateMutability": "view",
         "inputs": [{"name": "", "type": "uint256"}],
         "outputs": [{"name": "", "type": "address"}],
-    }
+    },
 ]
 PERMIT2_ABI = [
     {
@@ -239,7 +246,11 @@ class Deployment:
             "contracts/burners/adapters/AdapterRegistry.vy", self.fee_collector.address
         )
         self.adapter = boa.load(
-            "contracts/burners/adapters/zerox/ZeroExSettlerAdapter.vy", settler, PERMIT2, intent
+            "contracts/burners/adapters/zerox/ZeroExSettlerAdapter.vy",
+            settler,
+            ZEROX_DEPLOYER,
+            PERMIT2,
+            intent,
         )
         self.burner = boa.load(
             "contracts/burners/DutchAuctionBurner.vy",
@@ -298,6 +309,10 @@ def _settle_through_live_settler(settler_address: str, intent: bool, submitter: 
     pool = _abi_contract(POOL_ABI, "CurvePool", CRVUSD_USDC_POOL)
     assert (pool.coins(0), pool.coins(1)) == (USDC, CRVUSD)
     assert bytes(deployment.adapter.domain_separator()) == bytes(permit2.DOMAIN_SEPARATOR())
+    # The adapter pinned the real registry and the flavor's feature; the
+    # live Settler it validates for is that feature's current instance.
+    assert deployment.adapter.deployer() == ZEROX_DEPLOYER
+    assert deployment.adapter.feature() == (FEATURE_INTENT if intent else FEATURE_METATXN)
 
     _lot_start, lot_end, initial_amount = deployment.stage_lot()
     market_out = pool.get_dy(0, 1, initial_amount)
@@ -419,9 +434,17 @@ def test_mainnet_real_gasless_fill_digest_recovers_the_taker():
     fork_env = boa.Env()
     with boa.swap_env(fork_env):
         _fork(rpc_url)
+        # The adapter only deploys for a Settler the registry still lists
+        # (ownerOf(3) or prev(3)); once 0x has rotated past this one, the
+        # real fill to re-derive has to be refreshed too.
+        deployer = _abi_contract(DEPLOYER_ABI, "ZeroExDeployer", ZEROX_DEPLOYER)
+        listed = {deployer.ownerOf(FEATURE_METATXN).lower(), deployer.prev(FEATURE_METATXN).lower()}
+        if REAL_METATXN_SETTLER not in listed:
+            pytest.skip(f"0x retired SettlerMetaTxn {REAL_METATXN_SETTLER}; pick a newer real fill")
         adapter = boa.load(
             "contracts/burners/adapters/zerox/ZeroExSettlerAdapter.vy",
             to_checksum_address(REAL_METATXN_SETTLER),
+            ZEROX_DEPLOYER,
             PERMIT2,
             False,
         )

@@ -6,8 +6,9 @@
 @license MIT
 @notice Minimal 0x Settler stand-in: a contract address for
         ZeroExSettlerAdapter deployments in tests (the adapter only requires
-        code at the pinned Settler; it never calls it). Settlement through
-        the real Settler and Permit2 is the fork test's job.
+        code at the pinned Settler and a ZeroExRegistryMock listing it; it
+        never calls the Settler). Settlement through the real Settler and
+        Permit2 is the fork test's job.
 @custom:kill Test-only contract; never deployed to production.
 @custom:security Deliberately trusting test double.
 """

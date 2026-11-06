@@ -35,6 +35,9 @@ STEP_DURATION = 60
 AUCTION_LENGTH = 24 * 60 * 60
 LOT_AMOUNT = 250 * WAD
 NONCE = 0xABCDEF
+# 0x deployer/registry features (ERC-721 token ids) of the two flavors.
+FEATURE_METATXN = 3
+FEATURE_INTENT = 4
 # A plausible signed action list: METATXN_TRANSFER_FROM and a BASIC swap.
 ACTIONS = [bytes.fromhex("0dfeb419") + bytes(160), bytes.fromhex("38c9c147") + bytes(256)]
 ACTIONS_HASH = hash_actions_reference(ACTIONS)
@@ -113,6 +116,20 @@ def settler_intent(settler_deployer):
 
 
 @pytest.fixture(scope="module")
+def zerox_deployer(settler_deployer, settler_metatxn, settler_intent):
+    """The 0x deployer/registry stand-in, listing both mock Settlers as the
+    current instance of their feature (3 = SettlerMetaTxn, 4 = SettlerIntent)
+    after two retired predecessors each, as on mainnet, where every feature
+    has a history (prev answers after a removal)."""
+    deployer = boa.load("contracts/testing/dutch_auction/ZeroExRegistryMock.vy")
+    for feature, settler in ((FEATURE_METATXN, settler_metatxn), (FEATURE_INTENT, settler_intent)):
+        deployer.add(feature, settler_deployer.deploy())
+        deployer.add(feature, settler_deployer.deploy())
+        deployer.add(feature, settler)
+    return deployer
+
+
+@pytest.fixture(scope="module")
 def adapter_deployer():
     return boa.load_partial("contracts/burners/adapters/zerox/ZeroExSettlerAdapter.vy")
 
@@ -123,14 +140,14 @@ def registry(role_source):
 
 
 @pytest.fixture
-def adapter(adapter_deployer, settler_metatxn, permit2):
+def adapter(adapter_deployer, settler_metatxn, zerox_deployer, permit2):
     """The SettlerMetaTxn-flavored adapter (the default of every test)."""
-    return adapter_deployer.deploy(settler_metatxn, permit2, False)
+    return adapter_deployer.deploy(settler_metatxn, zerox_deployer, permit2, False)
 
 
 @pytest.fixture
-def intent_adapter(adapter_deployer, settler_intent, permit2):
-    return adapter_deployer.deploy(settler_intent, permit2, True)
+def intent_adapter(adapter_deployer, settler_intent, zerox_deployer, permit2):
+    return adapter_deployer.deploy(settler_intent, zerox_deployer, permit2, True)
 
 
 @pytest.fixture
@@ -239,36 +256,131 @@ def _to_tuple(order) -> tuple:
 # Deployment pinning
 
 
-def test_deploy_pins_settler_flavor_permit2_and_domain(
-    adapter, intent_adapter, settler_metatxn, settler_intent, permit2
+def test_deploy_pins_settler_flavor_registry_permit2_and_domain(
+    adapter, intent_adapter, settler_metatxn, settler_intent, zerox_deployer, permit2
 ):
     assert adapter.settler() == settler_metatxn.address
     assert adapter.intent() is False
+    assert adapter.feature() == FEATURE_METATXN
     assert intent_adapter.settler() == settler_intent.address
     assert intent_adapter.intent() is True
+    assert intent_adapter.feature() == FEATURE_INTENT
     for deployed in (adapter, intent_adapter):
+        assert deployed.deployer() == zerox_deployer.address
         assert deployed.permit2() == permit2.address
         assert bytes(deployed.domain_separator()) == DOMAIN_SEPARATOR
         assert deployed.ADAPTER_VERSION() == "ZeroExSettlerAdapter"
 
 
-def test_deploy_rejects_settler_without_code(adapter_deployer, permit2):
+def test_deploy_rejects_settler_without_code(adapter_deployer, zerox_deployer, permit2):
     with boa.reverts(custom_err("BadSettler()")):
-        adapter_deployer.deploy(ZERO_ADDRESS, permit2, False)
+        adapter_deployer.deploy(ZERO_ADDRESS, zerox_deployer, permit2, False)
     with boa.reverts(custom_err("BadSettler()")):
-        adapter_deployer.deploy(boa.env.generate_address("eoa_settler"), permit2, False)
+        adapter_deployer.deploy(
+            boa.env.generate_address("eoa_settler"), zerox_deployer, permit2, False
+        )
 
 
-def test_deploy_rejects_missing_permit2(adapter_deployer, settler_metatxn):
+def test_deploy_rejects_missing_deployer(adapter_deployer, settler_metatxn, permit2):
+    with boa.reverts(custom_err("BadDeployer()")):
+        adapter_deployer.deploy(settler_metatxn, ZERO_ADDRESS, permit2, False)
+
+
+def test_deploy_rejects_missing_permit2(adapter_deployer, settler_metatxn, zerox_deployer):
     with boa.reverts(custom_err("BadPermit2()")):
-        adapter_deployer.deploy(settler_metatxn, ZERO_ADDRESS, False)
+        adapter_deployer.deploy(settler_metatxn, zerox_deployer, ZERO_ADDRESS, False)
 
 
 def test_deploy_rejects_missing_domain_separator(
-    permit2_deployer, settler_metatxn, adapter_deployer
+    permit2_deployer, settler_metatxn, zerox_deployer, adapter_deployer
 ):
     with boa.reverts(custom_err("BadDomainSeparator()")):
-        adapter_deployer.deploy(settler_metatxn, permit2_deployer.deploy(bytes(32)), False)
+        adapter_deployer.deploy(
+            settler_metatxn, zerox_deployer, permit2_deployer.deploy(bytes(32)), False
+        )
+
+
+def test_deploy_rejects_settler_the_registry_does_not_list(
+    adapter_deployer, settler_deployer, settler_metatxn, settler_intent, zerox_deployer, permit2
+):
+    # A contract 0x never deployed: the registry's own deployInfo revert
+    # bubbles (an address with code is not enough).
+    foreign = settler_deployer.deploy()
+    with boa.reverts(custom_err("ERC721InvalidOwner(address)", foreign.address)):
+        adapter_deployer.deploy(foreign, zerox_deployer, permit2, False)
+    # A 0x deployment of the other flavor: the witness type would never match.
+    with boa.reverts(custom_err("BadFlavor()")):
+        adapter_deployer.deploy(settler_intent, zerox_deployer, permit2, False)
+    with boa.reverts(custom_err("BadFlavor()")):
+        adapter_deployer.deploy(settler_metatxn, zerox_deployer, permit2, True)
+    # A 0x deployment 0x has since removed: deployInfo still knows it, the
+    # feature no longer lists it.
+    zerox_deployer.remove(settler_metatxn)
+    with boa.reverts(custom_err("SettlerRetired()")):
+        adapter_deployer.deploy(settler_metatxn, zerox_deployer, permit2, False)
+    # Only its feature is affected.
+    adapter_deployer.deploy(settler_intent, zerox_deployer, permit2, True)
+
+
+# 0x's pause: the adapter follows the deployer/registry
+
+
+def test_settler_accepted_while_current_or_previous(
+    harness, adapter, adapter_deployer, make_order, settler_deployer, zerox_deployer, permit2
+):
+    order = make_order()
+    assert zerox_deployer.ownerOf(FEATURE_METATXN) == adapter.settler()
+    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
+    # 0x deploys a newer SettlerMetaTxn: ours is now prev(3), which the 0x
+    # API keeps serving during the dwell time, and still signs.
+    zerox_deployer.add(FEATURE_METATXN, settler_deployer.deploy())
+    assert zerox_deployer.ownerOf(FEATURE_METATXN) != adapter.settler()
+    assert zerox_deployer.prev(FEATURE_METATXN) == adapter.settler()
+    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
+    # A previous Settler can still be pinned by a fresh deployment.
+    adapter_deployer.deploy(adapter.settler(), zerox_deployer, permit2, False)
+
+
+def test_settler_rejected_once_two_newer_are_deployed(
+    harness, adapter, make_order, settler_deployer, zerox_deployer
+):
+    order = make_order()
+    zerox_deployer.add(FEATURE_METATXN, settler_deployer.deploy())
+    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
+    zerox_deployer.add(FEATURE_METATXN, settler_deployer.deploy())
+    with boa.reverts(custom_err("OrderNotValid(string)", "SettlerRetired")):
+        _validate(harness, adapter, order)
+
+
+def test_settler_rejected_after_removal(
+    harness, adapter, intent_adapter, make_order, settler_deployer, zerox_deployer
+):
+    order = make_order()
+    intent_order = make_order(actions_hash=bytes(32))
+    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
+    # 0x removes the current SettlerMetaTxn (its pause): the adapter stops
+    # signing by itself, before any auction read; the other feature is
+    # untouched.
+    zerox_deployer.remove(adapter.settler())
+    with boa.reverts(custom_err("OrderNotValid(string)", "SettlerRetired")):
+        _validate(harness, adapter, order)
+    assert _validate(harness, intent_adapter, intent_order) == ERC1271_MAGIC_VALUE
+    # Removed as the previous instance: the same.
+    with boa.env.anchor():
+        zerox_deployer.add(FEATURE_METATXN, adapter.settler())
+        zerox_deployer.add(FEATURE_METATXN, settler_deployer.deploy())
+        assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
+        zerox_deployer.remove(adapter.settler())
+        with boa.reverts(custom_err("OrderNotValid(string)", "SettlerRetired")):
+            _validate(harness, adapter, order)
+    # Every instance of the feature removed: the registry's ownerOf revert
+    # bubbles, fail closed.
+    zerox_deployer.remove_all(FEATURE_METATXN)
+    with boa.reverts(custom_err("ERC721NonexistentToken(uint256)", FEATURE_METATXN)):
+        _validate(harness, adapter, order)
+    # Relisted, it signs again: the adapter holds no state of its own.
+    zerox_deployer.add(FEATURE_METATXN, adapter.settler())
+    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
 
 
 # Routing: the 0x rail is a regular registry adapter behind the prefix

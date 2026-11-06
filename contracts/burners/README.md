@@ -527,9 +527,22 @@ Permit2 (its EIP-712 domain separator is read at deploy). The live
 implementations are the 0x deployer registry's `ownerOf(3)` and `ownerOf(4)`
 (`0x00000000000004533Fe15556B1E086BB1A72cEae`, the same address on every
 chain), previous implementations keep settling, and a flavor mismatch fails
-every digest, so each Settler to be reachable is one adapter deployment. Its
-registry entry is `adapter = ZeroExSettlerAdapter, executor = Permit2`: the
-Settler's first action (`METATXN_TRANSFER_FROM` or another `METATXN_*_VIP`)
+every digest, so each Settler to be reachable is one adapter deployment. The
+adapter also pins that registry and follows it, as 0x's integration guidance
+asks (never hardcode a Settler; check `ownerOf(feature)` / `prev(feature)`
+before signing): 0x retires a Settler only there, by deploying a newer one
+or by removing a faulty one (its pause), while the retired bytecode keeps
+executing. At deploy the registry must know the Settler under the flavor's
+feature (`deployInfo`, 3 = `SettlerMetaTxn`, 4 = `SettlerIntent`;
+`BadFlavor` otherwise) and list it as the feature's current or previous
+instance (`SettlerRetired` otherwise), and every validation repeats the
+latter (`OrderNotValid(SettlerRetired)`; one registry staticcall while the
+Settler is current, two once it is the previous one), so the adapter stops
+signing by itself once 0x has removed its Settler or deployed two newer
+ones, and a new adapter deployment follows the registry. A registry revert
+(`ownerOf` once a feature has no instance left) bubbles and fails closed
+too. Its registry entry is `adapter = ZeroExSettlerAdapter, executor =
+Permit2`: the Settler's first action (`METATXN_TRANSFER_FROM` or another `METATXN_*_VIP`)
 pulls the sold token through `Permit2.permitWitnessTransferFrom`, so Permit2
 is what `sync_executor_approvals(permit2, tokens)` approves. A relayer (for
 `SettlerIntent`, an allow-listed solver) calls
@@ -549,7 +562,8 @@ exactly it), and delegates the economics to `check_order` (buy token is the
 target, recipient is the FeeCollector, amount within the snapshot,
 `minAmountOut` at or above the live quote, `deadline` no later than the lot
 end). Shape failures revert with `settler.OrderNotValid(reason)`
-(`NonCanonical`, `InvalidHash`, `BadActionsHash`, `ExceedsAvailable`); the
+(`NonCanonical`, `InvalidHash`, `BadActionsHash`, `SettlerRetired`,
+`ExceedsAvailable`); the
 auction's typed `check_order` revert bubbles unchanged, through the real
 Settler and Permit2 included, and a disabled adapter's `0xffffffff` surfaces
 as Permit2's `InvalidContractSignature`.
@@ -601,7 +615,10 @@ Emergency procedure is the CoW one with `executor = Permit2`:
 Permit2-based adapter (UniswapX, OIF, 0x): the executor reference count keeps
 the allowance while any of them is active and clears it only when the last
 one is disabled, so disabling the 0x adapter alone stops its routing at once
-but leaves the burner's allowance to Permit2 in place for the others.
+but leaves the burner's allowance to Permit2 in place for the others. 0x's
+own pause (removing the Settler from its registry) needs no action on our
+side: the adapter rejects every order for a Settler the registry no longer
+lists.
 
 ### Payment token and resync
 

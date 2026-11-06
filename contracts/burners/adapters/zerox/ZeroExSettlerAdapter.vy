@@ -22,8 +22,19 @@
      deployment pins one Settler contract and its flavor: the Settler is the
      signed permit spender and the flavor decides the witness type
      (SettlerMetaTxn signs SlippageAndActions, SettlerIntent signs Slippage;
-     a flavor mismatch fails every digest, InvalidHash). A Settler upgrade
-     means a fresh adapter deployment and a new registry entry.
+     a flavor mismatch fails every digest, InvalidHash), and the 0x
+     deployer/registry it must stay listed in: 0x retires a Settler only
+     there (a newer deployment, or remove for a faulty one), the retired
+     bytecode keeps settling, and 0x's integration guidance is to query
+     ownerOf(feature) / prev(feature) before signing rather than hardcode
+     a Settler. So the deploy probes the registry (the Settler is a 0x
+     deployment of the flavor's feature, 3 for SettlerMetaTxn or 4 for
+     SettlerIntent, and the feature's current or previous instance) and
+     every validation repeats the liveness part: the adapter stops signing
+     once 0x has removed its Settler or deployed two newer ones, as that
+     guidance intends; a new adapter deployment follows the registry. A
+     Settler upgrade thus means a fresh adapter deployment and a new
+     registry entry on our side.
      Settlement is atomic: the pull, the swap actions and the slippage check
      run in one executeMetaTxn and nothing is escrowed, so the only time
      bound is the permit deadline (at most the lot end) and no fill window
@@ -31,7 +42,11 @@
      settlement and the Settler pulls exactly the permitted amount.
 @custom:kill Stateless and immutable: nothing to pause here. Routing through
              this adapter stops immediately when the registry disables it
-             (owner or emergency owner); native take() stays untouched.
+             (owner or emergency owner), and by itself once the 0x
+             deployer/registry no longer lists the pinned Settler as its
+             feature's current or previous instance (0x's pause, reported
+             as OrderNotValid(SettlerRetired)); native take() stays
+             untouched.
 @custom:security Holds no funds and receives no allowances (the executor —
                  Permit2 — does, and spends them only under a digest this
                  adapter validated through the auction's router).
@@ -54,7 +69,12 @@
                  signature check bubble unchanged (a typed reason reaches
                  the relayer) and reports a non-magic answer, such as the
                  router's 0xffffffff for a disabled adapter, as its own
-                 InvalidContractSignature.
+                 InvalidContractSignature. The 0x deployer/registry is
+                 trusted as 0x's pause switch only: it is upgradeable (UUPS,
+                 0x governance) and the floor rests on the pinned Settler's
+                 code, so a registry that keeps listing a faulty Settler is
+                 0x's call, as for every 0x integrator, and the auction
+                 registry's disable stays the local kill.
 """
 
 from contracts.burners.adapters.zerox import settler as zerox
@@ -63,6 +83,18 @@ from contracts.utils import constants as c
 
 
 error BadSettler:
+    pass
+
+
+error BadDeployer:
+    pass
+
+
+error BadFlavor:
+    pass
+
+
+error SettlerRetired:
     pass
 
 
@@ -94,40 +126,100 @@ interface Permit2:
     def DOMAIN_SEPARATOR() -> bytes32: view
 
 
+# The 0x Settler deployer/registry (0x00000000000004533Fe15556B1E086BB1A72cEae
+# on every chain): an ERC-721 whose token per feature is owned by the
+# feature's current Settler. ownerOf reverts (ERC721NonexistentToken) once a
+# feature has no instance left, prev (NoInstance) when the current one has
+# no predecessor, deployInfo (ERC721InvalidOwner) for an address it never
+# deployed.
+interface ZeroExDeployer:
+    def ownerOf(tokenId: uint256) -> address: view
+    def prev(feature: uint128) -> address: view
+    def deployInfo(instance: address) -> (uint128, uint32): view
+
+
 ADAPTER_VERSION: public(constant(String[20])) = "ZeroExSettlerAdapter"
 # `this_adapter ++ abi_encode(Order)`: the 20-byte adapter address the
 # auction's router strips, then the bare order this contract validates.
 SIGNATURE_LEN: constant(uint256) = 20 + zerox.ENCODED_ORDER_LEN
 
+# Registry features (ERC-721 token ids) of the two gasless Settler flavors
+# (SettlerMetaTxn._tokenId, SettlerIntent._tokenId).
+FEATURE_METATXN: constant(uint256) = 3
+FEATURE_INTENT: constant(uint256) = 4
+
 # 0x wiring pinned at deploy: the Settler is the permit spender and its
-# flavor picks the witness type; Permit2 is the signer's verifying contract.
+# flavor picks the witness type and the registry feature it must stay listed
+# under; Permit2 is the signer's verifying contract.
 settler: public(immutable(address))
 intent: public(immutable(bool))
+deployer: public(immutable(address))
+feature: public(immutable(uint256))
 permit2: public(immutable(address))
 domain_separator: public(immutable(bytes32))
 
 
 @deploy
-def __init__(_settler: address, _permit2: address, _intent: bool):
+def __init__(_settler: address, _deployer: address, _permit2: address, _intent: bool):
     """
-    @notice Pin the Settler, its flavor, and Permit2 with its EIP-712 domain.
+    @notice Pin the Settler, its flavor and the 0x deployer/registry it is
+            listed in, and Permit2 with its EIP-712 domain.
+    @dev The registry must know the Settler under the flavor's feature
+         (deployInfo: a 0x deployment of the right flavor, BadFlavor
+         otherwise; deployInfo itself reverts for an address 0x never
+         deployed) and still list it as the feature's current or previous
+         instance (SettlerRetired otherwise), the check every validation
+         repeats.
     @param _settler The Settler contract (one SettlerMetaTxn or SettlerIntent
            deployment; the live ones are the deployer registry's
-           ownerOf(3) and ownerOf(4), previous ones keep settling too).
+           ownerOf(3) and ownerOf(4), their predecessors prev(3) and
+           prev(4) keep settling too).
+    @param _deployer The 0x Settler deployer/registry.
     @param _permit2 The Permit2 the Settler pulls through.
     @param _intent True for a SettlerIntent (Slippage witness, solver
            submitted), False for a SettlerMetaTxn (SlippageAndActions
            witness, permissionless relay).
     """
     assert _settler.is_contract, BadSettler()
+    assert _deployer != empty(address), BadDeployer()
     assert _permit2 != empty(address), BadPermit2()
     domain: bytes32 = staticcall Permit2(_permit2).DOMAIN_SEPARATOR()
     assert domain != empty(bytes32), BadDomainSeparator()
 
+    expected_feature: uint256 = FEATURE_METATXN
+    if _intent:
+        expected_feature = FEATURE_INTENT
+    registry: ZeroExDeployer = ZeroExDeployer(_deployer)
+    deployed_feature: uint128 = 0
+    deployed_nonce: uint32 = 0
+    deployed_feature, deployed_nonce = staticcall registry.deployInfo(_settler)
+    assert convert(deployed_feature, uint256) == expected_feature, BadFlavor()
+    assert self._listed(registry, expected_feature, _settler), SettlerRetired()
+
     self.settler = _settler
     self.intent = _intent
+    self.deployer = _deployer
+    self.feature = expected_feature
     self.permit2 = _permit2
     self.domain_separator = domain
+
+
+@internal
+@view
+def _listed(_registry: ZeroExDeployer, _feature: uint256, _settler: address) -> bool:
+    """
+    @notice Whether the registry still lists the Settler for its feature:
+            0x's requireGenuineSettler, the current instance (ownerOf) or
+            the previous one (prev, which the 0x API keeps serving during
+            the dwell time after a deployment).
+    @dev One registry staticcall while the Settler is current, two once it
+         is the previous one. A registry revert bubbles and fails closed:
+         ownerOf reverts once 0x has removed every instance of the feature,
+         prev when the current instance has none before it.
+    """
+    if staticcall _registry.ownerOf(_feature) == _settler:
+        return True
+    return staticcall _registry.prev(convert(_feature, uint128)) == _settler
 
 
 # Publishing
@@ -240,7 +332,12 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[zerox.ENCODED_ORDER_LEN])
          stripped the adapter prefix). Protocol checks revert with
          zerox.OrderNotValid(reason); the economic check is the auction's
          check_order, whose typed reverts pass through untouched. The
-         calling router lets every revert bubble. The order is static, so
+         calling router lets every revert bubble. Between the two, the
+         pinned Settler must still be the one the 0x deployer/registry
+         lists for its feature, as its current or previous instance
+         (SettlerRetired otherwise: 0x removed it, or deployed two newer
+         ones); that is 0x's pause switch and costs one or two registry
+         staticcalls per validation. The order is static, so
          its only encoding is exactly ENCODED_ORDER_LEN bytes (NonCanonical
          otherwise; a longer payload fails ABI decoding before any check
          runs). The digest binds the permit, the pinned Settler as spender
@@ -265,6 +362,11 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[zerox.ENCODED_ORDER_LEN])
     ), zerox.OrderNotValid(reason="InvalidHash")
     if self.intent:
         assert order.actions_hash == empty(bytes32), zerox.OrderNotValid(reason="BadActionsHash")
+    # 0x's pause: a Settler the registry no longer lists keeps executing,
+    # so the adapter stops signing for it on its own.
+    assert self._listed(ZeroExDeployer(self.deployer), self.feature, self.settler), (
+        zerox.OrderNotValid(reason="SettlerRetired")
+    )
 
     auction: IDutchAuction = IDutchAuction(msg.sender)
     assert order.permit.amount <= staticcall auction.available(order.permit.token), (
