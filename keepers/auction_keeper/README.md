@@ -74,12 +74,18 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `okx.owner_prefix` | `true` | UNVERIFIED: whether the posted eip1271 signature carries the owner prefix (see below). |
 | `kyber.enabled`, `kyber.post` | `true`, `true` | Serve `KyberDsloAdapter`; `post: false` logs standing asks only. |
 | `kyber.api_url`, `kyber.client_id` | `https://limit-order.kyberswap.com`, none | Maker API base (no key) and the optional `X-Client-Id` (fee recipient selection; also sent with the `kyber` price source). |
+| `velora.enabled`, `velora.post` | `true`, `true` | Serve `VeloraDeltaAdapter`; `post: false` logs standing asks only. |
+| `velora.api_url`, `velora.partner` | `https://api.paraswap.io`, none | Delta API base (no key) and the partner string sent with the price and the order (also with the `velora` price source). |
+| `velora.partner_address`, `velora.partner_fee_bps` | none, 0 | A partner fee the order signs away (`partnerAndFee`); the signed `destAmount` is grossed up so the netted floor still covers the curve. |
+| `velora.partially_fillable` | `false` | Sign the `FillableOrder` primary type (pro-rata fills) instead of the fill-or-kill `Order`. |
+| `velora.order_type` | `LIMIT` | ASSUMED: the API's order `type` for a standing ask at the curve floor (the API default is `MARKET`). |
 
 Adapters are never configured: each cycle the keeper reads the auction's
 `AdapterRegistry`, takes the active adapters, and matches their
 `ADAPTER_VERSION()` to a publisher (`CowAdapter` → `CowPublisher`,
 `OKXIntentAdapter` → `OKXIntentPublisher`,
-`KyberDsloAdapter` → `KyberDsloPublisher`). A rail section with `enabled:
+`KyberDsloAdapter` → `KyberDsloPublisher`,
+`VeloraDeltaAdapter` → `VeloraDeltaPublisher`). A rail section with `enabled:
 false` skips its adapters. Adding a rail is one class in
 `keepers/auction_keeper/rails/`.
 
@@ -243,6 +249,49 @@ taker) with a bare `timestampBelow(valid_to + 1)` predicate, validated and
 logged as `fillOrderTo(order, orderSignature)`; every fill still needs the
 operator co-signature, so this is a log rather than a permissionless
 fallback.
+
+### Velora rail (`velora`)
+
+Executor: the Delta contract itself (`adapter.settlement()`; it does the
+`transferFrom` with an empty permit). Feed mode (`post: true`): `GET
+{api_url}/v2/delta/prices?srcToken&destToken&amount=<available>&srcDecimals&destDecimals&chainId&side=SELL&userAddress=<auction>&beneficiary=<FeeCollector>[&partner]`
+(parameters and the `DeltaPrice` answer — `route.{origin,destination}.
+output.amount`, `partner`, `spender` — from the Velora SDK's
+`getDeltaPrice`, `src/methods/delta/getDeltaPrice.ts` and `types.ts`; the
+docs page "Delta swap" at docs.velora.xyz/docs/integrate/api/delta-swap
+documents the same flow through `GET /v2/quote?mode=DELTA`). The order is
+built here, not by the API: the docs' `POST /v2/delta/orders/build` wants
+the quote's `route` object verbatim (undocumented contents), so the
+publisher takes `VeloraDeltaAdapter.order_for` (owner = the auction,
+beneficiary = the FeeCollector, the whole available amount, the curve quote,
+a random nonce, no permit/metadata/bridge) and sets `deadline` = the
+scheduled validity (never past the window end), `partnerAndFee` from
+`velora.partner_address` / `partner_fee_bps` with `destAmount` grossed up
+so the fee-netted floor the adapter checks still covers the curve, and
+`expectedAmount` = max(quoted output, `destAmount`) (surplus above it is
+shared). A quote below the curve does not block the post: the floor is
+ours to set, the order simply stands until the curve meets the market. The
+pair `adapter ++ abi_encode(order)` is validated on-chain under the `Order`
+or, with `partially_fillable`, the `FillableOrder` digest, then `POST
+{api_url}/v2/delta/orders` sends `{chainId, order{owner, beneficiary,
+srcToken, destToken, srcAmount, destAmount, expectedAmount, deadline, kind:
+0, nonce, partnerAndFee, permit, metadata, bridge}, signature,
+partiallyFillable, type, partner?}` — the SDK's `DeltaOrderToPost`
+(`postDeltaOrder.ts`, `helpers/types.ts`: `DeltaAuctionOrder`); the answer
+is the stored `DeltaAuction` (`id`, `status`, `orderHash`, ...). The record
+is keyed by the order digest.
+
+Unverified: the docs describe the `signature` field as a 64-byte ERC-2098
+compact signature and the SDK comment says "EOA signatures must be
+submitted in ERC-2098 compact representation"; whether the API relays a
+long ERC-1271 signature from a contract owner is not documented and was
+not exercised (no order was submitted). `type: LIMIT` for a standing ask
+at the curve floor is an assumption (`velora.order_type`; the API default
+is `MARKET`). Only Velora's registered agents can settle.
+
+Standing-ask mode (`post: false`): the same order without the price call
+(`expectedAmount` = `destAmount`), validated and logged as
+`swapSettle(order, signature)`; a log, not a permissionless fallback.
 
 Run it as a long-lived service (systemd, docker); it is stateless beyond the
 state file and safe to restart.

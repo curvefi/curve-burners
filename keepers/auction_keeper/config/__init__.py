@@ -51,6 +51,10 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
           enabled: true
           post: true                 # sign-message -> validate -> orders; no key needed
           # client_id: curve         # optional X-Client-Id (fee recipient selection)
+        velora:
+          enabled: true
+          post: true                 # price -> build locally -> validate -> POST /v2/delta/orders
+          # partner: curve           # partner string for the price and the order
 
 Every other settlement rail gets a section named after it (``oneinch``,
 ``bebop``, ...) parsed by ``parse_rail`` (``config/rails.py``) into a
@@ -93,6 +97,7 @@ from keepers.auction_keeper.config.rails import (
     KyberSettings,
     OKXSettings,
     RailSettings,
+    VeloraSettings,
 )
 
 __all__ = [
@@ -116,6 +121,7 @@ __all__ = [
     "RailSettings",
     "OKXSettings",
     "KyberSettings",
+    "VeloraSettings",
     "TokenFilter",
     "TtlSettings",
     "expand_env",

@@ -242,7 +242,9 @@ def build_sources(
                     f"{config.name}: Velora does not serve chain {chain_id}; "
                     "drop 'velora' from pricing.sources"
                 )
-            sources.append(VeloraQuoteSource(chain_id, client, http=http))
+            sources.append(
+                VeloraQuoteSource(chain_id, client, http=http, partner=config.velora.partner)
+            )
         elif name == "router":
             sources.append(CurveRouterSource(curve_router_for(config, client, http=http)))
         elif name == "oneinch":

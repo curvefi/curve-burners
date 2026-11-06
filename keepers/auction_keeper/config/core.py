@@ -26,6 +26,7 @@ from keepers.auction_keeper.config.rails import (
     CowSettings,
     KyberSettings,
     OKXSettings,
+    VeloraSettings,
     parse_cow,
     parse_rail,
 )
@@ -74,6 +75,7 @@ class NetworkConfig:
     cow: CowSettings = CowSettings()
     okx: OKXSettings = OKXSettings()
     kyber: KyberSettings = KyberSettings()
+    velora: VeloraSettings = VeloraSettings()
     # Periphery for custom executions (optional).
     auction_taker: str | None = None
 
@@ -156,6 +158,7 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
     cow = parse_cow(raw, name)
     okx = parse_rail(raw, name, "okx", OKXSettings)
     kyber = parse_rail(raw, name, "kyber", KyberSettings)
+    velora = parse_rail(raw, name, "velora", VeloraSettings)
 
     start_block = raw.get("start_block")
     if start_block is not None and (
@@ -202,6 +205,7 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
         cow=cow,
         okx=okx,
         kyber=kyber,
+        velora=velora,
         auction_taker=taker,
     )
 

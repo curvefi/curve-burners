@@ -362,6 +362,40 @@ class KyberDsloAdapterContract(AdapterContract):
         )
 
 
+# Velora Delta order (adapters/velora/delta.vy): fourteen fields, the
+# Bridge (protocolSelector, destinationChainId, outputToken, scalingFactor,
+# protocolData) last.
+DELTA_BRIDGE_ABI = "(bytes4,uint256,address,int8,bytes)"
+DELTA_ORDER_ABI = (
+    "(address,address,address,address,uint256,uint256,uint256,uint256,uint8,uint256,uint256,"
+    f"bytes,bytes,{DELTA_BRIDGE_ABI})"
+)
+
+
+class VeloraDeltaAdapterContract(AdapterContract):
+    SETTLEMENT = Function("settlement()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function("order_for(address,address,uint256,uint256)", (DELTA_ORDER_ABI, "bytes"))
+    DESCRIBE = Function("describe(uint256)", ("address", "uint256", "bool", "bool"))
+
+    def settlement(self) -> str:
+        return to_checksum_address(self._read_one(self.SETTLEMENT))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(
+        self, auction: str, token: str, nonce: int, sell_amount: int = 0
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(self.ORDER_FOR, auction, token, nonce, sell_amount)
+        return tuple(order), bytes(signature)
+
+    def describe(self, partner_and_fee: int) -> tuple[str, int, bool, bool]:
+        """(partner, fee bps, partner takes surplus, cap surplus) of a packed partnerAndFee."""
+        partner, fee_bps, takes_surplus, cap_surplus = self._read(self.DESCRIBE, partner_and_fee)
+        return to_checksum_address(partner), fee_bps, takes_surplus, cap_surplus
+
+
 class AuctionTaker(Contract):
     """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route."""
 
@@ -385,6 +419,7 @@ class AuctionTaker(Contract):
 
 
 __all__ = [
+    "DELTA_ORDER_ABI",
     "DSLO_ORDER_ABI",
     "ERC1271_INVALID",
     "ERC1271_MAGIC_VALUE",
@@ -401,6 +436,7 @@ __all__ = [
     "Lot",
     "LotView",
     "OKXIntentAdapterContract",
+    "VeloraDeltaAdapterContract",
     "address_word",
     "lot_staged_token",
 ]

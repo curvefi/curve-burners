@@ -83,8 +83,32 @@ class KyberSettings(RailSettings):
     client_id: str | None = None
 
 
+@dataclass(frozen=True)
+class VeloraSettings(RailSettings):
+    """Velora (ex-ParaSwap) Delta: the public Delta API needs no key. The
+    order is built here from the price answer and the adapter's
+    ``order_for`` (the API's build endpoint wants an undocumented route
+    object) and posted to ``/v2/delta/orders``."""
+
+    api_key_env: str | None = None
+    api_url: str = "https://api.paraswap.io"
+    # Partner string sent with the price and the order (fee attribution).
+    partner: str | None = None
+    # A partner fee the order signs away (packed into partnerAndFee): the
+    # recipient and bps; the signed destAmount is grossed up so the netted
+    # floor still covers the curve quote. None: no partner fee.
+    partner_address: str | None = None
+    partner_fee_bps: int = 0
+    # FillableOrder (pro-rata partial fills) instead of the fill-or-kill Order
+    # primary type; the adapter accepts either digest.
+    partially_fillable: bool = False
+    # ASSUMED: the API's order `type` for a standing ask at the curve floor
+    # (MARKET is the API default; LIMIT keeps the order open until the deadline).
+    order_type: str = "LIMIT"
+
+
 # Integer rail fields that may be zero (the rest must be positive).
-_NON_NEGATIVE_FIELDS: set[str] = set()
+_NON_NEGATIVE_FIELDS: set[str] = {"partner_fee_bps"}
 
 
 def parse_cow(raw: dict[str, Any], network: str) -> CowSettings:
