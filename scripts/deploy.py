@@ -33,6 +33,13 @@ COMPOSABLE_COW = (
 COW_VAULT_RELAYER = (
     "0xC92E8bdf79f0507f65a392b0ab4667716BFE0110"  # ALTER: VaultRelayer (CowSwapBurner only)
 )
+# OKX Intent Swap dependency (verify against the target chain before deploy):
+# the production Settlement of the legacy schema (the same address on
+# Ethereum, Arbitrum, Base, BSC and X Layer; the threshold schema lives at
+# 0xC75d2cE9d0A2C67b606a7B325c16E8a1B7C15a4A); OKXIntentAdapter checks its
+# EIP-712 domain at deploy and follows its tokenApproveProxy to the OKX DEX
+# TokenApprove (the executor).
+OKX_INTENT_SETTLEMENT = "0x25ED72C3f671b626810A6dB597DCFD50F215A423"  # ALTER
 
 
 def deploy():
@@ -106,6 +113,18 @@ def deploy_burner(fee_collector):
             print(f"CowAdapter: {cow_adapter.address}")
             registry.set_adapter(cow_adapter.address, cow_adapter.vault_relayer())
             registry.activate_adapter(cow_adapter.address)
+
+        okx_enabled = True  # ALTER: False on chains without OKX Intent Swap
+        if okx_enabled:
+            # Registry-managed; keepers run sync_executor_approvals(token_approve, tokens) after collect.
+            okx_adapter = boa.load(
+                "contracts/burners/adapters/okx/OKXIntentAdapter.vy",
+                OKX_INTENT_SETTLEMENT,
+            )
+            # okx_adapter = boa.load_partial("contracts/burners/adapters/okx/OKXIntentAdapter.vy").at("")
+            print(f"OKXIntentAdapter: {okx_adapter.address}")
+            registry.set_adapter(okx_adapter.address, okx_adapter.token_approve())
+            registry.activate_adapter(okx_adapter.address)
         return burner
     raise ValueError("Burner not specified")
 

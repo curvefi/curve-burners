@@ -94,8 +94,10 @@ lives in `interfaces/IDutchAuction.vyi`, Yearn's `AuctionInfo` in
 `interfaces/IYearnAuction.vyi`, `AdapterConfig` in
 `interfaces/IAdapterRegistry.vyi`, and the ERC-165 ids, the burner interface
 id, and the ERC-1271 magic value in `utils/constants.vy`; the GPv2 constants
-in `adapters/cow/gpv2.vy` are keccak256-derived. Peers (`CowAdapter`, the resolver)
-read the burner through `IDutchAuction` alone.
+in `adapters/cow/gpv2.vy` and the OKX order type hash, domain and
+commission rules in `adapters/okx/intent_swap.vy` are keccak256-derived.
+Peers (`CowAdapter`, `OKXIntentAdapter`, the resolver) read the burner
+through `IDutchAuction` alone.
 
 ### Adapter signature format
 
@@ -161,6 +163,135 @@ runbook batches the registry disable with the burner's
 stragglers afterwards. `available` never exceeds the snapshot; a balance
 restored by donations sells again along the same curve, always in the
 FeeCollector's favor.
+
+### OKX rail: `OKXIntentAdapter`
+
+OKX Intent Swap (the intent mode of the OKX DEX aggregator API, "Onchain
+OS") is the next rail, built the same way. Its on-chain `Settlement` is a
+GPv2 fork (verified Solidity 0.8.24 source on Etherscan, no proxy), deployed
+at one address per calldata schema on Ethereum, Arbitrum, Base, BSC and X
+Layer: the legacy schema at `0x25ED72C3f671b626810A6dB597DCFD50F215A423`
+(`settle` selector `0xf1c95699`, where the volume settles) and the threshold
+schema at `0xC75d2cE9d0A2C67b606a7B325c16E8a1B7C15a4A` (`0x462c3ed1`,
+`version() == "v2.0.0-threshold-uncapped-surplus"`, solvers still being
+onboarded). Both share the EIP-712 domain name `OKX Intent Swap`, version
+`v1.0.0`, and the immutable `tokenApproveProxy`
+`0x70cBb871E8f30Fc8Ce23609E9E0Ea87B6b222F58` whose `tokenApprove()` is the
+OKX DEX `TokenApprove` `0x40aA958dd87FC8305b97f2BA922CDdCa374bcD7f` (Etherscan
+"OKX: DEX Token Approval 1", verified): a fill calls
+`TokenApproveProxy.claimTokens`, which the proxy's `allowedApprove` allowlist
+gates and forwards to `TokenApprove.claimTokens`, a plain `transferFrom` from
+the order owner. Neither Polygon nor Fraxtal is supported, so this rail is
+for Ethereum (and the other four chains). Economic principle, verified
+against the settlement source: **the signed `toTokenAmount` is the floor the
+receiver is paid for the signed `fromTokenAmount`, after every fee**. Every
+order is fill-or-kill: `TradeLib.extractFlags` rejects the partial-fill bit
+(and the buy-order bit; only `exactIn` exists), the whole `fromTokenAmount`
+is pulled from the owner (commissions flagged "ToC" straight to their
+recipients, the rest to the settlement), the gross proceeds are
+`netFrom * fromPrice / toPrice` at the solver's clearing prices, to-token
+commissions and the solver fee come off them, and the payout to the receiver
+must still cover `toTokenAmount` (`"toTokenAmount not respected"`); the
+threshold schema's output-shortfall gate is capped by the same floor. The
+order uid (`digest ++ owner ++ validTo`) is marked filled, so no order
+settles twice. Surplus (whatever is left on the settlement after payouts) is
+shared among the batch's participants, the from-side share going to the
+owner (the burner, where it is inventory again) and the to-side share to the
+receiver. `settle` is `onlySolver`: only KYB'd, owner-allowlisted solvers
+fill, as with CoW, and there is no permissionless on-chain fill.
+
+`adapters/okx/intent_swap.vy` holds the signed order type (the eleven
+EIP-712 fields with `commissionInfos` last — exactly the quote API's
+`signData.message`), the type hashes, the domain, the hashStruct with the
+commission array hashed as its element hashes (`OrderLib.hash`), the uid
+packing, the trade flag layout (`EIP1271_TRADE_FLAGS = 0x40`: scheme bits
+5-6) and the commission rules of `FeeLib` (at most three entries, each
+exactly one direction, a recipient for a paid entry, 3% total, paid entries
+sharing one direction and one fund flow). `OKXIntentAdapter.vy` is
+stateless and immutable and pinned to one settlement: at deploy it rebuilds
+the domain from the fixed name and version, the chain and the settlement
+address, checks it against the settlement's `domainSeparator` (so a wrong
+address, a fork with another domain or another protocol version fails the
+deployment), and follows `tokenApproveProxy().tokenApprove()` to the
+approval target. The registry entry is `adapter = OKXIntentAdapter, executor
+= TokenApprove` (`adapter.token_approve()`), what
+`sync_executor_approvals(token_approve, tokens)` approves; one adapter per
+settlement, the two sharing the executor (the registry refcounts it). A
+solver settles a trade with `flags = 0x40` and `signature = burner ++
+OKXIntentAdapter ++ abi.encode(order)`; `Signing.recoverEip1271Signer`
+reads the owner from the first 20 bytes and forwards the rest verbatim to
+the owner's `isValidSignature` with the EIP-712 digest (and requires the
+signed `owner` field to be that owner), the burner strips the adapter
+prefix, and the adapter recomputes the digest from the bare order and
+checks the shape: canonical encoding, the burner as `owner`, the `exactIn`
+mode and no partial-fill flag, commissions the settlement accepts
+(`NonCanonical`, `InvalidHash`, `BadOwner`, `BadOrderFlags`,
+`BadCommissionDirection`, `ZeroFeeRecipient`, `CommissionTooHigh`,
+`MixedCommissionDirections`, `MixedCommissionFlows`), then hands the tuple
+to the auction's `check_order` — buy token is the target, the receiver is
+the FeeCollector (an empty `receiver` means the owner, as the protocol
+resolves it, and fails there), sell amount within the snapshot, buy amount
+at or above the live quote, `validTo` (inclusive on both sides) no later
+than the lot end. The native-coin placeholder is a legal buy token on the
+settlement but never the target, so it fails there too. `appData` and the
+commissions themselves pass through: `appData` has no on-chain effect
+(the API sets it per quote; `order_for` takes it as a salt), and every
+commission or solver fee only lowers the solver's margin above the floor.
+Shape failures revert with `intent_swap.OrderNotValid(reason)`; the
+auction's typed `check_order` revert bubbles unchanged through the burner
+and through the settlement (a Solidity high-level call lets the callee's
+revert data through), while a non-magic answer (the router's `0xffffffff`
+for a disabled adapter) is reported as the settlement's own `"invalid
+eip1271 signature"`. The settlement checks the contract signature on every
+fill, so disabling the adapter stops every unfilled order at once; the
+allowance sync is hygiene here, not the step that stops fills.
+
+`OKXIntentAdapter.order_for(burner, token, sell_amount, app_data)` returns
+the publishable pair for a live lot: the whole available amount by default,
+priced at the current block, to the FeeCollector, no commissions, expiring
+at the lot end, and the signature `adapter ++ abi.encode(order)`. A
+published order is a standing ask like the CoW one: the burner keeps
+accepting it as the curve decays below it, and a publisher re-posts lower
+(a different `toTokenAmount` is a new uid; equal fields need another
+`appData`). `describe(payload)` decodes a bare payload into its order, its
+digest and its uid, the key of the settlement's `filledAmount(uid)` and
+`invalidateOrder(uid)` (owner-only; the burner has no such call, orders
+simply expire). Keeper flow through the API (every endpoint requires an OKX
+Onchain OS API key — `OK-ACCESS-KEY`, HMAC-signed requests — including the
+quote): `GET /api/v6/dex/aggregator/quote?chainIndex=1&mode=intent&swapMode=exactIn&fromTokenAddress=<lot>&toTokenAddress=<target>&amount=<n>&userWalletAddress=<burner>&swapReceiverAddress=<FeeCollector>&signingScheme=eip1271&slippagePercent=<s>&expiration=<seconds>`
+returns `quoteId` and `signData` (`domain.verifyingContract` names the
+settlement the order is for, `message` is the order with OKX's
+`commissionInfos` and `appData`); the keeper checks
+`message.toTokenAmount >= getAmountNeeded(token, n)` (or `eth_call`s the
+burner's `isValidSignature` on the digest), then `POST
+/api/v6/dex/aggregator/intent/create-order` with the message fields,
+`quoteId`, `signingScheme = "eip1271"` and `signature = adapter ++
+abi.encode(message)`; the orderbook runs its auction and the winning solver
+settles within the quote's expiration (180 s by default, 300 s at most).
+Open questions, not verifiable without an API key: whether the orderbook
+prefixes the owner to an `eip1271` signature itself or expects `burner ++
+adapter ++ abi.encode(message)` from the submitter (the on-chain settle
+calldata needs the owner prefix; the solver SDK passes the orderbook's
+bytes verbatim), and whether it `eth_call`s the owner's ERC-1271 before
+relaying an order (the docs say it does, and that a long signature is
+fine). The quote's `verifyingContract` decides which deployed adapter to
+use.
+
+Limitations: one order per fill and no partial fills (the protocol's
+choice); the API path needs an OKX API key and the solver set is OKX's
+allowlist, so the rail has no permissionless fallback (CoW's is the
+orderbook, 1inch's is any taker); `appData` is free; the executor is the
+OKX DEX-wide `TokenApprove`, whose `claimTokens` any contract on the
+unverified `TokenApproveProxy`'s allowlist (the two settlements, the OKX
+DEX routers) may call for any owner it names — approving it is the same
+trust every OKX DEX user extends, bounded here by the staged inventory, and
+listing the adapter is the owner's review of it.
+
+Emergency procedure is the CoW one with `executor = token_approve`:
+`registry.disable_adapter(OKXIntentAdapter)` batched with
+`sync_executor_approvals(token_approve, tokens)`
+(`scripts/emergency_cow_disable.py` takes the executor as an argument); the
+disable alone already stops every fill, as the mainnet fork test shows.
 
 ### Payment token and resync
 
