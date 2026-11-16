@@ -22,6 +22,8 @@ from eth_abi import encode
 from tests.burners.adapters.oneinch.test_module import (
     ALLOW_MULTIPLE_FILLS_FLAG,
     EXPIRATION_OFFSET,
+    NONCE_MASK,
+    NONCE_OFFSET,
     ORDER_ABI,
     ROUTER,
     domain_separator_reference,
@@ -211,7 +213,8 @@ def test_mainnet_real_router_fills_a_published_order():
             target.address,
             initial_amount,
             quote,
-            ALLOW_MULTIPLE_FILLS_FLAG | (lot_end << EXPIRATION_OFFSET),
+            # No flags: one fill of any size, tracked by the nonce bit.
+            ((SALT & NONCE_MASK) << NONCE_OFFSET) | (lot_end << EXPIRATION_OFFSET),
         )
         assert signature == bytes.fromhex(adapter.address[2:]) + encode(
             [ORDER_ABI, "bytes"], [order, b""]
@@ -249,30 +252,48 @@ def test_mainnet_real_router_fills_a_published_order():
         assert sell_token.balanceOf(taker) == quarter
         assert target.balanceOf(fee_collector) == quarter_quote
         assert burner.available(sell_token) == initial_amount - quarter
-        assert router.remainingInvalidatorForOrder(burner.address, digest) == (
-            initial_amount - quarter
-        )
-
-        # The router checks a contract signature on the first fill only: once
-        # the adapter is disabled, the remainder of this order still fills at
-        # its signed price, while a fresh order does not.
-        with boa.env.prank(emergency_owner):
-            registry.disable_adapter(adapter)
-        fresh, fresh_sig = adapter.order_for(burner.address, sell_token.address, SALT + 1)
-        with boa.env.prank(taker), boa.reverts(custom_err("BadSignature()", nested=True)):
-            router.fillContractOrder(
-                _router_order(tuple(fresh)), bytes(fresh_sig), quarter, TAKER_MAKING_AMOUNT
-            )
-        with boa.env.prank(taker):
+        # The fill burnt the order's nonce bit: the router keeps no remainder
+        # it could fill without asking the burner again.
+        with boa.env.prank(taker), boa.reverts(custom_err("BitInvalidatedOrder()", nested=True)):
             router.fillContractOrder(router_order, signature, quarter, TAKER_MAKING_AMOUNT)
+
+        # An order the router would track by remaining amount (partial and
+        # multiple fills on) is validated on its first fill only; the adapter
+        # never signs one.
+        multi = (*order[:7], order[7] | ALLOW_MULTIPLE_FILLS_FLAG | ((SALT + 7) << NONCE_OFFSET))
+        multi_sig = bytes.fromhex(adapter.address[2:]) + encode([ORDER_ABI, "bytes"], [multi, b""])
+        with boa.env.prank(taker), boa.reverts(custom_err("BadSignature()", nested=True)):
+            router.fillContractOrder(_router_order(multi), multi_sig, quarter, TAKER_MAKING_AMOUNT)
+
+        # Every fill is validated live. A FeeCollector kill of the token stops
+        # an order published before it, with the allowance untouched...
+        second, second_sig = adapter.order_for(burner.address, sell_token.address, SALT + 1)
+        second = _router_order(tuple(second))
+        second_sig = bytes(second_sig)
+        with boa.env.prank(emergency_owner):
+            fee_collector.set_killed([(sell_token.address, Epoch.EXCHANGE)])
+        assert sell_token.allowance(burner, ROUTER) >= initial_amount
+        with boa.env.prank(taker), boa.reverts(custom_err("BadSignature()", nested=True)):
+            router.fillContractOrder(second, second_sig, quarter, TAKER_MAKING_AMOUNT)
+        # ...and the same order fills once the kill is lifted.
+        with boa.env.prank(owner):
+            fee_collector.set_killed([(sell_token.address, 0)])
+        with boa.env.prank(taker):
+            router.fillContractOrder(second, second_sig, quarter, TAKER_MAKING_AMOUNT)
         assert sell_token.balanceOf(taker) == 2 * quarter
         assert target.balanceOf(fee_collector) == 2 * quarter_quote
 
-        # The emergency procedure completes with the allowance sync: with the
-        # executor released, the remainder cannot be pulled any more.
+        # So does a registry disable, for an order published before it.
+        third, third_sig = adapter.order_for(burner.address, sell_token.address, SALT + 2)
+        with boa.env.prank(emergency_owner):
+            registry.disable_adapter(adapter)
+        with boa.env.prank(taker), boa.reverts(custom_err("BadSignature()", nested=True)):
+            router.fillContractOrder(
+                _router_order(tuple(third)), bytes(third_sig), quarter, TAKER_MAKING_AMOUNT
+            )
+
+        # The allowance sync completes the emergency procedure as hygiene.
         with boa.env.prank(keeper):
             burner.sync_executor_approvals(ROUTER, [sell_token.address])
         assert sell_token.allowance(burner, ROUTER) == 0
-        with boa.env.prank(taker), boa.reverts():
-            router.fillContractOrder(router_order, signature, quarter, TAKER_MAKING_AMOUNT)
         assert burner.available(sell_token) == initial_amount - 2 * quarter

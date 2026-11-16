@@ -53,8 +53,8 @@ struct Fees:
     whitelist_discount: uint256  # 1e2 numerator: whitelisted takers pay this share of resolver_fee
 
 
-# The receivers of the post-interaction header; custom is empty when the
-# flag is unset (the taking tokens then go to the maker).
+# The receivers of the post-interaction header; custom is empty when, and
+# only when, the flag is unset (the taking tokens then go to the maker).
 struct Receivers:
     integrator: address
     protocol: address
@@ -253,6 +253,11 @@ def _parse_post_header(_data: Bytes[oneinch.MAX_EXTENSION]) -> (Receivers, uint2
     @notice The flags and receivers opening the post-interaction extraData,
             as FeeTaker._postInteraction reads them; returns the receivers
             (custom empty when the flag is unset) and the next position.
+    @dev FeeTaker branches on the flag, not on the address: a flagged zero
+         receiver is paid literally, with no maker fallback. It is rejected
+         here (BadCustomReceiver), so an empty custom receiver always means
+         an unset flag and _taking_receiver resolves exactly like the
+         settlement.
     """
     assert len(_data) >= POST_HEADER_LEN, oneinch.OrderNotValid(reason="BadPostInteraction")
     flags: uint256 = convert(slice(_data, 0, 1), uint256)
@@ -267,6 +272,9 @@ def _parse_post_header(_data: Bytes[oneinch.MAX_EXTENSION]) -> (Receivers, uint2
             oneinch.OrderNotValid(reason="BadPostInteraction")
         )
         receivers.custom = convert(slice(_data, POST_HEADER_LEN, TARGET_LEN), address)
+        assert receivers.custom != empty(address), (
+            oneinch.OrderNotValid(reason="BadCustomReceiver")
+        )
         pos += TARGET_LEN
     return receivers, pos
 
@@ -277,6 +285,9 @@ def _taking_receiver(_receivers: Receivers, _maker: address) -> address:
     """
     @notice Where the post-interaction sends the taking tokens net of fees:
             the custom receiver when flagged, else the maker.
+    @dev `_receivers` must come from _parse_post_header, which rejects a
+         flagged zero receiver: only then does an empty custom receiver
+         stand for an unset flag.
     """
     if _receivers.custom == empty(address):
         return _maker

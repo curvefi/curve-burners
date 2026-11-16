@@ -28,9 +28,10 @@ from tests.burners.adapters.oneinch.test_fork import (
     _rpc_url,
 )
 from tests.burners.adapters.oneinch.test_module import (
-    ALLOW_MULTIPLE_FILLS_FLAG,
     EXPIRATION_OFFSET,
     HAS_EXTENSION_FLAG,
+    NONCE_MASK,
+    NONCE_OFFSET,
     ORDER_ABI,
     ROUTER,
     build_extension,
@@ -194,9 +195,10 @@ def test_mainnet_real_fee_taker_splits_a_published_order():
             target.address,
             initial_amount,
             quote,
-            ALLOW_MULTIPLE_FILLS_FLAG
-            | HAS_EXTENSION_FLAG
+            # One fill of any size, tracked by the nonce bit.
+            HAS_EXTENSION_FLAG
             | POST_INTERACTION_CALL_FLAG
+            | ((SALT & NONCE_MASK) << NONCE_OFFSET)
             | (lot_end << EXPIRATION_OFFSET),
         )
         assert signature == bytes.fromhex(adapter.address[2:]) + encode(
@@ -250,22 +252,71 @@ def test_mainnet_real_fee_taker_splits_a_published_order():
         assert target.balanceOf(fee_collector) >= linear
         assert target.balanceOf(FEE_TAKER) == 0
         assert burner.available(sell_token) == initial_amount - third
-        assert router.remainingInvalidatorForOrder(burner.address, digest) == (
-            initial_amount - third
-        )
 
-        # Emergency: a disable alone leaves the remainder fillable (first
-        # fill signature check); the allowance sync ends it.
+        # The fill burnt the order's nonce bit: the router keeps no remainder
+        # it could fill without asking the burner again.
+        with (
+            boa.env.prank(resolver),
+            boa.reverts(custom_err("BitInvalidatedOrder()", nested=True)),
+        ):
+            router.fillContractOrderArgs(
+                router_order, signature, third, _taker_traits(extension), extension
+            )
+
+        # A flagged zero custom receiver: the real FeeTaker would pay the zero
+        # address (it branches on the flag), so the adapter must not read it
+        # as "no custom receiver". Rejected by name on an eth_call, and as the
+        # router's BadSignature inside a fill.
+        zero_extension = build_extension(
+            fee_taker_fields(
+                FEE_TAKER,
+                encode_fees(*FEES),
+                [resolver],
+                integrator,
+                protocol_fee_receiver,
+                ZERO_ADDRESS,
+            )
+        )
+        zero_order = (
+            bind_salt_reference(SALT + 1, zero_extension),
+            *order[1:7],
+            order[7] | (1 << NONCE_OFFSET),
+        )
+        zero_signature = bytes.fromhex(adapter.address[2:]) + encode(
+            [ORDER_ABI, "bytes"], [zero_order, zero_extension]
+        )
+        zero_digest = bytes(router.hashOrder(_router_order(zero_order)))
+        with (
+            boa.env.prank(ROUTER),
+            boa.reverts(custom_err("OrderNotValid(string)", "BadCustomReceiver")),
+        ):
+            burner.isValidSignature(zero_digest, zero_signature)
+        with boa.env.prank(resolver), boa.reverts(custom_err("BadSignature()", nested=True)):
+            router.fillContractOrderArgs(
+                _router_order(zero_order),
+                zero_signature,
+                third,
+                _taker_traits(zero_extension),
+                zero_extension,
+            )
+        assert target.balanceOf(ZERO_ADDRESS) == 0
+
+        # Emergency: every fill is validated live, so a disable stops an order
+        # published before it; the allowance sync is hygiene.
+        fresh, fresh_signature = adapter.order_for(
+            burner.address, sell_token.address, SALT + 2, 0, extension
+        )
         with boa.env.prank(emergency_owner):
             registry.disable_adapter(adapter)
-        with boa.env.prank(resolver):
+        with boa.env.prank(resolver), boa.reverts(custom_err("BadSignature()", nested=True)):
             router.fillContractOrderArgs(
-                router_order, signature, third, _taker_traits(extension), extension
+                _router_order(tuple(fresh)),
+                bytes(fresh_signature),
+                third,
+                _taker_traits(extension),
+                extension,
             )
-        assert sell_token.balanceOf(resolver) == 2 * third
+        assert sell_token.balanceOf(resolver) == third
         with boa.env.prank(keeper):
             burner.sync_executor_approvals(ROUTER, [sell_token.address])
-        with boa.env.prank(resolver), boa.reverts():
-            router.fillContractOrderArgs(
-                router_order, signature, third, _taker_traits(extension), extension
-            )
+        assert sell_token.allowance(burner, ROUTER) == 0

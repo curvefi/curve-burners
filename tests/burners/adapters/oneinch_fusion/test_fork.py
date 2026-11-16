@@ -27,9 +27,10 @@ from tests.burners.adapters.oneinch.test_fork import (
     _rpc_url,
 )
 from tests.burners.adapters.oneinch.test_module import (
-    ALLOW_MULTIPLE_FILLS_FLAG,
     EXPIRATION_OFFSET,
     HAS_EXTENSION_FLAG,
+    NONCE_MASK,
+    NONCE_OFFSET,
     ROUTER,
     build_extension,
 )
@@ -53,6 +54,7 @@ from tests.burners.adapters.oneinch_fusion.test_module import (
     encode_surplus,
     fusion_fields,
 )
+from tests.burners.conftest import custom_err
 from tests.burners.test_dutch_auction_v2 import (
     FLOOR_TOTAL,
     START_TOTAL,
@@ -168,9 +170,10 @@ def test_mainnet_real_settlement_fills_a_published_order_during_the_auction():
             target.address,
             initial_amount,
             quote,
-            ALLOW_MULTIPLE_FILLS_FLAG
-            | HAS_EXTENSION_FLAG
+            # One fill of any size, tracked by the nonce bit.
+            HAS_EXTENSION_FLAG
             | POST_INTERACTION_CALL_FLAG
+            | ((SALT & NONCE_MASK) << NONCE_OFFSET)
             | (lot_end << EXPIRATION_OFFSET),
         )
         router_order = _router_order(order)
@@ -216,14 +219,34 @@ def test_mainnet_real_settlement_fills_a_published_order_during_the_auction():
         assert target.balanceOf(SETTLEMENT) == 0
         assert burner.available(sell_token) == initial_amount - half
 
-        # After the auction the rest fills at the fee-grossed linear price
-        # and the FeeCollector gets exactly the base (fees out, no surplus).
-        boa.env.time_travel(seconds=AUCTION_DURATION)
-        before = target.balanceOf(fee_collector)
-        with boa.env.prank(resolver):
+        # The fill burnt the order's nonce bit: the router keeps no remainder
+        # it could fill without asking the burner again.
+        with (
+            boa.env.prank(resolver),
+            boa.reverts(custom_err("BitInvalidatedOrder()", nested=True)),
+        ):
             router.fillContractOrderArgs(
                 router_order, signature, half, _taker_traits(extension), extension
             )
-        linear_rest = -(-quote * half // initial_amount)
-        assert linear_rest <= target.balanceOf(fee_collector) - before <= linear_rest + 1
-        assert burner.available(sell_token) == initial_amount - 2 * half
+
+        # After the auction the rest, re-posted under a fresh nonce, fills at
+        # the fee-grossed linear price and the FeeCollector gets exactly the
+        # base (fees out, no surplus).
+        boa.env.time_travel(seconds=AUCTION_DURATION)
+        rest, rest_signature = adapter.order_for(
+            burner.address, sell_token.address, SALT + 1, 0, extension
+        )
+        rest = tuple(rest)
+        assert rest[5] == initial_amount - half
+        before = target.balanceOf(fee_collector)
+        with boa.env.prank(resolver):
+            router.fillContractOrderArgs(
+                _router_order(rest),
+                bytes(rest_signature),
+                rest[5],
+                _taker_traits(extension),
+                extension,
+            )
+        # At most a wei of rounding per fee leg in the receiver's favour.
+        assert rest[6] <= target.balanceOf(fee_collector) - before <= rest[6] + 2
+        assert burner.available(sell_token) == 0

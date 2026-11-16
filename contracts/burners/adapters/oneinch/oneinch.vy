@@ -88,6 +88,8 @@ UNWRAP_WETH_FLAG: constant(uint256) = 1 << 247
 # from bit 120) and series (40 bits from bit 160).
 EXPIRATION_OFFSET: constant(uint256) = 80
 EXPIRATION_MASK: constant(uint256) = 2**40 - 1
+NONCE_OFFSET: constant(uint256) = 120
+NONCE_MASK: constant(uint256) = 2**40 - 1
 
 # OrderLib.isValidExtension: the low 160 bits of the salt commit to the
 # extension hash.
@@ -185,6 +187,37 @@ def _words_digest(_words: OrderWords, _domain_separator: bytes32) -> bytes32:
 @pure
 def _has_flag(_maker_traits: uint256, _flag: uint256) -> bool:
     return _maker_traits & _flag != 0
+
+
+@internal
+@pure
+def _is_single_fill(_maker_traits: uint256) -> bool:
+    """
+    @notice MakerTraitsLib.useBitInvalidator: partial fills or multiple
+            fills are off, so the protocol tracks the order by its nonce
+            bit instead of a remaining amount. Such an order fills at most
+            once (the fill burns the bit) and OrderMixin._fillContractOrder
+            asks the maker for its contract signature on that fill, since
+            the remaining amount it compares is always the whole order. An
+            order with both on is validated on its first fill only and
+            keeps filling from the cached remainder.
+    """
+    return (
+        self._has_flag(_maker_traits, NO_PARTIAL_FILLS_FLAG)
+        or not self._has_flag(_maker_traits, ALLOW_MULTIPLE_FILLS_FLAG)
+    )
+
+
+@internal
+@pure
+def _nonce_traits(_salt: uint256) -> uint256:
+    """
+    @notice The maker-traits nonce field of a published single-fill order:
+            the low 40 bits of the publisher's salt. A fill burns the
+            maker's bit for this nonce, so live orders need distinct
+            nonces and a filled one is never reused.
+    """
+    return (_salt & NONCE_MASK) << NONCE_OFFSET
 
 
 @internal

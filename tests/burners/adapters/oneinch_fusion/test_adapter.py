@@ -24,6 +24,8 @@ from tests.burners.adapters.oneinch.test_module import (
     ALLOW_MULTIPLE_FILLS_FLAG,
     EXPIRATION_OFFSET,
     HAS_EXTENSION_FLAG,
+    NONCE_MASK,
+    NONCE_OFFSET,
     ORDER_ABI,
     ROUTER_NAME,
     ROUTER_VERSION,
@@ -70,7 +72,9 @@ TAKER_MAKING_AMOUNT = 1 << 255
 ERC1271_MAGIC_VALUE = bytes.fromhex("1626ba7e")
 ERC1271_INVALID = bytes.fromhex("ffffffff")
 
-PUBLISHED_FLAGS = ALLOW_MULTIPLE_FILLS_FLAG | HAS_EXTENSION_FLAG | POST_INTERACTION_CALL_FLAG
+# One fill of any size (partial fills on, multiple fills off), the shape
+# order_for publishes.
+PUBLISHED_FLAGS = HAS_EXTENSION_FLAG | POST_INTERACTION_CALL_FLAG
 FEES = (500, 40, 1000, 50)
 # The resolver auction of the tests: 3 minutes from 1% down through two
 # points, no gas bump; a 50% surplus fee above the estimate.
@@ -480,14 +484,47 @@ def test_auction_must_end_within_the_order_and_estimate_cover_the_order(
     )
 
 
-def test_custom_receiver_is_the_auction_receiver(make_fields, make_order, validate):
-    # No custom receiver: the settlement pays the maker, the auction itself, an
-    # accepted receiver (push_target forwards); a third party still fails.
+def test_custom_receiver_cases(harness, make_fields, make_order, validate, proceeds_receiver):
+    # Flagged, the auction's receiver (the published shape).
+    extension = build_extension(make_fields(custom_receiver=proceeds_receiver))
+    assert validate(make_order(extension), extension) == ERC1271_MAGIC_VALUE
+    # Flagged, the auction itself: an accepted receiver (push_target forwards).
+    extension = build_extension(make_fields(custom_receiver=harness.address))
+    assert validate(make_order(extension), extension) == ERC1271_MAGIC_VALUE
+    # No custom receiver: the post-interaction pays the maker, the auction.
     extension = build_extension(make_fields(custom_receiver=None))
     assert validate(make_order(extension), extension) == ERC1271_MAGIC_VALUE
+    # Flagged, a third party.
     extension = build_extension(make_fields(custom_receiver=boa.env.generate_address("thief")))
     with boa.reverts(custom_err("BadReceiver()")):
         validate(make_order(extension), extension)
+
+
+def test_flagged_zero_custom_receiver_is_rejected(make_fields, make_order, validate):
+    # The post-interaction branches on the flag, not on the address: a
+    # flagged zero receiver is paid literally. Reading it as "no custom
+    # receiver" would price the order as paying the maker.
+    extension = build_extension(make_fields(custom_receiver=ZERO_ADDRESS))
+    with boa.reverts(custom_err("OrderNotValid(string)", "BadCustomReceiver")):
+        validate(make_order(extension), extension)
+
+
+def test_settlement_pays_the_receiver_the_adapter_resolved(
+    harness, make_fields, make_order, want, resolver, fill
+):
+    making = LOT_AMOUNT // 4
+    # Flagged zero: the settlement would pay the zero address; the fill
+    # never gets the auction's signature.
+    extension = build_extension(make_fields(custom_receiver=ZERO_ADDRESS))
+    order = make_order(extension)
+    with boa.reverts(custom_err("BadSignature()")):
+        fill(order, extension, resolver, making, TAKER_MAKING_AMOUNT)
+    # Unflagged: the settlement pays the maker, as the adapter resolved.
+    extension = build_extension(make_fields(custom_receiver=None))
+    order = make_order(extension)
+    fill(order, extension, resolver, making, TAKER_MAKING_AMOUNT)
+    assert want.balanceOf(harness.address) >= _linear(order, making)
+    assert want.balanceOf(ZERO_ADDRESS) == 0
 
 
 def test_auction_economics_revert_bubbles_through_adapter(
@@ -515,7 +552,8 @@ def test_order_for_builds_the_publishable_pair(
         want.address,
         LOT_AMOUNT,
         quote,
-        _traits(harness.frame_end()),
+        # The nonce is the low 40 bits of the publisher's salt.
+        _traits(harness.frame_end()) | ((SALT & NONCE_MASK) << NONCE_OFFSET),
     )
     assert bytes(signature) == _signature(adapter, order, extension)
     assert validate(order, extension, bytes(signature)) == ERC1271_MAGIC_VALUE
@@ -593,6 +631,62 @@ def test_fill_after_the_auction_pays_the_linear_floor(
     # Fees out, no surplus left above the estimate: the receiver gets the
     # base (and a wei of rounding in its favour at most).
     assert linear <= want.balanceOf(proceeds_receiver) <= linear + 1
+
+
+def test_an_order_fills_once(harness, adapter, sell_token, extension, resolver, fill):
+    order, _ = adapter.order_for(harness.address, sell_token.address, SALT, 0, extension)
+    order = tuple(order)
+    quarter = LOT_AMOUNT // 4
+    fill(order, extension, resolver, quarter, TAKER_MAKING_AMOUNT)
+    # The fill burnt the order's nonce bit: there is no remainder the
+    # protocol could keep filling without asking the auction again.
+    with boa.reverts(custom_err("BitInvalidatedOrder()")):
+        fill(order, extension, resolver, quarter, TAKER_MAKING_AMOUNT)
+    # The rest of the lot is re-posted under a fresh nonce.
+    fresh, _ = adapter.order_for(harness.address, sell_token.address, SALT + 1, 0, extension)
+    fill(tuple(fresh), extension, resolver, quarter, TAKER_MAKING_AMOUNT)
+    assert sell_token.balanceOf(resolver) == 2 * quarter
+
+
+def test_multiple_fill_orders_are_rejected(make_order, extension, validate, resolver, fill):
+    # Partial and multiple fills both on: validated on the first fill only,
+    # the remainder would fill from the protocol's cache.
+    order = make_order(extension, flags=PUBLISHED_FLAGS | ALLOW_MULTIPLE_FILLS_FLAG)
+    with boa.reverts(custom_err("OrderNotValid(string)", "BadMakerTraits")):
+        validate(order, extension)
+    with boa.reverts(custom_err("BadSignature()")):
+        fill(order, extension, resolver, LOT_AMOUNT // 4, TAKER_MAKING_AMOUNT)
+
+
+@pytest.mark.parametrize("stop", ["disable", "kill", "window_end"])
+def test_published_orders_stop_with_the_auction(
+    harness,
+    adapter,
+    sell_token,
+    extension,
+    resolver,
+    registry,
+    emergency_owner,
+    protocol,
+    fill,
+    stop,
+):
+    order, _ = adapter.order_for(harness.address, sell_token.address, SALT, 0, extension)
+    order = tuple(order)
+    if stop == "disable":
+        with boa.env.prank(emergency_owner):
+            registry.disable_adapter(adapter)
+    elif stop == "kill":
+        harness.set_sellable(sell_token.address, False)
+    else:
+        # The protocol's expiration is inclusive, the window end is not.
+        boa.env.time_travel(seconds=harness.frame_end() - _now())
+        assert _now() == order[7] >> EXPIRATION_OFFSET & (2**40 - 1)
+    # No allowance sync involved: the protocol can still pull, but every
+    # fill asks the auction and the auction says no.
+    assert sell_token.allowance(harness.address, protocol.address) == MAX_UINT256
+    with boa.reverts(custom_err("BadSignature()")):
+        fill(order, extension, resolver, LOT_AMOUNT // 4, TAKER_MAKING_AMOUNT)
 
 
 def test_whitelisted_resolver_waits_for_its_allowed_time(

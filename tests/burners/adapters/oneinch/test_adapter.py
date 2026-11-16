@@ -21,6 +21,8 @@ from tests.burners.adapters.oneinch.test_module import (
     ALLOW_MULTIPLE_FILLS_FLAG,
     EXPIRATION_OFFSET,
     NO_PARTIAL_FILLS_FLAG,
+    NONCE_MASK,
+    NONCE_OFFSET,
     ORDER_ABI,
     ROUTER_NAME,
     ROUTER_VERSION,
@@ -42,6 +44,9 @@ STEP_DURATION = 60
 AUCTION_LENGTH = 24 * 60 * 60
 LOT_AMOUNT = 250 * WAD
 SALT = 0xABCDEF
+# Maker traits of the orders under test: no flags, i.e. partial fills on and
+# multiple fills off, the single-fill shape order_for publishes.
+SINGLE_FILL_FLAGS = 0
 
 DOMAIN_FIELDS = b"\x0f"
 FOREIGN_DOMAIN = keccak(b"FOREIGN_DOMAIN")
@@ -158,7 +163,7 @@ def _now() -> int:
     return boa.env.evm.vm.state.timestamp
 
 
-def _traits(expiration: int, flags: int = ALLOW_MULTIPLE_FILLS_FLAG) -> int:
+def _traits(expiration: int, flags: int = SINGLE_FILL_FLAGS) -> int:
     return flags | (expiration << EXPIRATION_OFFSET)
 
 
@@ -179,7 +184,7 @@ def make_order(harness, sell_token, want, proceeds_receiver, lot):
                 sell_token.address, min(making_amount, LOT_AMOUNT)
             )
         expiration = overrides.pop("expiration", harness.frame_end())
-        flags = overrides.pop("flags", ALLOW_MULTIPLE_FILLS_FLAG)
+        flags = overrides.pop("flags", SINGLE_FILL_FLAGS)
         fields = {
             "salt": SALT,
             "maker": harness.address,
@@ -333,14 +338,26 @@ def test_foreign_maker_invalid(harness, adapter, make_order, validate):
 
 def test_permit2_and_unwrap_traits_invalid(harness, adapter, make_order, validate):
     with boa.reverts(custom_err("OrderNotValid(string)", "BadMakerTraits")):
-        validate(make_order(flags=ALLOW_MULTIPLE_FILLS_FLAG | USE_PERMIT2_FLAG))
+        validate(make_order(flags=USE_PERMIT2_FLAG))
     with boa.reverts(custom_err("OrderNotValid(string)", "BadMakerTraits")):
-        validate(make_order(flags=ALLOW_MULTIPLE_FILLS_FLAG | UNWRAP_WETH_FLAG))
+        validate(make_order(flags=UNWRAP_WETH_FLAG))
+
+
+def test_only_single_fill_orders_are_valid(harness, adapter, make_order, validate):
+    # Partial and multiple fills both on: the protocol would validate the
+    # first fill only and fill the rest from its cache, past any kill.
+    with boa.reverts(custom_err("OrderNotValid(string)", "BadMakerTraits")):
+        validate(make_order(flags=ALLOW_MULTIPLE_FILLS_FLAG))
+    # Either one off puts the order on the bit invalidator: one fill, with
+    # the signature checked on it.
+    for flags in (0, NO_PARTIAL_FILLS_FLAG, NO_PARTIAL_FILLS_FLAG | ALLOW_MULTIPLE_FILLS_FLAG):
+        assert validate(make_order(flags=flags)) == ERC1271_MAGIC_VALUE
 
 
 def test_fill_mode_traits_are_not_the_adapters_concern(harness, adapter, make_order, validate):
-    # Fill-or-kill, single-fill, epoch-checked or sender-restricted orders
-    # only restrict who fills and how; the unit price is the same.
+    # Among single-fill orders, fill-or-kill, epoch-checked, interaction
+    # or sender-restricted ones only restrict who fills and how; the unit
+    # price is the same.
     allowed_sender = int(boa.env.generate_address("allowed_sender"), 16) & (2**80 - 1)
     for flags in (0, NO_PARTIAL_FILLS_FLAG, 1 << 250, 1 << 252, 1 << 251):
         assert validate(make_order(flags=flags)) == ERC1271_MAGIC_VALUE
@@ -386,7 +403,7 @@ def test_restrictive_extension_fields_pass_through(harness, adapter, make_order,
     extension = build_extension(
         [b"", b"", b"", b"", b"\xde\xad", b"\xbe\xef", target + b"\x01", target], custom=b"xyz"
     )
-    bound = bind_extension(make_order(flags=ALLOW_MULTIPLE_FILLS_FLAG | (1 << 252)), extension)
+    bound = bind_extension(make_order(flags=1 << 252), extension)
     assert validate(bound, extension=extension) == ERC1271_MAGIC_VALUE
     # A sub-word extension has every field empty on the protocol side too.
     short = b"\xff" * 31
@@ -431,8 +448,8 @@ def test_partial_fills_are_priced_against_the_snapshot(
     harness, adapter, make_order, sell_token, want, validate
 ):
     # Unlike a fill-or-kill rail, a standing ask over the whole lot stays
-    # valid after a native take shrinks the remainder: later partial fills
-    # keep the unit price and the protocol stops at the balance.
+    # valid after a native take shrinks the remainder: its one fill keeps
+    # the unit price for whatever part is still there.
     order = make_order()
     taker = boa.env.generate_address("taker")
     taken = LOT_AMOUNT // 4
@@ -463,7 +480,8 @@ def test_order_for_builds_the_publishable_pair(
         want.address,
         LOT_AMOUNT,
         quote,
-        _traits(harness.frame_end()),
+        # No flags: one fill of any size; the nonce is the salt's low 40 bits.
+        _traits(harness.frame_end()) | ((SALT & NONCE_MASK) << NONCE_OFFSET),
     )
     # The signature is the documented template and validates end-to-end.
     assert bytes(signature) == _signature(adapter, tuple(order))

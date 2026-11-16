@@ -25,17 +25,21 @@
      flag is set (the protocol calls the listener only then; without it the
      taking tokens would stay with the FeeTaker), no pre-interaction, both
      amount getters and the post-interaction target the pinned FeeTaker with
-     the same fee data and whitelist, no chained getter or interaction. Fee
+     the same fee data and whitelist, no chained getter or interaction, a
+     custom receiver that is not zero when flagged (the FeeTaker would pay
+     the zero address, not the maker). Fee
      values are not bounded: they are the taker's cost. Fills are
      restricted by the FeeTaker to whitelisted takers and holders of its
      access token (1inch resolvers), not by this adapter.
 @custom:kill Stateless and immutable: nothing to pause here. Routing through
              this adapter stops immediately when the registry disables it
              (owner or emergency owner); native take() stays untouched.
-             Because the protocol does not re-check partially filled orders,
-             an emergency disable is complete only with
-             sync_executor_approvals(protocol, tokens), which zeroes the
-             allowance every remaining fill relies on.
+             Orders are single-fill (OneInchAdapter), so every fill is
+             validated live and a disable, a FeeCollector kill or a target
+             change stops every order at once.
+             sync_executor_approvals(protocol, tokens) completes the
+             emergency procedure as hygiene; it clears the allowance only
+             once no other active adapter shares the protocol as executor.
 @custom:security Holds no funds and receives no allowances. Auction-agnostic:
                  every economic decision is delegated to msg.sender's
                  check_order. Trusts the pinned FeeTaker to implement the
@@ -80,13 +84,12 @@ interface AmountGetter:
 ADAPTER_VERSION: public(constant(String[32])) = "OneInchFeeTakerAdapter"
 PAYLOAD_BOUND: constant(uint256) = base.PAYLOAD_BOUND
 SIGNATURE_BOUND: constant(uint256) = 20 + PAYLOAD_BOUND
-# The maker traits of a published order: partial and multiple fills, the
-# extension flag, the post-interaction call that splits the fees; the
-# expiration is added per order.
+# The maker traits of a published order: one fill of any size (partial
+# fills on, multiple fills off), the extension flag, the post-interaction
+# call that splits the fees; the nonce and the expiration are added per
+# order.
 PUBLISHED_TRAITS: constant(uint256) = (
-    oneinch.ALLOW_MULTIPLE_FILLS_FLAG
-    | oneinch.HAS_EXTENSION_FLAG
-    | oneinch.POST_INTERACTION_CALL_FLAG
+    oneinch.HAS_EXTENSION_FLAG | oneinch.POST_INTERACTION_CALL_FLAG
 )
 # Deploy-time probe: a 1% integrator fee with an empty whitelist on a 1:3
 # order must gross the taking amount up to exactly 3.03.
@@ -221,13 +224,14 @@ def order_for(
          receiver as custom receiver); this contract checks its shape and
          custom receiver and fills in the order: priced at the current block
          like OneInchAdapter.order_for (a standing ask re-posted lower with
-         a fresh salt as the curve decays), receiver = the FeeTaker, partial
-         and multiple fills, the post-interaction call, expiring at the lot
+         a fresh salt as the curve decays), receiver = the FeeTaker, one
+         fill of any size, the post-interaction call, expiring at the lot
          end, salt bound to the extension like the SDK binds it (the low 96
          bits of `_salt` in the high bits). Anyone may publish.
     @param _auction Auction (DutchAuctionBurner) selling the lot.
     @param _token Lot token to sell.
-    @param _salt Publisher's salt (96 bits used).
+    @param _salt Publisher's salt (96 bits used); its low 40 bits are also
+           the order's nonce, so live orders need salts that differ there.
     @param _sell_amount Amount to sell; 0 sells everything available.
     @param _extension The FeeTaker extension bytes.
     @return The order and `this_adapter ++ abi_encode(order, extension)`.
@@ -254,7 +258,9 @@ def order_for(
         takerAsset=(staticcall _auction.want()).address,
         makingAmount=sell_amount,
         takingAmount=taking_amount,
-        makerTraits=PUBLISHED_TRAITS | (lot_end << oneinch.EXPIRATION_OFFSET),
+        makerTraits=(
+            PUBLISHED_TRAITS | oneinch._nonce_traits(_salt) | (lot_end << oneinch.EXPIRATION_OFFSET)
+        ),
     )
     return order, concat(convert(self, bytes20), abi_encode(order, _extension))
 
@@ -273,9 +279,11 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[PAYLOAD_BOUND]) -> bytes4
          BadAssetSuffix), then the FeeTaker shape (BadMakerTraits for the
          interaction flags, BadOrderReceiver, BadPreInteraction,
          BadAmountGetter, BadPostInteraction, BadFeeData, BadWhitelist,
-         BadGetterTail, BadInteractionTail, BadExtensionOffsets), then the
-         auction's check_order with the custom receiver (the maker when none
-         is flagged, which the auction rejects) as receiver; its typed
+         BadGetterTail, BadInteractionTail, BadExtensionOffsets,
+         BadCustomReceiver for a flagged zero receiver), then the auction's
+         check_order with the receiver the post-interaction pays: the
+         custom receiver when flagged, else the maker, i.e. the auction
+         itself, which check_order accepts next to its receiver. Its typed
          reverts pass through untouched.
     @param _hash Order digest the protocol is verifying.
     @param _signature The abi-encoded (Order, extension) pair, prefix

@@ -8,9 +8,10 @@
 @notice Minimal 1inch LOP v4 stand-in for the 1inch adapter deployments and
         settlement tests: the ERC-5267 domain description and hashOrder over
         a configurable domain, and a fillContractOrderArgs that follows
-        OrderMixin._fill for what the adapters rely on — the contract
-        signature checked on the first fill only, the extension bound by
-        flag and salt, amounts through the extension's getters (linear
+        OrderMixin._fill for what the adapters rely on — the two order
+        invalidators (a remaining amount with the contract signature
+        checked on the first fill only, or a nonce bit with the signature
+        checked on the single fill), the extension bound by flag and salt, amounts through the extension's getters (linear
         without them), the transfers, and the post-interaction call. Not
         modelled: taker thresholds, permits, pre-interactions, WETH paths,
         taker interactions. Settlement against the real protocol is the fork
@@ -71,6 +72,14 @@ error InvalidExtension:
     pass
 
 
+error BitInvalidatedOrder:
+    pass
+
+
+error PartialFillNotAllowed:
+    pass
+
+
 MAX_EXTENSIONS: constant(uint256) = 8
 SIGNATURE_BOUND: constant(uint256) = 20 + oneinch.ENCODED_ORDER_LEN + 2 * 32 + oneinch.MAX_EXTENSION
 # TakerTraitsLib: the fill amount is a making amount.
@@ -88,6 +97,9 @@ domain: immutable(bytes32)
 
 # RemainingInvalidatorLib: 0 for an untouched order, else remaining + 1.
 remaining_raw: HashMap[bytes32, uint256]
+# BitInvalidatorLib, one flag per nonce instead of packed slots: set by the
+# fill of an order with partial or multiple fills off.
+bit_invalidated: HashMap[address, HashMap[uint256, bool]]
 
 
 @deploy
@@ -186,14 +198,18 @@ def fillContractOrderArgs(
     """
     order_hash: bytes32 = oneinch._words_digest(_order, self.domain)
     maker: address = convert(_order.maker, address)
-    raw: uint256 = self.remaining_raw[order_hash]
+    # _checkRemainingMakingAmount: a bit-invalidator order always reads as
+    # whole, so its extension and signature are checked on every fill.
+    single_fill: bool = oneinch._is_single_fill(_order.makerTraits)
     remaining: uint256 = _order.makingAmount
-    if raw != 0:
-        remaining = raw - 1
+    if not single_fill:
+        raw: uint256 = self.remaining_raw[order_hash]
+        if raw != 0:
+            remaining = raw - 1
     assert remaining > 0, InvalidatedOrder()
     if remaining == _order.makingAmount:
-        # OrderLib.isValidExtension, then the contract signature: both on
-        # the first fill only.
+        # OrderLib.isValidExtension, then the contract signature: for a
+        # remaining-invalidator order both on the first fill only.
         if _order.makerTraits & oneinch.HAS_EXTENSION_FLAG != 0:
             assert len(_extension) > 0 and (
                 convert(keccak256(_extension), uint256) & oneinch.EXTENSION_HASH_MASK
@@ -253,7 +269,14 @@ def fillContractOrderArgs(
                 taking_amount = staticcall AmountGetter(getter).getTakingAmount(
                     _order, _extension, order_hash, msg.sender, making_amount, remaining, data
                 )
-    self.remaining_raw[order_hash] = remaining - making_amount + 1
+    if _order.makerTraits & oneinch.NO_PARTIAL_FILLS_FLAG != 0:
+        assert making_amount == _order.makingAmount, PartialFillNotAllowed()
+    if single_fill:
+        nonce: uint256 = (_order.makerTraits >> oneinch.NONCE_OFFSET) & oneinch.NONCE_MASK
+        assert not self.bit_invalidated[maker][nonce], BitInvalidatedOrder()
+        self.bit_invalidated[maker][nonce] = True
+    else:
+        self.remaining_raw[order_hash] = remaining - making_amount + 1
 
     assert extcall IERC20(convert(_order.makerAsset, address)).transferFrom(
         maker, msg.sender, making_amount, default_return_value=True

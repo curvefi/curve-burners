@@ -39,6 +39,8 @@ USE_PERMIT2_FLAG = 1 << 248
 UNWRAP_WETH_FLAG = 1 << 247
 EXPIRATION_OFFSET = 80
 EXPIRATION_MASK = 2**40 - 1
+NONCE_OFFSET = 120
+NONCE_MASK = 2**40 - 1
 
 # Deployed AggregationRouterV6 (LOP v4, 0x111111125421cA6dc452d289314280a0f8842A65,
 # the same verified source on Ethereum and Polygon): eip712Domain() reports
@@ -120,6 +122,18 @@ def expiration(_maker_traits: uint256) -> uint256:
 @pure
 def has_flag(_maker_traits: uint256, _flag: uint256) -> bool:
     return oneinch._has_flag(_maker_traits, _flag)
+
+
+@external
+@pure
+def is_single_fill(_maker_traits: uint256) -> bool:
+    return oneinch._is_single_fill(_maker_traits)
+
+
+@external
+@pure
+def nonce_traits(_salt: uint256) -> uint256:
+    return oneinch._nonce_traits(_salt)
 
 
 @external
@@ -343,6 +357,25 @@ def test_flags_are_read_individually(harness):
     assert not harness.has_flag(traits, UNWRAP_WETH_FLAG)
     assert not harness.has_flag(traits, HAS_EXTENSION_FLAG)
     assert not harness.has_flag(traits, NO_PARTIAL_FILLS_FLAG)
+
+
+def test_single_fill_is_the_bit_invalidator_shape(harness):
+    # MakerTraitsLib.useBitInvalidator: !allowPartialFills || !allowMultipleFills.
+    assert harness.is_single_fill(0)
+    assert harness.is_single_fill(NO_PARTIAL_FILLS_FLAG)
+    assert harness.is_single_fill(NO_PARTIAL_FILLS_FLAG | ALLOW_MULTIPLE_FILLS_FLAG)
+    assert not harness.is_single_fill(ALLOW_MULTIPLE_FILLS_FLAG)
+    # No other bit takes part.
+    others = MAX_UINT256 & ~NO_PARTIAL_FILLS_FLAG
+    assert not harness.is_single_fill(others)
+    assert harness.is_single_fill(others & ~ALLOW_MULTIPLE_FILLS_FLAG)
+
+
+def test_nonce_is_the_low_40_bits_of_the_salt_at_bit_120(harness):
+    assert harness.nonce_traits(0) == 0
+    assert harness.nonce_traits(0xABCDEF) == 0xABCDEF << NONCE_OFFSET
+    assert harness.nonce_traits(MAX_UINT256) == NONCE_MASK << NONCE_OFFSET
+    assert harness.nonce_traits(1 << 40) == 0
 
 
 def test_receiver_defaults_to_the_maker(harness):

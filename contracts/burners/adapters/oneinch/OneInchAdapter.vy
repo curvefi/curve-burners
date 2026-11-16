@@ -24,21 +24,28 @@
      (OneInchFeeTakerAdapter, OneInchFusionAdapter), so the taking amount is
      a fixed ratio of the making amount, rounded in the maker's favour, and
      the order's takingAmount is a floor on what any fill pays per unit.
-     The protocol checks a contract signature on the first fill of an order
-     only: a partially filled standing ask keeps filling at its signed price
-     (always at or above the curve at validation time, which only decays)
-     until it expires, without asking the auction again.
+     Single-fill orders only: the protocol checks a contract signature on
+     the first fill of an order it tracks by remaining amount (partial and
+     multiple fills both on) and fills the rest from its own cache, without
+     asking the auction again. Such an order would outlive a FeeCollector
+     kill, a target change, an adapter disable and the last second of the
+     window, so it is rejected: an accepted order is tracked by its nonce
+     bit (oneinch._is_single_fill), fills once, in part or in whole, and
+     that fill always carries a live signature check. A publisher re-posts
+     the unsold rest under a fresh nonce.
 @custom:kill Stateless and immutable: nothing to pause here. Routing through
              this adapter stops immediately when the registry disables it
              (owner or emergency owner); native take() stays untouched.
-             Because the protocol does not re-check partially filled orders,
-             an emergency disable is complete only with
-             sync_executor_approvals(protocol, tokens), which zeroes the
-             allowance every remaining fill relies on.
+             Every fill is validated live, so a disable, a FeeCollector
+             kill or a target change stops every order at once, published
+             earlier or not. sync_executor_approvals(protocol, tokens)
+             completes the emergency procedure as hygiene; it clears the
+             allowance only once no other active adapter shares the
+             protocol as executor.
 @custom:security Holds no funds and receives no allowances (the executor —
                  the protocol — does, and spends them only under a digest
-                 this adapter validated through the auction's router, or for
-                 the remainder of an order it validated earlier).
+                 this adapter validated through the auction's router within
+                 the same fill).
                  Auction-agnostic: every economic decision is delegated to
                  msg.sender's check_order, so calling this contract directly
                  proves nothing about any auction. Validity here means the
@@ -96,10 +103,11 @@ PAYLOAD_BOUND: constant(uint256) = oneinch.ENCODED_ORDER_LEN + 2 * 32 + oneinch.
 SIGNATURE_LEN: constant(uint256) = 20 + oneinch.ENCODED_ORDER_LEN + 2 * 32
 # ERC-5267 extensions list bound; the protocol reports none.
 MAX_DOMAIN_EXTENSIONS: constant(uint256) = 8
-# The maker traits of a published order: partial and multiple fills (a
-# standing ask filled in pieces), no extension, direct transferFrom, no
-# unwrapping, any taker; the expiration is added per order.
-PUBLISHED_TRAITS: constant(uint256) = oneinch.ALLOW_MULTIPLE_FILLS_FLAG
+# The maker traits of a published order: no flags, i.e. one fill of any
+# size (partial fills on, multiple fills off), no extension, direct
+# transferFrom, no unwrapping, any taker; the nonce and the expiration are
+# added per order.
+PUBLISHED_TRAITS: constant(uint256) = 0
 
 # Protocol wiring pinned at deploy: the EIP-712 domain is fixed by the
 # protocol's name, version and address, so a protocol upgrade means a fresh
@@ -159,7 +167,8 @@ def _quote_lot(
             at the current block, and the lot end as the order expiration.
     @dev Shared by every 1inch adapter's order_for. The expiration is
          inclusive on the protocol side; check_order rejects at lot_end
-         anyway (LotInactive), so nothing settles past the window.
+         (LotInactive) and runs on every fill, so nothing settles past the
+         window.
     """
     sell_amount: uint256 = _sell_amount
     if sell_amount == 0:
@@ -184,13 +193,15 @@ def order_for(
     @dev Priced at the current block: the taking amount is the auction's
          quote now, so the order stays valid while the curve decays below it
          (a standing ask) and a publisher re-posts, with a fresh salt, as
-         the price falls. Partial and multiple fills are allowed; every
-         fill pays the same unit price rounded up. Validity ends with the
+         the price falls. One fill of any size at the signed unit price
+         rounded up: the fill burns the order's nonce bit, and the rest
+         of the lot is re-posted under a fresh one. Validity ends with the
          lot window. No extension, any taker. Anyone may publish.
     @param _auction Auction (DutchAuctionBurner) selling the lot.
     @param _token Lot token to sell.
-    @param _salt Order salt; the protocol tracks fills per order hash, so
-           two live orders with equal fields need different salts.
+    @param _salt Order salt; its low 40 bits are the order's nonce, so two
+           live orders need salts that differ there, and a filled nonce
+           is not reused (the protocol reports BitInvalidatedOrder).
     @param _sell_amount Amount to sell; 0 sells everything available.
     @return The order and `this_adapter ++ abi_encode(order, b"")`.
     """
@@ -207,7 +218,9 @@ def order_for(
         takerAsset=(staticcall _auction.want()).address,
         makingAmount=sell_amount,
         takingAmount=taking_amount,
-        makerTraits=PUBLISHED_TRAITS | (lot_end << oneinch.EXPIRATION_OFFSET),
+        makerTraits=(
+            PUBLISHED_TRAITS | oneinch._nonce_traits(_salt) | (lot_end << oneinch.EXPIRATION_OFFSET)
+        ),
     )
     return order, concat(convert(self, bytes20), abi_encode(order, b""))
 
@@ -223,9 +236,9 @@ def _decode_and_check(
     """
     @notice The protocol-level checks every 1inch adapter shares: decode the
             canonical (Order, extension) pair, prove the digest, require the
-            calling auction as maker, neither USE_PERMIT2 nor UNWRAP_WETH,
-            the extension bound as the protocol binds it, and no asset
-            suffixes.
+            calling auction as maker, a single-fill order, neither
+            USE_PERMIT2 nor UNWRAP_WETH, the extension bound as the
+            protocol binds it, and no asset suffixes.
     @dev Reverts with oneinch.OrderNotValid(reason); a payload that does not
          decode fails ABI decoding before any check runs. Returns the order,
          its extension and the packed extension field ends.
@@ -241,8 +254,17 @@ def _decode_and_check(
         oneinch.OrderNotValid(reason="InvalidHash")
     )
     assert order.maker == msg.sender, oneinch.OrderNotValid(reason="BadMaker")
-    # The executor pulls with a plain transferFrom (no Permit2 allowance
-    # exists) and the auction's receiver takes the payment token itself.
+    # The protocol must ask for this signature on every fill: an order it
+    # tracks by remaining amount is validated once and then fills from the
+    # cache past any kill, target change or disable.
+    assert oneinch._is_single_fill(order.makerTraits), (
+        oneinch.OrderNotValid(reason="BadMakerTraits")
+    )
+    # The executor pulls with a plain transferFrom. USE_PERMIT2 pulls
+    # through Permit2's allowance transfer, which the auction never
+    # grants (its token allowance to Permit2, if a Permit2-based adapter
+    # is active, serves signature transfers only). The auction's receiver
+    # takes the payment token itself.
     assert not (
         oneinch._has_flag(order.makerTraits, oneinch.USE_PERMIT2_FLAG)
         or oneinch._has_flag(order.makerTraits, oneinch.UNWRAP_WETH_FLAG)
@@ -298,10 +320,12 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[PAYLOAD_BOUND]) -> bytes4
          suffixes nor amount getters, so the protocol prices every fill
          linearly from the order amounts; predicates, permits and
          interactions only restrict or decorate a fill and pass through.
-         The order's amounts are priced as a whole (partial fills keep the
-         unit price), the receiver resolves like the protocol resolves it
-         (empty means the maker), and the maker-traits expiration is the
-         validity bound (0, never expiring, fails it).
+         The order must be single-fill (BadMakerTraits otherwise), so
+         this check runs on every fill. Its amounts are priced as a whole
+         (a partial fill keeps the unit price), the receiver resolves like
+         the protocol resolves it (empty means the maker), and the
+         maker-traits expiration is the validity bound (0, never expiring,
+         fails it).
     @param _hash Order digest the protocol is verifying.
     @param _signature The abi-encoded (Order, extension) pair, prefix
            already stripped.
