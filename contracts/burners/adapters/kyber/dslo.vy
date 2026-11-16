@@ -5,8 +5,8 @@
 @author Curve Finance
 @license MIT
 @notice Stateless KyberSwap Double Signature Limit Order (DSLO) order type,
-        its EIP-712 digest and domain, the feeConfig bit layout, the linear
-        amount getters, the predicate shapes carrying an expiry, and the
+        its EIP-712 digest and domain, the feeConfig bit layout, the amount
+        getter policy, the predicate shapes carrying an expiry, and the
         OrderNotValid revert shared by Kyber-facing adapters.
 @dev Pure parametric helpers only: no storage, no external calls, no abstract
      hooks. Hashing must stay byte-identical to DSOrderMixin.hashOrder, the
@@ -25,7 +25,9 @@ error OrderNotValid:
 
 # Bounds of the variable-sized order fields. Asset data must be empty
 # (anything up to the bound decodes and is rejected as such; longer fails
-# ABI decoding), a getter is empty or the 68-byte linear call, a predicate
+# ABI decoding), a getter must be empty too (the bound fits the 68-byte
+# linear call the KyberSwap API builds, so it decodes and is rejected with
+# a reason), a predicate
 # is `timestampBelow(t)` or an `and` over at most MAX_PREDICATES entries of
 # `nonceEquals(maker, nonce)` and `timestampBelow(t)`, and the interaction
 # must be empty.
@@ -97,14 +99,8 @@ FEE_PERCENT_MASK: constant(uint256) = 2**32 - 1
 TAKER_ASSET_FEE_OFFSET: constant(uint256) = 192
 FEE_UNITS: constant(uint256) = 100_000
 
-# AmountCalculator and PredicateHelper/NonceManager selectors, all called on
-# the protocol itself with a staticcall.
-GET_MAKER_AMOUNT_SELECTOR: constant(bytes4) = method_id(
-    "getMakerAmount(uint256,uint256,uint256)", output_type=bytes4
-)  # 0xf4a215c3
-GET_TAKER_AMOUNT_SELECTOR: constant(bytes4) = method_id(
-    "getTakerAmount(uint256,uint256,uint256)", output_type=bytes4
-)  # 0x296637bf
+# PredicateHelper/NonceManager selectors, all called on the protocol itself
+# with a staticcall.
 AND_SELECTOR: constant(bytes4) = method_id(
     "and(address[],bytes[])", output_type=bytes4
 )  # 0x961d5b1e
@@ -197,35 +193,29 @@ def _fee_config(_fee_config: uint256) -> (address, uint256, bool):
     )
 
 
-# Amount getters: AmountCalculator's linear ones over the order's own
-# amounts, the swap amount appended by the protocol at fill time. The
-# protocol prices a fill with whatever call the getter bytes encode, so an
-# adapter accepts only these (or an empty getter, which allows exact-amount
-# fills only).
-
-
-@internal
-@pure
-def _linear_getter(_selector: bytes4, _order: Order) -> Bytes[GETTER_LEN]:
-    return concat(_selector, abi_encode(_order.makingAmount, _order.takingAmount))
+# Amount getters: calldata the protocol staticcalls on itself with the swap
+# amount appended to price a fill. Without a getter only the exact order
+# amount is accepted (DSOrderMixin._callGetter: 'LOP: wrong amount'), so an
+# order with both getters empty fills once, in whole.
 
 
 @internal
 @pure
 def _check_getters(_order: Order):
     """
-    @notice Require each getter to be empty or the linear call over the
-            order's own amounts: the taking amount of a making-amount fill
-            is then ceil(making * takingAmount / makingAmount) and the
-            making amount of a taking-amount fill floor(taking *
-            makingAmount / takingAmount), both in the maker's favour.
+    @notice Require both getters to be empty: the order is fill-or-kill at
+            its signed amounts.
+    @dev The protocol validates the maker's contract signature on the
+         first fill of an order only and fills the rest from its cached
+         remainder. With either getter set (the linear AmountCalculator
+         ones included) a partial fill is possible in that getter's
+         direction, and the remainder would keep filling without asking
+         the maker again. With none, the first fill is the only one and
+         always carries the signature check.
     """
-    assert len(_order.getMakerAmount) == 0 or (
-        _order.getMakerAmount == self._linear_getter(GET_MAKER_AMOUNT_SELECTOR, _order)
-    ), OrderNotValid(reason="BadAmountGetter")
-    assert len(_order.getTakerAmount) == 0 or (
-        _order.getTakerAmount == self._linear_getter(GET_TAKER_AMOUNT_SELECTOR, _order)
-    ), OrderNotValid(reason="BadAmountGetter")
+    assert len(_order.getMakerAmount) == 0 and len(_order.getTakerAmount) == 0, (
+        OrderNotValid(reason="BadAmountGetter")
+    )
 
 
 # Predicates: the protocol staticcalls itself with the predicate bytes and

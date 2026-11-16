@@ -38,6 +38,7 @@ from tests.burners.adapters.kyber.test_module import (
     timestamp_below,
     with_fields,
 )
+from tests.burners.conftest import custom_err
 from tests.burners.test_dutch_auction_v2 import (
     FLOOR_TOTAL,
     START_TOTAL,
@@ -309,13 +310,15 @@ def test_mainnet_real_protocol_fills_published_orders():
         assert initial_amount > 0
         _move_to_timestamp(lot_start + 3 * STEP_DURATION)
 
-        # What a publisher hands to takers, straight from the adapter: the
-        # whole lot at the live quote to the FeeCollector, and the signature
-        # the protocol will forward to the burner.
-        order, signature = adapter.order_for(burner.address, sell_token.address, SALT)
+        # What a publisher hands to takers, straight from the adapter: a
+        # quarter of the lot at the live quote to the FeeCollector,
+        # fill-or-kill, and the signature the protocol will forward to the
+        # burner.
+        quarter = initial_amount // 4
+        order, signature = adapter.order_for(burner.address, sell_token.address, SALT, quarter)
         order = tuple(order)
         signature = bytes(signature)
-        quote = burner.getAmountNeeded(sell_token, initial_amount)
+        quote = burner.getAmountNeeded(sell_token, quarter)
         assert order == (
             SALT,
             sell_token.address,
@@ -323,12 +326,14 @@ def test_mainnet_real_protocol_fills_published_orders():
             burner.address,
             fee_collector.address,
             ZERO_ADDRESS,
-            initial_amount,
+            quarter,
             quote,
             0,
             b"",
             b"",
-            *linear_getters(initial_amount, quote),
+            # No getters: the protocol takes the exact order amounts only.
+            b"",
+            b"",
             timestamp_below(lot_end + 1),
             b"",
         )
@@ -339,7 +344,7 @@ def test_mainnet_real_protocol_fills_published_orders():
             assert burner.isValidSignature(digest, signature) == bytes.fromhex("1626ba7e")
             assert burner.isValidSignature(digest, signature[20:]) == bytes.fromhex("ffffffff")
 
-        target._mint_for_testing(taker, 3 * quote)
+        target._mint_for_testing(taker, 12 * quote)
         with boa.env.prank(taker):
             target.approve(PROTOCOL, MAX_UINT256)
 
@@ -347,52 +352,44 @@ def test_mainnet_real_protocol_fills_published_orders():
         # real fill: the protocol reports every rejected contract signature
         # as its own 'LOP: bad signature' (the auction's typed reason is for
         # eth_call).
-        cheaper_getters = linear_getters(initial_amount, quote - 1)
-        cheaper = with_fields(
-            order,
-            takingAmount=quote - 1,
-            getMakerAmount=cheaper_getters[0],
-            getTakerAmount=cheaper_getters[1],
-        )
+        cheaper = with_fields(order, takingAmount=quote - 1)
         cheaper_sig = bytes.fromhex(adapter.address[2:]) + encode([ORDER_ABI], [cheaper])
         with boa.reverts():
-            filler.fill(cheaper, cheaper_sig, making=initial_amount)
+            filler.fill(cheaper, cheaper_sig, making=quarter)
 
-        # The real protocol fills a quarter of the published order: it
-        # verifies the digest through the burner's router on this first
-        # fill, runs the predicate and the linear getter, pulls the lot
-        # slice from the burner, and moves the taker's proportional payment
-        # (rounded up) to the FeeCollector.
-        quarter = initial_amount // 4
-        quarter_quote = -(-quote * quarter // initial_amount)
+        # No getters: the real protocol refuses a part of the order
+        # ('LOP: wrong amount'), so there is never a remainder for it to
+        # fill from its cache without the burner's signature.
+        with boa.reverts():
+            filler.fill(order, signature, making=quarter // 2)
+
+        # The real protocol fills the published order in whole: it verifies
+        # the digest through the burner's router, runs the predicate, pulls
+        # the lot slice from the burner, and moves the taker's payment to
+        # the FeeCollector.
         making, taking, fee = filler.fill(order, signature, making=quarter)
-        assert (making, taking, fee) == (quarter, quarter_quote, 0)
+        assert (making, taking, fee) == (quarter, quote, 0)
         assert sell_token.balanceOf(taker) == quarter
-        assert target.balanceOf(fee_collector) == quarter_quote
+        assert target.balanceOf(fee_collector) == quote
         assert burner.available(sell_token) == initial_amount - quarter
-        assert protocol.remainingRaw(digest) == initial_amount - quarter + 1
+        # DSOrderMixin._ORDER_FILLED: nothing left under this hash.
+        assert protocol.remainingRaw(digest) == 1
+        with boa.reverts():
+            filler.fill(order, signature, making=quarter)
 
         # An order in the shape the KyberSwap API signs: its salt, a
         # taker-asset fee and the `and(nonceEquals(maker, nonce),
         # timestampBelow(expiry))` predicate run by the real PredicateHelper.
         # The burner never advances its protocol nonce, so it reads 0.
         assert protocol.nonce(burner.address) == 0
-        remaining = initial_amount - quarter
-        remaining_quote = burner.getAmountNeeded(sell_token, remaining)
+        api_quote = burner.getAmountNeeded(sell_token, quarter)
         api_order = with_fields(
             order,
             salt=SALT + 1,
-            makingAmount=remaining,
-            takingAmount=remaining_quote,
+            takingAmount=api_quote,
             feeConfig=pack_fee_config(fee_recipient, 300, True),
             predicate=api_predicate(PROTOCOL, burner.address, 0, lot_end + 1),
         )
-        api_getters = linear_getters(remaining, remaining_quote)
-        api_order = with_fields(
-            api_order, getMakerAmount=api_getters[0], getTakerAmount=api_getters[1]
-        )
-        api_sig = bytes.fromhex(adapter.address[2:]) + encode([ORDER_ABI], [api_order])
-        api_digest = bytes(protocol.hashOrder(api_order))
         assert adapter.describe(api_order) == (
             fee_collector.address,
             fee_recipient,
@@ -400,36 +397,54 @@ def test_mainnet_real_protocol_fills_published_orders():
             True,
             lot_end,
         )
+        # With the linear getters the API builds today the order could be
+        # filled in parts, the remainder without a signature check: rejected
+        # by name on an eth_call and inside the real fill.
+        api_getters = linear_getters(quarter, api_quote)
+        partial_order = with_fields(
+            api_order, getMakerAmount=api_getters[0], getTakerAmount=api_getters[1]
+        )
+        partial_sig = bytes.fromhex(adapter.address[2:]) + encode([ORDER_ABI], [partial_order])
+        with (
+            boa.env.prank(PROTOCOL),
+            boa.reverts(custom_err("OrderNotValid(string)", "BadAmountGetter")),
+        ):
+            burner.isValidSignature(bytes(protocol.hashOrder(partial_order)), partial_sig)
+        with boa.reverts():
+            filler.fill(partial_order, partial_sig, making=quarter // 2)
+
+        # Every fill is validated live: a FeeCollector kill of the token
+        # stops the fill-or-kill API-shaped order, with the allowance
+        # untouched...
+        api_sig = bytes.fromhex(adapter.address[2:]) + encode([ORDER_ABI], [api_order])
+        api_digest = bytes(protocol.hashOrder(api_order))
         with boa.env.prank(PROTOCOL):
             assert burner.isValidSignature(api_digest, api_sig) == bytes.fromhex("1626ba7e")
-        # A taking-amount fill: the maker amount is floored for what is paid
-        # and the fee is charged on top of it, to the recipient.
-        paid = remaining_quote // 3
-        making, taking, fee = filler.fill(api_order, api_sig, taking=paid)
-        expected_making = paid * remaining // remaining_quote
-        expected_fee = -(-paid * 300 // 100_000)
-        assert (making, taking, fee) == (expected_making, paid + expected_fee, expected_fee)
-        assert sell_token.balanceOf(taker) == quarter + expected_making
-        assert target.balanceOf(fee_collector) == quarter_quote + paid
+        with boa.env.prank(emergency_owner):
+            fee_collector.set_killed([(sell_token.address, Epoch.EXCHANGE)])
+        assert sell_token.allowance(burner, PROTOCOL) >= quarter
+        with boa.reverts():
+            filler.fill(api_order, api_sig, taking=api_quote)
+        # ...and it fills once the kill is lifted: a taking-amount fill of
+        # the exact order amount, the fee charged on top, to the recipient.
+        with boa.env.prank(owner):
+            fee_collector.set_killed([(sell_token.address, 0)])
+        making, taking, fee = filler.fill(api_order, api_sig, taking=api_quote)
+        expected_fee = -(-api_quote * 300 // 100_000)
+        assert (making, taking, fee) == (quarter, api_quote + expected_fee, expected_fee)
+        assert sell_token.balanceOf(taker) == 2 * quarter
+        assert target.balanceOf(fee_collector) == quote + api_quote
         assert target.balanceOf(fee_recipient) == expected_fee
 
-        # The protocol checks a contract signature on the first fill only:
-        # once the adapter is disabled, the remainder of a started order
-        # still fills at its signed price, while a fresh order does not.
+        # So does a registry disable, for an order published before it.
+        fresh, fresh_sig = adapter.order_for(burner.address, sell_token.address, SALT + 2, quarter)
         with boa.env.prank(emergency_owner):
             registry.disable_adapter(adapter)
-        fresh, fresh_sig = adapter.order_for(burner.address, sell_token.address, SALT + 2)
         with boa.reverts():
             filler.fill(tuple(fresh), bytes(fresh_sig), making=quarter)
-        filler.fill(order, signature, making=quarter)
-        assert sell_token.balanceOf(taker) == 2 * quarter + expected_making
-        assert target.balanceOf(fee_collector) == 2 * quarter_quote + paid
 
-        # The emergency procedure completes with the allowance sync: with the
-        # executor released, the remainder cannot be pulled any more.
+        # The allowance sync completes the emergency procedure as hygiene.
         with boa.env.prank(keeper):
             burner.sync_executor_approvals(PROTOCOL, [sell_token.address])
         assert sell_token.allowance(burner, PROTOCOL) == 0
-        with boa.reverts():
-            filler.fill(order, signature, making=quarter)
-        assert burner.available(sell_token) == initial_amount - 2 * quarter - expected_making
+        assert burner.available(sell_token) == initial_amount - 2 * quarter

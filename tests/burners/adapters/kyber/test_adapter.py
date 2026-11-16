@@ -20,7 +20,6 @@ from eth_abi import encode
 from eth_utils import keccak
 
 from tests.burners.adapters.kyber.test_module import (
-    GET_MAKER_AMOUNT,
     GET_TAKER_AMOUNT,
     MAX_PREDICATE,
     ORDER_ABI,
@@ -165,7 +164,6 @@ def make_order(harness, sell_token, want, proceeds_receiver, lot, protocol):
         taking = overrides.pop("takingAmount", None)
         if taking is None:
             taking = harness.getAmountNeeded(sell_token.address, min(making, LOT_AMOUNT))
-        getters = linear_getters(making, taking)
         order = (
             SALT,
             sell_token.address,
@@ -178,8 +176,9 @@ def make_order(harness, sell_token, want, proceeds_receiver, lot, protocol):
             0,
             b"",
             b"",
-            overrides.pop("getMakerAmount", getters[0]),
-            overrides.pop("getTakerAmount", getters[1]),
+            # Fill-or-kill: no getters.
+            overrides.pop("getMakerAmount", b""),
+            overrides.pop("getTakerAmount", b""),
             # timestampBelow is strict: lot_end + 1 lets the lot's last
             # second fill.
             overrides.pop("predicate", timestamp_below(harness.frame_end() + 1)),
@@ -322,18 +321,26 @@ def test_asset_data_invalid(harness, adapter, make_order, field):
         _validate(harness, adapter, make_order(**{field: b"\x00"}))
 
 
-def test_non_linear_getters_invalid(harness, adapter, make_order):
+def test_amount_getters_invalid(harness, adapter, make_order):
+    # The linear getters the KyberSwap API builds allow partial fills, whose
+    # remainder the protocol fills without asking the auction again.
+    maker_getter, taker_getter = linear_getters(LOT_AMOUNT, make_order()[7])
+    for getters in (
+        {"getMakerAmount": maker_getter},
+        {"getTakerAmount": taker_getter},
+        {"getMakerAmount": maker_getter, "getTakerAmount": taker_getter},
+    ):
+        with boa.reverts(custom_err("OrderNotValid(string)", "BadAmountGetter")):
+            _validate(harness, adapter, make_order(**getters))
     cheap = GET_TAKER_AMOUNT + encode(["uint256", "uint256"], [LOT_AMOUNT, 1])
     with boa.reverts(custom_err("OrderNotValid(string)", "BadAmountGetter")):
         _validate(harness, adapter, make_order(getTakerAmount=cheap))
-    cheap = GET_MAKER_AMOUNT + encode(["uint256", "uint256"], [LOT_AMOUNT * 2, 1])
-    with boa.reverts(custom_err("OrderNotValid(string)", "BadAmountGetter")):
-        _validate(harness, adapter, make_order(getMakerAmount=cheap))
 
 
-def test_empty_getters_valid(harness, adapter, make_order):
-    # Exact-amount fills only, priced from the order amounts.
-    order = make_order(getMakerAmount=b"", getTakerAmount=b"")
+def test_fill_or_kill_order_valid(harness, adapter, make_order):
+    # No getters: exact-amount fills only, priced from the order amounts.
+    order = make_order()
+    assert order[11] == b"" and order[12] == b""
     assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
 
 
@@ -402,7 +409,7 @@ def test_expiry_bounds_from_the_predicate(harness, adapter, make_order):
     assert _validate(harness, adapter, make_order(predicate=timestamp_below(now + 1)))
 
 
-def test_partial_fill_order_valid(harness, adapter, make_order):
+def test_order_over_a_part_of_the_lot_valid(harness, adapter, make_order):
     assert _validate(harness, adapter, make_order(makingAmount=LOT_AMOUNT // 3)) == (
         ERC1271_MAGIC_VALUE
     )
@@ -429,7 +436,9 @@ def test_order_for_builds_the_publishable_pair(
         0,
         b"",
         b"",
-        *linear_getters(LOT_AMOUNT, quote),
+        # Fill-or-kill: no getters.
+        b"",
+        b"",
         timestamp_below(harness.frame_end() + 1),
         b"",
     )
@@ -490,7 +499,7 @@ def test_describe(adapter, make_order, proceeds_receiver, harness, protocol):
 # Settlement through the protocol mock
 
 
-def test_mock_fills_a_published_order_in_parts(
+def test_mock_fills_a_published_order_in_whole_only(
     harness, adapter, protocol, sell_token, want, proceeds_receiver, lot, taker, owner
 ):
     order, _ = adapter.order_for(harness.address, sell_token.address, SALT)
@@ -503,29 +512,21 @@ def test_mock_fills_a_published_order_in_parts(
     with boa.env.prank(taker):
         want.approve(protocol, MAX_UINT256)
 
-    # A making-amount fill of a quarter pays the proportional quote rounded up.
-    quarter = LOT_AMOUNT // 4
-    quarter_quote = -(-quote * quarter // LOT_AMOUNT)
-    _fill(protocol, adapter, order, taker, making=quarter)
-    assert sell_token.balanceOf(taker) == quarter
-    assert want.balanceOf(proceeds_receiver) == quarter_quote
-    assert harness.available(sell_token) == LOT_AMOUNT - quarter
+    # No getters: neither a making-amount nor a taking-amount fill of a part.
+    with boa.reverts(custom_err("WrongAmount()")):
+        _fill(protocol, adapter, order, taker, making=LOT_AMOUNT // 4)
+    with boa.reverts(custom_err("WrongAmount()")):
+        _fill(protocol, adapter, order, taker, taking=quote // 10, threshold=0)
 
-    # A taking-amount fill delivers the floored maker amount for what is paid.
-    paid = quote // 10
-    _fill(protocol, adapter, order, taker, taking=paid, threshold=0)
-    assert sell_token.balanceOf(taker) == quarter + paid * LOT_AMOUNT // quote
-    assert want.balanceOf(proceeds_receiver) == quarter_quote + paid
-
-    # Overpaying for the remainder is capped at the remainder, priced up.
-    remaining = LOT_AMOUNT - sell_token.balanceOf(taker)
-    remaining_quote = -(-quote * remaining // LOT_AMOUNT)
+    # The whole order at exactly its signed amounts.
     _fill(protocol, adapter, order, taker, taking=quote, threshold=0)
     assert sell_token.balanceOf(taker) == LOT_AMOUNT
-    assert want.balanceOf(proceeds_receiver) == quarter_quote + paid + remaining_quote
-    assert want.balanceOf(proceeds_receiver) >= quote
+    assert want.balanceOf(proceeds_receiver) == quote
     digest = order_digest_reference(order, bytes(adapter.domain_separator()))
     assert protocol.remainingRaw(digest) == 1
+    # Nothing is left to fill without a fresh signature check.
+    with boa.reverts(custom_err("InvalidOrder()")):
+        _fill(protocol, adapter, order, taker, making=LOT_AMOUNT)
 
 
 def test_mock_rejects_an_underpriced_order(
@@ -555,7 +556,8 @@ def test_mock_fee_branches_keep_the_maker_whole(
     half_quote = -(-quote * half // LOT_AMOUNT)
 
     # Taker-asset fee: paid on top by the taker.
-    order = make_order(feeConfig=pack_fee_config(fee_recipient, 300, True))
+    order = make_order(makingAmount=half, feeConfig=pack_fee_config(fee_recipient, 300, True))
+    assert order[7] == half_quote
     making, taking, fee = _fill(protocol, adapter, order, taker, making=half)
     assert (making, fee) == (half, -(-half_quote * 300 // 100_000))
     assert taking == half_quote + fee
@@ -565,9 +567,8 @@ def test_mock_fee_branches_keep_the_maker_whole(
 
     # Maker-asset fee: carved out of the taker's receipt, the maker still
     # gives half and receives the full quote for it.
-    # The lot is half sold now, so the order is priced from the earlier quote.
     order = make_order(
-        salt=SALT + 1, takingAmount=quote, feeConfig=pack_fee_config(fee_recipient, 10, False)
+        salt=SALT + 1, makingAmount=half, feeConfig=pack_fee_config(fee_recipient, 10, False)
     )
     making, taking, fee = _fill(protocol, adapter, order, taker, making=half)
     assert (making, taking, fee) == (half, half_quote, -(-half * 10 // 100_000))
@@ -577,8 +578,9 @@ def test_mock_fee_branches_keep_the_maker_whole(
     assert sell_token.balanceOf(harness) == 0
 
 
-def test_mock_checks_the_signature_on_the_first_fill_only(
-    harness, adapter, protocol, sell_token, want, lot, taker, owner, emergency_owner, registry
+@pytest.mark.parametrize("stop", ["disable", "kill", "window_end"])
+def test_mock_published_orders_stop_with_the_auction(
+    harness, adapter, protocol, sell_token, want, lot, taker, owner, emergency_owner, registry, stop
 ):
     order, _ = adapter.order_for(harness.address, sell_token.address, SALT)
     order = tuple(order)
@@ -587,22 +589,20 @@ def test_mock_checks_the_signature_on_the_first_fill_only(
     want._mint_for_testing(taker, order[7])
     with boa.env.prank(taker):
         want.approve(protocol, MAX_UINT256)
-    quarter = LOT_AMOUNT // 4
-    _fill(protocol, adapter, order, taker, making=quarter)
-
-    with boa.env.prank(emergency_owner):
-        registry.disable_adapter(adapter)
-    fresh, _ = adapter.order_for(harness.address, sell_token.address, SALT + 1)
+    if stop == "disable":
+        with boa.env.prank(emergency_owner):
+            registry.disable_adapter(adapter)
+    elif stop == "kill":
+        harness.set_sellable(sell_token.address, False)
+    else:
+        # The predicate still holds in the window's end second; the window
+        # itself is over.
+        boa.env.time_travel(seconds=harness.frame_end() - boa.env.evm.vm.state.timestamp)
+    # No allowance sync involved: the protocol can still pull, but an order
+    # fills only in whole and that fill asks the auction.
+    assert sell_token.allowance(harness, protocol) == MAX_UINT256
     with boa.reverts(custom_err("BadSignature()")):
-        _fill(protocol, adapter, tuple(fresh), taker, making=quarter)
-    # The remainder of the started order still fills at its signed price...
-    _fill(protocol, adapter, order, taker, making=quarter)
-    assert sell_token.balanceOf(taker) == 2 * quarter
-    # ...until the allowance sync completes the emergency procedure.
-    harness.sync_executor_approvals(protocol, [sell_token.address])
-    assert sell_token.allowance(harness, protocol) == 0
-    with boa.reverts():
-        _fill(protocol, adapter, order, taker, making=quarter)
+        _fill(protocol, adapter, order, taker, making=LOT_AMOUNT)
 
 
 def test_mock_predicate_gates_the_fill(
@@ -617,16 +617,17 @@ def test_mock_predicate_gates_the_fill(
     end = harness.frame_end()
     # The API shape with the auction's nonce gates on the protocol's nonce
     # manager; the auction never advances it, so 0 holds.
-    order = make_order(predicate=api_predicate(protocol.address, harness.address, 1, end + 1))
+    half = LOT_AMOUNT // 2
+    order = make_order(
+        makingAmount=half, predicate=api_predicate(protocol.address, harness.address, 1, end + 1)
+    )
     with boa.reverts(custom_err("PredicateFailed()")):
-        _fill(protocol, adapter, order, taker, making=LOT_AMOUNT // 2)
-    order = make_order(predicate=api_predicate(protocol.address, harness.address, 0, end + 1))
-    _fill(protocol, adapter, order, taker, making=LOT_AMOUNT // 2)
-    assert sell_token.balanceOf(taker) == LOT_AMOUNT // 2
-    # Past the expiry the predicate fails even though the order was validated.
-    boa.env.time_travel(seconds=end + 1 - boa.env.evm.vm.state.timestamp)
-    with boa.reverts(custom_err("PredicateFailed()")):
-        _fill(protocol, adapter, order, taker, making=LOT_AMOUNT // 4)
+        _fill(protocol, adapter, order, taker, making=half)
+    order = make_order(
+        makingAmount=half, predicate=api_predicate(protocol.address, harness.address, 0, end + 1)
+    )
+    _fill(protocol, adapter, order, taker, making=half)
+    assert sell_token.balanceOf(taker) == half
 
 
 def test_mock_empty_getters_allow_exact_fills_only(
@@ -638,7 +639,7 @@ def test_mock_empty_getters_allow_exact_fills_only(
     want._mint_for_testing(taker, quote)
     with boa.env.prank(taker):
         want.approve(protocol, MAX_UINT256)
-    order = make_order(getMakerAmount=b"", getTakerAmount=b"")
+    order = make_order()
     with boa.reverts(custom_err("WrongAmount()")):
         _fill(protocol, adapter, order, taker, making=LOT_AMOUNT // 2)
     _fill(protocol, adapter, order, taker, making=LOT_AMOUNT)

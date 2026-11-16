@@ -20,28 +20,30 @@
      isValidSignature). The second signature of the name — the operator
      co-signature every fill carries, issued per fill by the KyberSwap API —
      is outside the maker's signature and this adapter's concern: it gates
-     who fills, never what the maker receives. Linear pricing only: amount
-     getters are pinned to the protocol's own linear calculators over the
-     order amounts (or empty: exact-amount fills), so the taking amount is a
-     fixed ratio of the making amount, rounded in the maker's favour, and
-     the order's takingAmount is a floor on what any fill pays per unit; the
-     feeConfig fee is either paid by the taker on top or carved out of the
-     taker's maker-asset receipt, never out of the maker's taking amount.
-     The protocol checks a contract signature on the first fill of an order
-     only: a partially filled standing ask keeps filling at its signed price
-     (always at or above the curve at validation time, which only decays)
-     until its predicate expires, without asking the auction again.
+     who fills, never what the maker receives. Fill-or-kill only: both
+     amount getters must be empty, so the protocol accepts only the exact
+     order amounts and the maker is paid the signed takingAmount for the
+     signed makingAmount; the feeConfig fee is either paid by the taker on
+     top or carved out of the taker's maker-asset receipt, never out of
+     the maker's taking amount. The reason is the protocol's signature
+     policy: it checks a contract signature on the first fill of an order
+     only and fills the rest from its cached remainder without asking the
+     auction again, past a FeeCollector kill, a target change, an adapter
+     disable or the last second of the window. An order that cannot be
+     filled in part has no remainder, so its one fill always carries a
+     live signature check. The linear getters the KyberSwap API builds
+     into its orders allow partial fills and are rejected.
 @custom:kill Stateless and immutable: nothing to pause here. Routing through
              this adapter stops immediately when the registry disables it
              (owner or emergency owner); native take() stays untouched.
-             Because the protocol does not re-check partially filled orders,
-             an emergency disable is complete only with
-             sync_executor_approvals(protocol, tokens), which zeroes the
-             allowance every remaining fill relies on.
+             Every fill is validated live, so a disable, a FeeCollector
+             kill or a target change stops every order at once, published
+             earlier or not. sync_executor_approvals(protocol, tokens)
+             completes the emergency procedure as hygiene.
 @custom:security Holds no funds and receives no allowances (the executor —
                  the protocol — does, and spends them only under a digest
-                 this adapter validated through the auction's router, or for
-                 the remainder of an order it validated earlier).
+                 this adapter validated through the auction's router within
+                 the same fill).
                  Auction-agnostic: every economic decision is delegated to
                  msg.sender's check_order, so calling this contract directly
                  proves nothing about any auction. Validity here means the
@@ -124,20 +126,21 @@ def order_for(
     @dev Priced at the current block: the taking amount is the auction's
          quote now, so the order stays valid while the curve decays below it
          (a standing ask) and a publisher re-posts, with a fresh salt, as
-         the price falls. Partial fills are allowed through the linear
-         getters; every fill pays the same unit price rounded up. The
-         predicate `timestampBelow(lot_end + 1)` ends validity with the lot
-         window. No fee, any taker, no asset data, no interaction. An order
-         placed through the KyberSwap API instead carries the fields the
-         API's sign-message returns (its salt, feeConfig and
-         `and(nonceEquals, timestampBelow)` predicate); this adapter accepts
-         that shape too, and the signature is built the same way from it.
-         Anyone may publish.
+         the price falls. Fill-or-kill: no amount getters, so the order
+         fills once at exactly its signed amounts. The predicate
+         `timestampBelow(lot_end + 1)` ends validity with the lot window.
+         No fee, any taker, no asset data, no interaction. An order placed
+         through the KyberSwap API instead carries the fields the API's
+         sign-message returns (its salt, feeConfig and `and(nonceEquals,
+         timestampBelow)` predicate); this adapter accepts that shape, and
+         the signature is built the same way from it, provided the API
+         leaves both getters empty. Anyone may publish.
     @param _auction Auction (DutchAuctionBurner) selling the lot.
     @param _token Lot token to sell.
     @param _salt Order salt; the protocol tracks fills per order hash, so
            two live orders with equal fields need different salts.
-    @param _sell_amount Amount to sell; 0 sells everything available.
+    @param _sell_amount Amount to sell; 0 sells everything available. The
+           order is fill-or-kill, so it must not exceed what is available.
     @return The order and `this_adapter ++ abi_encode(order)`.
     """
     sell_amount: uint256 = _sell_amount
@@ -164,12 +167,10 @@ def order_for(
         getMakerAmount=b"",
         getTakerAmount=b"",
         # timestampBelow is strict, so the last fillable second is lot_end;
-        # check_order rejects at lot_end anyway (LotInactive).
+        # check_order rejects at lot_end (LotInactive) on the fill itself.
         predicate=dslo._timestamp_below(lot_end + 1),
         interaction=b"",
     )
-    order.getMakerAmount = dslo._linear_getter(dslo.GET_MAKER_AMOUNT_SELECTOR, order)
-    order.getTakerAmount = dslo._linear_getter(dslo.GET_TAKER_AMOUNT_SELECTOR, order)
     return order, concat(convert(self, bytes20), abi_encode(order))
 
 
@@ -216,14 +217,14 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[dslo.ENCODED_ORDER_BOUND]
          decoding before any check runs and bubbles up the same way; one
          that decodes but is not the order's canonical encoding is
          NonCanonical. Shape: the calling auction as maker, no asset data
-         (it is appended to the transferFrom calldata), getters empty or
-         the linear ones over the order's own amounts, no interaction, and a
+         (it is appended to the transferFrom calldata), both getters empty
+         (fill-or-kill, so this check runs on the order's only fill), no
+         interaction, and a
          predicate carrying the expiry (`timestampBelow`, alone or inside
          the API's `and` with `nonceEquals(maker, nonce)` entries).
          Pass-through fields: salt, allowedSender (only restricts who fills)
          and feeConfig (the fee never lowers the maker's taking amount). The
-         order's amounts are priced as a whole (partial fills keep the unit
-         price), the receiver resolves like the protocol resolves it (empty
+         order's amounts are priced as a whole, the receiver resolves like the protocol resolves it (empty
          means the maker), and the predicate's expiry is the validity bound.
     @param _hash Order digest the protocol is verifying.
     @param _signature The abi-encoded Order, prefix already stripped.

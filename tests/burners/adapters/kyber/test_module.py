@@ -119,12 +119,6 @@ def fee_config(_fee_config: uint256) -> (address, uint256, bool):
 
 @external
 @pure
-def linear_getter(_selector: bytes4, _order: dslo.Order) -> Bytes[dslo.GETTER_LEN]:
-    return dslo._linear_getter(_selector, _order)
-
-
-@external
-@pure
 def check_getters(_order: dslo.Order):
     dslo._check_getters(_order)
 
@@ -419,24 +413,23 @@ def test_fee_config_unpacks_mainnet_vector(harness):
 # Amount getters
 
 
-def test_linear_getters_match_the_api(harness, order):
-    maker_getter, taker_getter = linear_getters(order[6], order[7])
-    assert bytes(harness.linear_getter(GET_MAKER_AMOUNT, order)) == maker_getter
-    assert bytes(harness.linear_getter(GET_TAKER_AMOUNT, order)) == taker_getter
-    mainnet = mainnet_order()
-    assert bytes(harness.linear_getter(GET_MAKER_AMOUNT, mainnet)) == mainnet[11]
-    assert bytes(harness.linear_getter(GET_TAKER_AMOUNT, mainnet)) == mainnet[12]
-
-
-def test_check_getters_accepts_linear_or_empty(harness, order):
-    harness.check_getters(order)
-    harness.check_getters(with_fields(order, getMakerAmount=b""))
-    harness.check_getters(with_fields(order, getTakerAmount=b""))
+def test_check_getters_accepts_only_empty_ones(harness, order):
+    # Fill-or-kill: with neither getter the protocol takes exact amounts only.
     harness.check_getters(with_fields(order, getMakerAmount=b"", getTakerAmount=b""))
+    # The API's linear getters allow partial fills, one direction each: the
+    # remainder would fill without a fresh maker signature.
+    for linear in (
+        order,
+        with_fields(order, getMakerAmount=b""),
+        with_fields(order, getTakerAmount=b""),
+    ):
+        with boa.reverts(custom_err("OrderNotValid(string)", "BadAmountGetter")):
+            harness.check_getters(linear)
 
 
 @pytest.mark.parametrize("field", ["getMakerAmount", "getTakerAmount"])
 def test_check_getters_rejects_everything_else(harness, order, field):
+    order = with_fields(order, getMakerAmount=b"", getTakerAmount=b"")
     making, taking = order[6], order[7]
     maker_getter, taker_getter = linear_getters(making, taking)
     own, other = (
