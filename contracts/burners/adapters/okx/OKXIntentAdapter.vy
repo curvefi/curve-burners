@@ -31,7 +31,10 @@
              (owner or emergency owner): the settlement checks the contract
              signature on every fill, so no validated-but-unfilled order
              survives a disable. sync_executor_approvals(token_approve,
-             tokens) completes the emergency procedure as hygiene.
+             tokens) completes the emergency procedure: hygiene for the
+             signed path, and the step that ends TokenApprove's standing
+             authority over the tokens (see security), once no other
+             active adapter shares it as executor.
 @custom:security Holds no funds and receives no allowances (the executor —
                  OKX's TokenApprove — does, and spends them for any contract
                  its proxy allowlists, the settlement among them; listing
@@ -94,7 +97,10 @@ MAX_VALID_TO: constant(uint256) = 2**32 - 1
 # Protocol wiring pinned at deploy: the EIP-712 domain is fixed by the
 # settlement's name, version and address and the approval target is
 # immutable in the settlement, so a settlement upgrade means a fresh adapter
-# deployment and a new registry entry anyway.
+# deployment and a new registry entry anyway. The pin covers these
+# addresses, not the proxy's allowlist of contracts that may pull through
+# TokenApprove: OKX administers it, and a change there needs no new
+# address.
 settlement: public(immutable(address))
 domain_separator: public(immutable(bytes32))
 token_approve_proxy: public(immutable(address))
@@ -232,8 +238,9 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[intent_swap.ENCODED_ORDER
          settlement). Pass-through fields: appData (no on-chain effect) and
          the commissions themselves. The order's amounts are priced as a
          whole by check_order with the receiver resolved like the protocol
-         resolves it (empty means the owner, which the auction rejects) and
-         validTo as the validity bound.
+         resolves it (empty means the owner, i.e. the auction itself,
+         which check_order accepts next to its receiver) and validTo as the
+         validity bound.
     @param _hash Order digest the settlement is verifying.
     @param _signature The abi-encoded Order, prefix already stripped.
     @return ERC-1271 magic value for a fillable order (anything else reverts).

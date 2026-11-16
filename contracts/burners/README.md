@@ -373,16 +373,21 @@ A taker calls `fillOrderTo(params, amounts, sender)` with
 `params.signature.orderSignature = KyberDsloAdapter ++ abi.encode(Order)`;
 the burner strips the prefix and the adapter recomputes the digest from the
 bare order (`adapters/kyber/dslo.vy` holds the order type, the type hash,
-the `feeConfig` layout, the linear getters and the predicate shapes). The
+the `feeConfig` layout, the getter policy and the predicate shapes). The
 economic principle is the 1inch one: **the signed `takingAmount` is the
 floor the FeeCollector is paid for `makingAmount`**. The order carries no
 amounts of its own at fill time — `getMakerAmount`/`getTakerAmount` are
 calldata the protocol staticcalls on itself with the swap amount appended
-— so the adapter pins each getter to the protocol's own linear calculator
-over the order's own amounts (`floor(taking * M / T)` maker tokens for a
-taking-amount fill, `ceil(making * T / M)` payment for a making-amount
-fill, both in the maker's favour) or accepts it empty (exact-amount fills
-only); anything else is `BadAmountGetter`. `feeConfig` passes through: a
+— and without a getter the protocol accepts only the exact order amount
+(`'LOP: wrong amount'` otherwise). The adapter requires both getters to be
+empty (`BadAmountGetter` otherwise, the protocol's own linear calculators
+included), which makes every order fill-or-kill. The reason is the
+protocol's signature policy: it checks a contract signature on the first
+fill of an order only and fills the rest from its cached remainder, without
+asking the burner again — past a FeeCollector kill, a target change, an
+adapter disable or the last second of the window. An order that cannot be
+filled in part has no remainder, so its one fill always carries a live
+signature check. `feeConfig` passes through: a
 taker-asset fee is paid on top by the taker, a maker-asset fee is carved
 out of the taker's maker-asset receipt, and in both branches the maker
 gives `makingAmount` and the FeeCollector receives the full `takingAmount`.
@@ -402,18 +407,22 @@ and then `check_order` with the maker asset, the taker asset, the resolved
 receiver (empty means the maker), the order amounts and the predicate
 expiry. `order_for(burner, token, salt, sell_amount)` returns the
 publishable pair for a live lot: the whole available amount by default,
-priced at the current block, linear getters, no fee, any taker, expiring
-with the lot; an order placed through the KyberSwap API instead carries the
-fields its `sign-message` endpoint returns (salt, `feeConfig`, the `and`
-predicate), and the signature is built the same way from them.
+priced at the current block, fill-or-kill (no getters), no fee, any taker,
+expiring with the lot; an order placed through the KyberSwap API instead
+carries the fields its `sign-message` endpoint returns (salt, `feeConfig`,
+the `and` predicate), and the signature is built the same way from them.
+The API has been building the linear getters into every order; such an
+order is rejected, so the orderbook route works only for orders the API
+returns without them.
 `describe(order)` unpacks the resolved receiver, the fee recipient, percent
 and side, and the expiry. Like the 1inch router, the protocol swallows a
 failed contract signature check into its own `'LOP: bad signature'`, so a
 publisher classifies an order by `eth_call` against the burner's
-`isValidSignature`; and it checks the contract signature on the first fill
-only, so a partially filled order keeps filling at its signed price until
-its predicate expires, and an emergency disable is complete only with
-`sync_executor_approvals(protocol, tokens)`.
+`isValidSignature`. Because every accepted order is fill-or-kill, a
+registry disable, a FeeCollector kill or a target change stops every
+order at once, published earlier or not;
+`sync_executor_approvals(protocol, tokens)` completes the emergency
+procedure as hygiene.
 
 ### Velora Delta rail: `VeloraDeltaAdapter`
 
@@ -428,17 +437,22 @@ modules run inside the Delta contract by delegatecall and pull the sold
 tokens with a plain `transferFrom` from the owner (an order with an empty
 `permit`); the Delta contract is what `sync_executor_approvals(delta,
 tokens)` approves. A registered Delta agent settles with `swapSettle`
-(fill-or-kill under the `Order` primary type) or `swapSettleFillable`
-(pro-rata slices under `FillableOrder`), passing `OrderWithSig.signature =
-VeloraDeltaAdapter ++ abi.encode(Order)`; `SignatureLib.verify` forwards
+(fill-or-kill under the `Order` primary type), passing
+`OrderWithSig.signature = VeloraDeltaAdapter ++ abi.encode(Order)`;
+`swapSettleFillable` (pro-rata slices under `FillableOrder`) is not
+supported. `SignatureLib.verify` forwards
 those bytes verbatim to the burner's `isValidSignature` with the digest of
 the entry point's primary type (contract owners are ERC-1271 signers there;
 the on-chain pre-signature mapping is only an alternative and needs no
 burner state). The burner strips the adapter prefix and the adapter
 recomputes the digest from the bare order (`adapters/velora/delta.vy` holds
-the order type, both primary type hashes, the domain and the fee packing),
-accepting whichever of the two digests matches since the economics are the
-same, checks the shape — canonical encoding, the burner as owner, a sell
+the order type, both primary type hashes, the domain and the fee packing)
+under the `Order` type only — the `FillableOrder` digest of the same
+fields is `InvalidHash`: for a slice the settlement scales `srcAmount`,
+`destAmount` and `expectedAmount` down independently, each rounded down,
+while the auction prices a slice rounded up, so a slice of an order priced
+exactly at the curve can pay less than the curve asks for it and the
+whole-order check does not bound that — checks the shape — canonical encoding, the burner as owner, a sell
 order, an empty permit (a permit routes the pull through Permit2, which the
 burner never approves, or skips it), no bridge (the proceeds must reach the
 beneficiary on this chain), `expectedAmount` at or above `destAmount` — and
@@ -460,8 +474,9 @@ surfaces as the settlement's own `InvalidSignature`.
 `VeloraDeltaAdapter.order_for(burner, token, nonce, sell_amount)` returns
 the publishable pair for a live lot: the whole available amount by default,
 `destAmount = expectedAmount =` the quote at the current block, no partner,
-no permit, no metadata, no bridge, valid until the lot end; either entry
-point may fill it. Two Delta facts shape publishing. Nonces are unordered
+no permit, no metadata, no bridge, valid until the lot end; it fills in
+whole through `swapSettle` (a publisher splits a lot into several orders
+if smaller fills are wanted). Two Delta facts shape publishing. Nonces are unordered
 (a bitmap per owner, burnt once the order is filled in full), so every
 re-post as the curve decays needs a fresh nonce; `isNonceUsed(owner,
 nonce)` reads the bitmap. And only agents registered in the Portikus V2
@@ -491,10 +506,11 @@ OifEscrowAdapter, executor = Permit2`, because the escrow opens a sponsored
 intent through `Permit2.permitWitnessTransferFrom`: Permit2 is what pulls
 the sold tokens, so Permit2 is what `sync_executor_approvals(permit2,
 tokens)` approves (shared with every other Permit2-based adapter through
-the executor reference count). A solver calls
+the executor reference count). A solver fills the output first, then calls
 `escrow.openForAndFinalise(order, sponsor = burner, signature = 0x00 ++
 OifEscrowAdapter ++ abi.encode(StandardOrder), destination, call)` (or
-anyone calls `openFor` with the same bytes); the escrow strips its
+anyone calls `openFor` with the same bytes once the output is filled); the
+escrow strips its
 signature-type byte and Permit2 forwards the rest verbatim to the burner's
 `isValidSignature` with the `PermitBatchWitnessTransferFrom` digest (permit
 = the input token and amount, `order.nonce`, deadline = `fillDeadline`;
@@ -508,23 +524,36 @@ identifiers, the pinned output settler as the order's input oracle and as
 the output's oracle and settler on this chain, no callback, a plain
 limit-order context (none or limit; an exclusive one would let the opener
 lock every other solver out until a start time it picks), `expires` equal
-to `fillDeadline` (the escrow refunds an opened but unfilled intent only
-after `expires`, so a later `expires` would let any opener park the lot in
-the escrow past the lot end), and `fillDeadline` at most 15 minutes past
-the open (`MAX_FILL_WINDOW`: anyone may `openFor` a burner intent, which
-moves the lot into the escrow before anything is paid, so this bounds how
-long an unpaid open can keep the lot from every other rail) — and
-delegates the economics to `check_order` (output token is the target,
-recipient is the FeeCollector, input within the snapshot, output amount at
-or above the live quote, `fillDeadline` no later than the lot end). The
-oracle pin is what makes the floor real: the escrow releases the
+to `fillDeadline` (the escrow refunds an opened intent nobody finalised
+only after `expires`, so a later `expires` could park a lot in the escrow
+past the lot end), and `fillDeadline` at most 15 minutes past the open
+(`MAX_FILL_WINDOW`) — delegates the economics to `check_order` (output
+token is the target, recipient is the FeeCollector, input within the
+snapshot, output amount at or above the live quote, `fillDeadline` no
+later than the lot end), and last requires the output to be **already
+filled**: `outputSettler.getFillRecord(escrow.orderIdentifier(order),
+output)` must be set (`OutputNotFilled` otherwise). This is what keeps the
+lot available. The escrow pulls the input on open, before it looks at any
+fill, and `openFor` is permissionless; a signature given on shape and
+price alone would let anyone move a lot into the escrow for nothing —
+again and again under fresh nonces, each for another 15 minutes — and
+keep it from every other rail for the whole window (a per-intent deadline
+bounds one open, not their sum). With the fill required first, an open
+only ever moves an input that is paid for: the fill record is written by
+`OutputSettlerBase._fill` in the call that transfers the signed amount to
+the recipient, and it is keyed by the escrow's order id (user, nonce,
+deadlines, oracle, inputs, outputs) and the output, so one payment backs
+one open. The economics are checked before the fill record, so on an
+`eth_call` a typed economic error means "do not fill" and
+`OutputNotFilled` means every other check passed. The oracle pin is what
+makes the floor real: the escrow releases the
 input only against the input oracle's attestation, and the pinned output
 settler attests only its own fills, which pay `output.amount` to the
 recipient. Shape failures revert with `oif.OrderNotValid(reason)`
 (`NonCanonical`, `InvalidHash`, `BadUser`, `BadChain`, `BadInputs`,
 `BadOutputs`, `BadInputOracle`, `BadOutputChain`, `BadOutputSettler`,
 `BadIdentifier`, `BadCallback`, `BadContext`, `BadExpires`,
-`BadFillDeadline`); the auction's typed
+`BadFillDeadline`, `OutputNotFilled`); the auction's typed
 `check_order` revert bubbles unchanged, through the real escrow and Permit2
 included, and a disabled adapter surfaces as Permit2's
 `InvalidContractSignature`.
@@ -536,27 +565,31 @@ open to every solver, `expires = fillDeadline` (15 minutes from now by
 default, never past the lot end).
 Three escrow facts shape publishing. Intents are fill-or-kill and
 nonce-burning (Permit2 unordered nonces, burnt on open), so every re-post
-as the curve decays needs a fresh nonce. An intent is settled either
-atomically (the solver fills the output and attests on the output settler,
-then `openForAndFinalise` pulls the input and hands it to the solver in the
-same block) or in two steps (`openFor` moves the input into the escrow
-first; the solver then fills, attests and `finalise`s): in the second shape
-the input sits in the escrow until the fill or, after `expires`, a
-permissionless `refund` back to the burner, so a publisher opening intents
-itself keeps `fill_deadline` short. And distribution: LI.FI's order server
-(`order.li.fi`, no API key) quotes same-chain intents and fills the ones
-opened on-chain, but as of this writing accepts only user-opened orders
-(`oif-user-open-v0`), not sponsored escrow orders, so a sponsored intent
-reaches a solver directly or through a keeper that opens it on-chain for
-the server's solver to fill. A governance fee the escrow owner may set is
+as the curve decays needs a fresh nonce. An intent is settled fill-first:
+the solver fills the output for `escrow.orderIdentifier(order)` (paying the
+FeeCollector), attests on the output settler, and `openForAndFinalise`
+pulls the input and hands it over — in one transaction, so the solver
+carries no gap. Opening and finalising later also works (anyone may
+`openFor` a filled intent; the solver `finalise`s), but then the gap is
+the solver's: if the lot is sold or stopped between its fill and the open,
+the open reverts and the payment stays with the FeeCollector; and an
+opened intent the solver does not finalise by `expires` goes back to the
+burner by the permissionless `refund`. The open-first order of the same
+calls (`openFor`, then fill) is refused. And distribution: LI.FI's order
+server (`order.li.fi`, no API key) quotes same-chain intents and fills the
+ones opened on-chain, i.e. open-first, and as of this writing accepts only
+user-opened orders (`oif-user-open-v0`), not sponsored escrow orders, so a
+sponsored intent reaches a solver directly, and that solver must fill
+before it opens. A governance fee the escrow owner may set is
 taken from the input on release and is the solver's cost, never the
 FeeCollector's.
 
 Emergency procedure is the CoW one with `executor = Permit2`:
 `registry.disable_adapter(OifEscrowAdapter)` batched with
 `sync_executor_approvals(permit2, tokens)` (Permit2 stays approved while
-another Permit2-based adapter is active). An intent already opened keeps
-its input in the escrow until it is filled or refunded.
+another Permit2-based adapter is active). An intent already opened is
+already paid for; its input stays in the escrow until the solver finalises
+or, after `expires`, the refund returns it to the burner.
 
 ### 0x rail: `ZeroExSettlerAdapter`
 
@@ -621,7 +654,7 @@ the intent rail, the solver's unsigned ones decide only the margin above the
 floor: the API's fee actions (`BASIC` ppm transfers of the sell token) come
 out of the permitted amount, never out of `minAmountOut`. The pull, the swap
 and the floor check run in one `executeMetaTxn` and nothing is escrowed, so
-unlike an OIF open there is no unpaid state to bound and no fill window: the
+unlike an OIF open there is no escrowed state and no fill window: the
 permit deadline (at most the lot end) is the only time limit. A native buy
 token (the Settler's ETH sentinel) is never the target and fails
 `check_order`.
@@ -849,14 +882,20 @@ itself, however, swallows every revert of a contract signature check into
 its own `BadSignature()`, so a publisher classifies an order by `eth_call`
 against the burner's `isValidSignature`, not against a fill. Two protocol
 facts shape every 1inch rail. The router checks a contract signature on
-the first fill of an order only: a partially filled order keeps filling at
-its signed unit price (at or above the curve at validation time, which
-only decays) until it expires, without asking the burner again — fine
-economically, but it means that disabling an adapter does not stop the
-remainder of an already started order; only the allowance does. And a
-published order is a standing ask like the CoW one: the burner keeps
-accepting it as the curve decays below it, and a publisher re-posts lower
-with a fresh salt (the router tracks fills per order hash). 1inch is not
+the first fill only of an order it tracks by remaining amount (partial and
+multiple fills both on) and fills the rest from its own cache, without
+asking the burner again — such an order would outlive a FeeCollector kill,
+a target change, an adapter disable and the last second of the window
+(the router's expiration is inclusive, the window end is not). All three
+adapters therefore accept single-fill orders only (`BadMakerTraits`
+otherwise): partial fills or multiple fills off, which puts the order on
+the router's bit invalidator (`MakerTraitsLib.useBitInvalidator`). Such an
+order fills once, in part or in whole, the fill burns the maker's bit for
+the order's nonce, and that fill always asks the burner. And a published
+order is a standing ask like the CoW one: the burner keeps accepting it as
+the curve decays below it, and a publisher re-posts lower — and re-posts
+the unsold rest after a fill — with a fresh salt, whose low 40 bits
+`order_for` uses as the nonce. 1inch is not
 deployed on Fraxtal, so this rail is for Polygon and Ethereum.
 
 #### Plain orders: `OneInchAdapter`
@@ -869,7 +908,7 @@ prices every fill linearly from the order amounts and the resolved receiver
 `OneInchAdapter.order_for(burner, token, salt, sell_amount)` returns the
 publishable pair for a live lot: a plain order (no extension) for the whole
 available amount by default, priced at the current block, open to every
-taker, partially and multiply fillable, expiring at the lot end. Plain
+taker, one fill of any size, expiring at the lot end. Plain
 orders are not what the 1inch off-chain feeds carry, so a publisher hands
 them to takers directly (or through its own feed); the on-chain fill is
 permissionless.
@@ -894,7 +933,9 @@ calls only when the `makerTraits` ask for it and which splits only when
 `order.receiver` is the FeeTaker itself (else `InconsistentFee` for any
 fee), keeps `floor(T * fee / denominator)` per fee for the integrator and
 protocol receivers and sends the rest to the custom receiver (flag `0x01`,
-20 bytes after the two fee receivers) or to the maker; and it refuses
+20 bytes after the two fee receivers) or, with the flag unset, to the
+maker — it branches on the flag, so a flagged zero receiver is paid
+literally; and it refuses
 takers that are neither whitelisted nor holders of the Resolver Access
 Token (`0xAcce5500000f71A32B5E5514D1577E14b7aacC4a`): orderbook orders
 are filled by 1inch resolvers, not by anyone. Receiver floor: for a fill
@@ -914,9 +955,13 @@ post-interaction targets it (`BadPostInteraction`), the fee data parses
 with the getter's bounds and is the same on both sides (`BadFeeData`), the
 whitelists parse and list the same takers (`BadWhitelist`), and neither
 side has a tail (a tail of 20 bytes or more chains another amount getter
-or `IPostInteraction`: `BadGetterTail`, `BadInteractionTail`). The custom
-receiver (the maker when none is flagged) is handed to `check_order`,
-which rejects anything but the FeeCollector. Fee values, fee receivers and
+or `IPostInteraction`: `BadGetterTail`, `BadInteractionTail`). A flagged
+custom receiver must not be zero (`BadCustomReceiver`): the FeeTaker would
+pay the zero address, not fall back to the maker. The receiver the
+post-interaction pays — the custom receiver when flagged, else the maker,
+i.e. the burner — is handed to `check_order`, which accepts the
+FeeCollector or the burner itself (`push_target` forwards) and nothing
+else. Fee values, fee receivers and
 whitelists are not bounded: the API dictates them and they are the taker's
 cost; `describe(extension)` returns them for publishers.
 
@@ -928,8 +973,8 @@ FeeCollector`; the Python encoders in `tests/burners/adapters/oneinch_feetaker/t
 reproduce the SDK bytes), then
 `OneInchFeeTakerAdapter.order_for(burner, token, salt, sell_amount,
 extension)` returns the order (receiver = FeeTaker, amounts at the live
-quote, partial and multiple fills, post-interaction call, expiring at the
-lot end, salt bound like `LimitOrder.buildSalt`) and the signature
+quote, one fill of any size, post-interaction call, expiring at the lot
+end, salt bound like `LimitOrder.buildSalt`, its low 40 bits as the nonce) and the signature
 `adapter ++ abi.encode(order, extension)`; submit `POST
 /orderbook/v4.0/{chain}` with `orderHash, signature, data{...order,
 extension}`. The SDK's own order over the same extension validates too.
@@ -1006,11 +1051,12 @@ FeeCollector gets below the linear base.
 Emergency procedure is the CoW one with `executor = router`, for all three
 adapters: `registry.disable_adapter(<adapter>)` batched with
 `sync_executor_approvals(router, tokens)` (`scripts/emergency_cow_disable.py`
-takes the executor as an argument). Here the allowance sync is not optional
-hygiene but the step that actually stops fills of orders validated before
-the disable (the first-fill-only signature check applies to all three), as
-the mainnet fork tests demonstrate; and because the three share the router
-as executor, the allowance only clears once the last of them is disabled.
+takes the executor as an argument). Every accepted order is single-fill
+and validated on that fill, so the disable alone stops every order,
+published before it or not, as does a FeeCollector kill or a target change
+(the mainnet fork tests demonstrate both); the allowance sync is hygiene,
+and because the three share the router as executor, the allowance only
+clears once the last of them is disabled.
 
 ### UniswapX rail: `UniswapXAdapter`
 
