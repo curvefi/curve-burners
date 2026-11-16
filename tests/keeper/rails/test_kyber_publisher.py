@@ -70,12 +70,11 @@ def adapter(client, auction, kyber_adapter, dslo_protocol, register):
 def sign_message_for(dslo_protocol, client):
     """The sign-message answer the maker API gives for a request body: the
     EIP-712 domain of the protocol and the message with the API's salt,
-    feeConfig (a 0.1% taker-asset fee), linear getters and the
-    and([nonceEquals(maker, 0), timestampBelow(expiredAt)]) predicate."""
+    feeConfig (a 0.1% taker-asset fee), no amount getters (the fill-or-kill
+    shape the adapter signs) and the and([nonceEquals(maker, 0),
+    timestampBelow(expiredAt)]) predicate."""
 
     def _answer(params, body, **overrides):
-        making, taking = int(body["makingAmount"]), int(body["takingAmount"])
-        getters = linear_getters(making, taking)
         message = {
             "salt": str(SALT),
             "makerAsset": body["makerAsset"],
@@ -88,8 +87,8 @@ def sign_message_for(dslo_protocol, client):
             "feeConfig": str(pack_fee_config(FEE_RECIPIENT, 100, True)),
             "makerAssetData": "0x",
             "takerAssetData": "0x",
-            "getMakerAmount": "0x" + getters[0].hex(),
-            "getTakerAmount": "0x" + getters[1].hex(),
+            "getMakerAmount": "0x",
+            "getTakerAmount": "0x",
             "predicate": "0x"
             + api_predicate(dslo_protocol.address, body["maker"], 0, body["expiredAt"]).hex(),
             "interaction": "0x",
@@ -219,6 +218,20 @@ def test_messages_that_do_not_match_the_lot_are_skipped(
         (
             dict(message={"predicate": "0x" + timestamp_below(timestamp() + 500).hex()}),
             "is past the requested",
+        ),
+        # The linear getters the maker API builds: partial fills, whose
+        # remainder the protocol fills without the auction's signature.
+        (
+            dict(
+                message={
+                    name: "0x" + getter.hex()
+                    for name, getter in zip(
+                        ("getMakerAmount", "getTakerAmount"),
+                        linear_getters(view.available, view.amount_needed),
+                    )
+                }
+            ),
+            "amount getters allow partial fills",
         ),
         # Shape failures the predicate check does not cover surface at the router.
         (dict(message={"interaction": "0x" + "ab" * 20}), "OrderNotValid('BadInteraction')"),
@@ -403,7 +416,6 @@ def kyber_feeds(http, dslo_protocol, client):
     """The maker API's sign-message (no fee, the API's predicate) and orders answers."""
 
     def kyber_sign_message(params, body):
-        getters = linear_getters(int(body["makingAmount"]), int(body["takingAmount"]))
         message = {
             "salt": str(timestamp()),
             "makerAsset": body["makerAsset"],
@@ -416,8 +428,8 @@ def kyber_feeds(http, dslo_protocol, client):
             "feeConfig": "0",
             "makerAssetData": "0x",
             "takerAssetData": "0x",
-            "getMakerAmount": "0x" + getters[0].hex(),
-            "getTakerAmount": "0x" + getters[1].hex(),
+            "getMakerAmount": "0x",
+            "getTakerAmount": "0x",
             "predicate": "0x"
             + api_predicate(dslo_protocol.address, body["maker"], 0, body["expiredAt"]).hex(),
             "interaction": "0x",

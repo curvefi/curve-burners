@@ -101,7 +101,6 @@ networks:
       # partner: curve                # partner string for the price and the order
       # partner_address: "0x..."      # partner fee the order signs away (destAmount grossed up)
       # partner_fee_bps: 0
-      # partially_fillable: false     # FillableOrder (pro-rata fills) instead of fill-or-kill
       # order_type: LIMIT             # ASSUMED API order type for a standing ask (default MARKET)
     zerox:                          # ZeroExSettlerAdapter (0x Settler v2 gasless flows)
       api_key_env: ZEROX_API_KEY    # Gasless API key (quote + submit, SettlerMetaTxn adapters only)

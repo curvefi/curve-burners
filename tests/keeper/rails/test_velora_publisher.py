@@ -210,20 +210,20 @@ def test_quote_below_the_curve_still_posts_the_floor(
     assert "below the curve" in caplog.text
 
 
-def test_fillable_order_and_partner_fee(
+def test_partner_fee_order_is_fill_or_kill(
     client, auction, harness, http, adapter, velora_adapter, sell_token, lot, network_config
 ):
     view = auction.lot_view(sell_token.address)
     http.on("GET", PRICES_PATH, lambda params, body: price_for(params, output=view.amount_needed))
     http.on("POST", ORDERS_PATH, POSTED)
-    settings = VeloraSettings(partially_fillable=True, partner_address=PARTNER, partner_fee_bps=50)
+    settings = VeloraSettings(partner_address=PARTNER, partner_fee_bps=50)
     publisher = VeloraDeltaPublisher(
         client, adapter, network_config(order_ttl=300, velora=settings), http=http
     )
     result = publisher.publish(auction, view)
     assert result is not None
     body = posted(http)[0]["json"]
-    assert body["partiallyFillable"] is True
+    assert body["partiallyFillable"] is False
     order = body["order"]
     assert int(order["partnerAndFee"]) == pack_partner_and_fee(PARTNER, 50)
     assert velora_adapter.describe(int(order["partnerAndFee"]))[:2] == (PARTNER, 50)
@@ -246,13 +246,14 @@ def test_fillable_order_and_partner_fee(
         int(order["partnerAndFee"]),
     )
     signature = bytes.fromhex(body["signature"][2:])
+    digest = built.digest(publisher.domain_separator)
+    assert result.uid == "0x" + digest.hex()
+    assert harness.isValidSignature(digest, signature) == ERC1271_MAGIC_VALUE
+    # The FillableOrder digest of the same order is never signed: a pro-rata
+    # slice would round against the auction.
     fillable = order_digest_reference(built.as_tuple(), publisher.domain_separator, fillable=True)
-    assert result.uid == "0x" + fillable.hex()
-    assert harness.isValidSignature(fillable, signature) == ERC1271_MAGIC_VALUE
-    assert (
-        harness.isValidSignature(built.digest(publisher.domain_separator), signature)
-        == ERC1271_MAGIC_VALUE
-    )
+    with boa.reverts():
+        harness.isValidSignature(fillable, signature)
 
 
 def test_ttl_never_passes_the_lot_end_and_nonces_are_fresh(
@@ -375,26 +376,26 @@ def test_config_section_defaults_and_parse():
 
     velora = velora_of()
     assert velora.enabled and velora.post and velora.partner is None
-    assert velora.partner_fee_bps == 0 and not velora.partially_fillable
+    assert velora.partner_fee_bps == 0
     assert velora.order_type == "LIMIT" and velora.api_url == "https://api.paraswap.io"
     velora = velora_of(
         {
             "partner": "curve",
             "partner_address": "0x" + "fe" * 20,
             "partner_fee_bps": 50,
-            "partially_fillable": True,
             "order_type": "MARKET",
         }
     )
     assert velora.partner == "curve" and velora.partner_fee_bps == 50
-    assert velora.partially_fillable and velora.order_type == "MARKET"
+    assert velora.order_type == "MARKET"
     # A zero fee is allowed explicitly; a negative one is not.
     assert velora_of({"partner_fee_bps": 0}).partner_fee_bps == 0
     for bad in (
         {"partner_fee_bps": -1},
         {"partner": 1},
         {"nope": True},
-        {"partially_fillable": "yes"},
+        # Gone with the FillableOrder digest the adapter no longer signs.
+        {"partially_fillable": True},
         "polygon",
     ):
         with pytest.raises(ConfigError):

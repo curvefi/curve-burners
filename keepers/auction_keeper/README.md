@@ -77,7 +77,6 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `velora.enabled`, `velora.post` | `true`, `true` | Serve `VeloraDeltaAdapter`; `post: false` logs standing asks only. |
 | `velora.api_url`, `velora.partner` | `https://api.paraswap.io`, none | Delta API base (no key) and the partner string sent with the price and the order (also with the `velora` price source). |
 | `velora.partner_address`, `velora.partner_fee_bps` | none, 0 | A partner fee the order signs away (`partnerAndFee`); the signed `destAmount` is grossed up so the netted floor still covers the curve. |
-| `velora.partially_fillable` | `false` | Sign the `FillableOrder` primary type (pro-rata fills) instead of the fill-or-kill `Order`. |
 | `velora.order_type` | `LIMIT` | ASSUMED: the API's order `type` for a standing ask at the curve floor (the API default is `MARKET`). |
 | `zerox.api_key_env` | `ZEROX_API_KEY` | 0x Gasless API key (`0x-api-key` header); without it MetaTxn orders go the self-relay way. |
 | `zerox.enabled`, `zerox.post` | `true`, `true` | Serve `ZeroExSettlerAdapter`; `post: false` skips the Gasless API. |
@@ -255,8 +254,12 @@ takerAsset, maker: <auction>, receiver: <FeeCollector>, makingAmount:
 validity, never past the window end}` returns `data{domain, types,
 primaryType, message}`, the message carrying the API's `salt`, `feeConfig`
 (the server-computed fee, selected by the optional `X-Client-Id` header),
-`allowedSender`, the linear getters and the `and([nonceEquals(maker, 0),
-timestampBelow(expiredAt)])` predicate; the publisher checks
+`allowedSender`, the amount getters and the `and([nonceEquals(maker, 0),
+timestampBelow(expiredAt)])` predicate; the publisher requires both getters
+to be empty (the adapter signs fill-or-kill orders only: the protocol checks
+the maker signature on the first fill of an order, so a partially fillable
+one would keep filling past a kill; the linear getters the API has been
+building make the message skipped with a reason), checks
 `domain.verifyingContract` (the adapter's protocol) and `chainId`, maker,
 receiver, pair and amounts against the lot, asks the adapter's `describe`
 for the predicate's last fillable second (`expiredAt - 1`,
@@ -301,7 +304,8 @@ so the fee-netted floor the adapter checks still covers the curve, and
 shared). A quote below the curve does not block the post: the floor is
 ours to set, the order simply stands until the curve meets the market. The
 pair `adapter ++ abi_encode(order)` is validated on-chain under the `Order`
-or, with `partially_fillable`, the `FillableOrder` digest, then `POST
+digest (fill-or-kill; the adapter never signs the `FillableOrder` one, whose
+pro-rata slices round against the auction), then `POST
 {api_url}/v2/delta/orders` sends `{chainId, order{owner, beneficiary,
 srcToken, destToken, srcAmount, destAmount, expectedAmount, deadline, kind:
 0, nonce, partnerAndFee, permit, metadata, bridge}, signature,

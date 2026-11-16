@@ -11,10 +11,12 @@ the quoted output and ``destAmount``, ``deadline`` = the keeper TTL bound
 within the lot window, a random nonce, no permit, no metadata, no bridge) —
 the API's own ``/v2/delta/orders/build`` wants an undocumented ``route``
 object, so it is not used. The pair ``adapter ++ abi_encode(order)`` is
-validated through ``isValidSignature`` under the ``Order`` (fill-or-kill) or
-``FillableOrder`` digest per ``velora.partially_fillable``, then ``POST
-/v2/delta/orders`` sends ``{chainId, order, signature, partner?,
-partiallyFillable, type}`` (the SDK's ``DeltaOrderToPost``). UNVERIFIED: the
+validated through ``isValidSignature`` under the ``Order`` (fill-or-kill)
+digest — the adapter never signs the ``FillableOrder`` one: a pro-rata slice
+is rounded down by the settlement and up by the auction, so it can underpay
+the curve — then ``POST /v2/delta/orders`` sends ``{chainId, order,
+signature, partner?, partiallyFillable: false, type}`` (the SDK's
+``DeltaOrderToPost``). UNVERIFIED: the
 docs describe ``signature`` as a 64-byte ERC-2098 compact EOA signature; the
 SDK comment restricts that to EOA signatures, but whether the API relays a
 long ERC-1271 signature from a contract owner has not been exercised.
@@ -323,7 +325,7 @@ class VeloraDeltaPublisher(AdapterPublisher):
         if order is None:
             return None
         signature = order.signature(self.address)
-        digest = order.digest(self.domain_separator, fillable=self.settings.partially_fillable)
+        digest = order.digest(self.domain_separator)
         reason = self.validate_signature(auction, digest, signature)
         if reason is not None:
             log.warning("%s: Delta order rejected by the auction router: %s", lot.token, reason)
@@ -335,7 +337,7 @@ class VeloraDeltaPublisher(AdapterPublisher):
             "orderHash": uid,
             "order": order.as_json(),
             "signature": hex_bytes(signature),
-            "partiallyFillable": self.settings.partially_fillable,
+            "partiallyFillable": False,
             "quoted": None if quoted is None else str(quoted),
         }
         summary = (
@@ -423,7 +425,8 @@ class VeloraDeltaPublisher(AdapterPublisher):
             "chainId": self.client.chain_id,
             "order": order.as_json(),
             "signature": hex_bytes(signature),
-            "partiallyFillable": self.settings.partially_fillable,
+            # Fill-or-kill: the adapter signs the Order digest only.
+            "partiallyFillable": False,
             "type": self.settings.order_type,
         }
         if self.settings.partner:

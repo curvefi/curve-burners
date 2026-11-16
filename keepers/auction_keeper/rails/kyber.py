@@ -6,18 +6,23 @@ two-step flow. ``POST /write/api/v1/orders/sign-message`` with the lot
 (maker = the auction, receiver = the auction's receiver, making amount =
 available, taking amount = the live curve quote, ``expiredAt`` = the keeper
 TTL bound, never past the lot end) returns the EIP-712 message to sign —
-the API dictates ``salt``, ``feeConfig``, the linear getters and the
+the API dictates ``salt``, ``feeConfig``, the amount getters and the
 ``and([nonceEquals, timestampBelow])`` predicate; the publisher checks the
 echoed fields against the lot and the adapter's ``describe`` (expiry
-inside the window), signs ``adapter ++ abi_encode(order)``, validates the
+inside the window), requires both getters to be empty, signs ``adapter ++ abi_encode(order)``, validates the
 pair through ``isValidSignature`` with the protocol's digest, and ``POST
 /write/api/v1/orders`` sends the sign-message body plus ``salt`` and
 ``signature``. No API key is needed; an optional ``X-Client-Id`` selects
 the fee recipient packed into ``feeConfig`` and is sent to both calls.
 
 Fills carry a second, operator signature issued per fill by KyberSwap, so
-distribution runs through the orderbook; the maker signature is checked on
-the first fill only (an emergency disable needs the allowance sync).
+distribution runs through the orderbook. The protocol checks the maker
+signature on the first fill of an order only, so the adapter signs
+fill-or-kill orders alone (no amount getters): the one fill is the first.
+The linear getters the maker API has been building into every order allow
+partial fills; such a message is skipped with a reason and nothing is
+posted, so feed mode publishes only once the API returns an order without
+them (UNVERIFIED whether it can be asked to).
 
 Standing-ask mode (``post: false``): the ``order_for`` order (no fee, any
 taker, ``timestampBelow`` predicate at the TTL bound) is validated and
@@ -301,6 +306,11 @@ class KyberDsloPublisher(AdapterPublisher):
             return (
                 f"amounts {order.making_amount} -> {order.taking_amount} differ from the lot "
                 f"({lot.available} -> {lot.amount_needed})"
+            )
+        if order.get_maker_amount or order.get_taker_amount:
+            return (
+                "amount getters allow partial fills, whose remainder fills without the "
+                "auction's signature; the adapter signs fill-or-kill orders only"
             )
         try:
             _receiver, _fee_to, _fee, _taker_fee, expiry = self.contract.describe(order.as_tuple())

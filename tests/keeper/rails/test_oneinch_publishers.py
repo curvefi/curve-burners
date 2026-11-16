@@ -256,12 +256,19 @@ def test_plain_order_matches_order_for_and_validates(
     ]
     assert int(posted["makingAmount"]) == LOT_AMOUNT == result.sell_amount
     assert int(posted["takingAmount"]) == order.taking_amount == result.buy_amount
-    assert int(posted["makerTraits"]) == order.maker_traits  # the lot end: TTL is longer
+    # The lot end as expiration (the TTL is longer); the nonce field is the
+    # low 40 bits of the publisher's random salt.
+    nonce_field = (2**40 - 1) << 120
+    traits = int(posted["makerTraits"])
+    assert traits & ~nonce_field == order.maker_traits & ~nonce_field
+    assert (traits & nonce_field) >> 120 == int(posted["salt"]) & (2**40 - 1)
     assert result.valid_to == view.end
     # The signature validates on-chain for the protocol's digest.
     signature = bytes.fromhex(result.details["signature"][2:])
     assert signature[:20] == bytes.fromhex(oneinch_adapter.address[2:])
-    rebuilt = OneInchOrder(**{**order.__dict__, "salt": int(posted["salt"])})
+    rebuilt = OneInchOrder(
+        **{**order.__dict__, "salt": int(posted["salt"]), "maker_traits": traits}
+    )
     digest = order_digest_reference(rebuilt.as_tuple(), publisher.domain_separator)
     assert harness.isValidSignature(digest, signature) == ERC1271_MAGIC_VALUE
     assert result.uid == "0x" + digest.hex()

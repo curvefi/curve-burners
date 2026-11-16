@@ -99,9 +99,6 @@ class VeloraSettings(RailSettings):
     # floor still covers the curve quote. None: no partner fee.
     partner_address: str | None = None
     partner_fee_bps: int = 0
-    # FillableOrder (pro-rata partial fills) instead of the fill-or-kill Order
-    # primary type; the adapter accepts either digest.
-    partially_fillable: bool = False
     # ASSUMED: the API's order `type` for a standing ask at the curve floor
     # (MARKET is the API default; LIMIT keeps the order open until the deadline).
     order_type: str = "LIMIT"
