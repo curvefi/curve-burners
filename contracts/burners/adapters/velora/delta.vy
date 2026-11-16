@@ -233,9 +233,13 @@ def _net_floor(_order: Order) -> uint256:
          surplus, leaving exactly expectedAmount. A partner fee in bps is
          then taken off the amount in hand (`amount - amount * bps //
          10000`, nondecreasing in the amount), so the floor is that
-         function of destAmount. A partial fill scales srcAmount,
-         destAmount and expectedAmount by the same percentage before the
-         same arithmetic, so the floor scales pro rata up to rounding.
+         function of destAmount. It is a floor for the whole order only: a
+         partial fill (FillableOrder) scales srcAmount, destAmount and
+         expectedAmount by the same percentage, each rounded down, before
+         the same arithmetic, so a slice can fall below its pro-rata share
+         of this floor rounded up, which is what an auction asks for it.
+         Adapters pricing with this function must not sign FillableOrder
+         digests.
     """
     partner: address = empty(address)
     fee_bps: uint256 = 0

@@ -270,10 +270,13 @@ def test_deploy_rejects_foreign_domain(settlement_deployer, adapter_deployer):
 # Routing: the Delta rail is a regular registry adapter behind the prefix
 
 
-def test_prefixed_bare_order_is_valid_under_both_primary_types(harness, adapter, make_order):
+def test_prefixed_bare_order_is_valid_under_the_order_type_only(harness, adapter, make_order):
     order = make_order()
     assert _validate(harness, adapter, order, fillable=False) == ERC1271_MAGIC_VALUE
-    assert _validate(harness, adapter, order, fillable=True) == ERC1271_MAGIC_VALUE
+    # The FillableOrder digest of the same fields (swapSettleFillable) is
+    # never signed: a pro-rata slice rounds against the auction.
+    with boa.reverts(custom_err("OrderNotValid(string)", "InvalidHash")):
+        _validate(harness, adapter, order, fillable=True)
     # No fallback route: the unprefixed encoding selects no adapter.
     assert _validate(harness, adapter, order, _bare(order)) == ERC1271_INVALID
 
@@ -464,8 +467,7 @@ def test_order_for_builds_the_publishable_pair(
     # under both primary types.
     normalized = (*order[:11], b"", b"", EMPTY_BRIDGE)
     assert bytes(signature) == _signature(adapter, normalized)
-    for fillable in (False, True):
-        assert _validate(harness, adapter, normalized, fillable=fillable) == ERC1271_MAGIC_VALUE
+    assert _validate(harness, adapter, normalized) == ERC1271_MAGIC_VALUE
 
     # A partial amount is priced proportionally and validates as well.
     partial, partial_signature = adapter.order_for(
@@ -540,28 +542,51 @@ def test_swap_settle_rejects_an_underpaying_executor(
         _settle(settlement, agent, executor, want, order, bytes(signature), order[5] - 1)
 
 
-def test_swap_settle_fillable_fills_pro_rata_and_burns_the_nonce_at_the_end(
+def test_swap_settle_fillable_is_rejected(
     harness, adapter, settlement, agent, executor, sell_token, want, proceeds_receiver, lot
 ):
     order, signature = adapter.order_for(harness.address, sell_token.address, NONCE)
     order = (*tuple(order)[:11], b"", b"", EMPTY_BRIDGE)
     quote = order[5]
-    quarter_out = quote * 2500 // HUNDRED_PERCENT
-    paid = _settle_fillable(
-        settlement, agent, executor, want, order, bytes(signature), 2500, quarter_out
-    )
-    assert paid == quarter_out
-    assert sell_token.balanceOf(harness) == LOT_AMOUNT - LOT_AMOUNT // 4
-    assert settlement.swapFilledAmount(order) == LOT_AMOUNT // 4
+    # The settlement hashes a slice under the FillableOrder type; the
+    # adapter signs the Order type only, whatever the slice.
+    for percent in (2500, HUNDRED_PERCENT):
+        with boa.reverts(custom_err("OrderNotValid(string)", "InvalidHash")):
+            _settle_fillable(
+                settlement,
+                agent,
+                executor,
+                want,
+                order,
+                bytes(signature),
+                percent,
+                quote * percent // HUNDRED_PERCENT,
+            )
+    assert sell_token.balanceOf(harness) == LOT_AMOUNT
+    assert want.balanceOf(proceeds_receiver) == 0
     assert not settlement.isNonceUsed(harness.address, NONCE)
-    # The signature is re-checked on every slice against the live curve.
-    rest_out = quote * 7500 // HUNDRED_PERCENT
-    _settle_fillable(settlement, agent, executor, want, order, bytes(signature), 7500, rest_out)
-    assert sell_token.balanceOf(harness) == 0
-    assert want.balanceOf(proceeds_receiver) == quarter_out + rest_out
-    assert settlement.isNonceUsed(harness.address, NONCE)
-    with boa.reverts(custom_err("InvalidNonce()")):
-        _settle_fillable(settlement, agent, executor, want, order, bytes(signature), 1, 1)
+
+
+def test_a_fillable_slice_would_underpay_the_curve(
+    harness, erc20_deployer, want, settlement, agent, executor, adapter
+):
+    # Why FillableOrder is rejected: the settlement scales destAmount down
+    # for a slice (floor), the auction prices the same slice up (ceil). On a
+    # quote that is not a multiple of the slice denominator the two differ.
+    dust = erc20_deployer.deploy("Dust", "DUST", 18)
+    dust._mint_for_testing(harness.address, HUNDRED_PERCENT)
+    harness.set_frame(boa.env.evm.vm.state.timestamp)
+    harness.stage(dust.address)
+    boa.env.time_travel(seconds=3 * STEP_DURATION)
+    order, signature = adapter.order_for(harness.address, dust.address, NONCE)
+    order = (*tuple(order)[:11], b"", b"", EMPTY_BRIDGE)
+    whole = order[5]
+    assert whole % HUNDRED_PERCENT != 0
+    # One unit of the lot, 0.01% of the order.
+    slice_floor = whole // HUNDRED_PERCENT
+    assert slice_floor + 1 == harness.getAmountNeeded(dust.address, 1)
+    with boa.reverts(custom_err("OrderNotValid(string)", "InvalidHash")):
+        _settle_fillable(settlement, agent, executor, want, order, bytes(signature), 1, slice_floor)
 
 
 def test_settlement_bubbles_the_auction_revert_and_reports_a_disabled_adapter(

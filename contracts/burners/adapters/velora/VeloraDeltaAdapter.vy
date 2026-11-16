@@ -15,14 +15,16 @@
      and pull the sold tokens with a plain transferFrom from the owner
      (ERC20UtilsLib.transferFrom for an empty permit), so the Delta contract
      is what auctions approve. Signature template: an agent calls
-     swapSettle (fill-or-kill) or swapSettleFillable (partial fills) with
-     OrderWithSig.signature = this_adapter ++ abi.encode(Order); the
-     settlement forwards the bytes verbatim to the owner's (the auction's)
-     isValidSignature with the EIP-712 digest of the order under the
-     primary type the entry point hashes (Order or FillableOrder). The
-     same payload validates under both: the adapter accepts whichever of
-     the two digests matches, since the economics are identical (a partial
-     fill scales every amount pro rata). The signed destAmount is the floor
+     swapSettle (fill-or-kill) with OrderWithSig.signature = this_adapter
+     ++ abi.encode(Order); the settlement forwards the bytes verbatim to
+     the owner's (the auction's) isValidSignature with the EIP-712 digest
+     of the order under the Order primary type. Fill-or-kill only: the
+     FillableOrder digest swapSettleFillable hashes is rejected. That
+     entry point scales srcAmount, destAmount and expectedAmount down
+     independently for a slice, each rounded down, while the auction
+     prices a slice rounded up, so a slice of an order priced exactly at
+     the curve can pay less than the curve asks for it; the whole-order
+     check made here does not bound it. The signed destAmount is the floor
      delivered to the beneficiary after the settlement's fees: the
      protocol and a surplus-taking partner are paid only out of the
      surplus above expectedAmount, a partner fee in bps comes off the top
@@ -41,7 +43,7 @@
                  contract directly proves nothing about any auction.
                  Validity here means the auction accepts the fill;
                  protocol-side liveness (an unused nonce, the registered
-                 agent set, the remaining fillable amount) is the
+                 agent set) is the
                  publisher's concern and cannot be read from a signature
                  check. The settlement lets a revert of the signature check
                  bubble unchanged (a typed reason reaches the agent) and
@@ -77,9 +79,10 @@ ADAPTER_VERSION: public(constant(String[20])) = "VeloraDeltaAdapter"
 SIGNATURE_BOUND: constant(uint256) = 20 + delta.ENCODED_ORDER_BOUND
 
 # Protocol wiring pinned at deploy: the EIP-712 domain is fixed by the
-# protocol's name and version, this chain and the Delta address, so a
-# settlement upgrade means a fresh adapter deployment and a new registry
-# entry anyway.
+# protocol's name and version, this chain and the Delta address. The pin
+# covers the address and the domain, not the code behind them: the Delta
+# contract dispatches to settlement modules its admin can replace without
+# changing either, so a module change is reviewed like a new listing.
 settlement: public(immutable(address))
 domain_separator: public(immutable(bytes32))
 
@@ -119,16 +122,16 @@ def order_for(
          fresh nonce, as the price falls. Validity ends with the lot window
          (the settlement's deadline is inclusive; check_order rejects at
          lot_end anyway). No partner, no permit (the plain allowance path),
-         no metadata, no bridge. Either entry point may fill it: the whole
-         amount through swapSettle or pro-rata slices through
-         swapSettleFillable. Anyone may publish; only registered agents
-         settle.
+         no metadata, no bridge. Filled in whole through swapSettle; a
+         publisher splits a lot into several orders if smaller fills are
+         wanted. Anyone may publish; only registered agents settle.
     @param _auction Auction (DutchAuctionBurner) selling the lot.
     @param _token Lot token to sell.
     @param _nonce Unordered nonce for the auction; the settlement burns it
            once the order is filled in full, so two live orders need
            different nonces.
-    @param _sell_amount Amount to sell; 0 sells everything available.
+    @param _sell_amount Amount to sell; 0 sells everything available. The
+           order is fill-or-kill, so it must not exceed what is available.
     @return The order and `this_adapter ++ abi_encode(order)`.
     """
     sell_amount: uint256 = _sell_amount
@@ -188,10 +191,13 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[delta.ENCODED_ORDER_BOUND
          decode as one order (truncation, dynamic fields above the bounds)
          fails ABI decoding before any check runs and bubbles up the same
          way; one that decodes but is not the order's canonical encoding is
-         NonCanonical. The digest must be the order's under either primary
-         type (Order or FillableOrder). Shape: the calling auction as
+         NonCanonical. The digest must be the order's under the Order
+         primary type (swapSettle); the FillableOrder digest of the same
+         fields is InvalidHash, so no partial fill is ever signed. Shape: the calling auction as
          owner, a sell order, an empty permit (a permit routes the pull
-         through Permit2, which the auction never approves, or skips it),
+         through Permit2's allowance transfer, which the auction never
+         grants, whether or not its tokens are approved to Permit2 for
+         another adapter's signature transfers, or skips the pull),
          no bridge (the proceeds must reach the beneficiary on this chain)
          and expectedAmount at or above destAmount (so the surplus split
          never cuts into the floor). Pass-through fields: nonce, metadata,
@@ -209,10 +215,11 @@ def isValidSignature(_hash: bytes32, _signature: Bytes[delta.ENCODED_ORDER_BOUND
     # must be the one encoding of the order.
     assert abi_encode(order) == _signature, delta.OrderNotValid(reason="NonCanonical")
 
-    assert (
-        delta._order_digest(order, self.domain_separator, False) == _hash
-        or delta._order_digest(order, self.domain_separator, True) == _hash
-    ), delta.OrderNotValid(reason="InvalidHash")
+    # Order only, never FillableOrder: a pro-rata slice is rounded against
+    # the auction (see the module docstring).
+    assert delta._order_digest(order, self.domain_separator, False) == _hash, (
+        delta.OrderNotValid(reason="InvalidHash")
+    )
     assert order.owner == msg.sender, delta.OrderNotValid(reason="BadOwner")
     assert order.kind == delta.KIND_SELL, delta.OrderNotValid(reason="BadOrderKind")
     assert len(order.permit) == 0, delta.OrderNotValid(reason="BadPermit")

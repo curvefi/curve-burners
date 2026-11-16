@@ -263,9 +263,12 @@ def test_mainnet_real_settlement_fills_published_orders():
         assert quote == burner.getAmountNeeded(sell_token, quarter)
         assert order[0] == burner.address and order[1] == fee_collector.address
         assert order[7] == lot_end
-        for fillable in (False, True):
-            digest = order_digest_reference(order, MAINNET_DOMAIN, fillable)
-            assert bytes(burner.isValidSignature(digest, signature)) == bytes.fromhex("1626ba7e")
+        digest = order_digest_reference(order, MAINNET_DOMAIN, False)
+        assert bytes(burner.isValidSignature(digest, signature)) == bytes.fromhex("1626ba7e")
+        # The FillableOrder digest of the same fields is never signed: the
+        # settlement rounds a pro-rata slice down, the auction prices it up.
+        with boa.reverts(custom_err("OrderNotValid(string)", "InvalidHash")):
+            burner.isValidSignature(order_digest_reference(order, MAINNET_DOMAIN, True), signature)
 
         # Not an agent: the registry gate comes first.
         with boa.env.prank(outsider), boa.reverts():
@@ -273,43 +276,43 @@ def test_mainnet_real_settlement_fills_published_orders():
                 _order_with_sig(order, signature), _executor_data(target, quote), executor, b""
             )
 
-        # A pro-rata slice through swapSettleFillable: 40% of the order, the
-        # executor paying exactly the sliced floor.
-        slice_out = quote * 4000 // HUNDRED_PERCENT
-        target._mint_for_testing(executor, slice_out)
-        with boa.env.prank(agent):
-            delta.swapSettleFillable(
-                _order_with_sig(order, signature),
-                _executor_data(target, slice_out),
-                executor,
-                4000,
-                b"",
-            )
-        assert sell_token.balanceOf(executor) == quarter * 4000 // HUNDRED_PERCENT
-        assert target.balanceOf(fee_collector) == slice_out
-        assert delta.swapFilledAmount(order) == quarter * 4000 // HUNDRED_PERCENT
+        # A pro-rata slice through the real swapSettleFillable asks the burner
+        # for the FillableOrder digest and gets the adapter's typed refusal,
+        # for a part and for the whole alike; nothing moves.
+        for percent in (4000, HUNDRED_PERCENT):
+            slice_out = quote * percent // HUNDRED_PERCENT
+            target._mint_for_testing(executor, slice_out)
+            with (
+                boa.env.prank(agent),
+                boa.reverts(custom_err("OrderNotValid(string)", "InvalidHash", nested=True)),
+            ):
+                delta.swapSettleFillable(
+                    _order_with_sig(order, signature),
+                    _executor_data(target, slice_out),
+                    executor,
+                    percent,
+                    b"",
+                )
+        assert sell_token.balanceOf(burner) == initial_amount
+        assert target.balanceOf(fee_collector) == 0
         assert not delta.isNonceUsed(burner, NONCE)
 
-        # The rest of the same order later on the curve, overpaid: the surplus
-        # above expectedAmount is split with the protocol, the FeeCollector
-        # still gets at least the sliced floor; the nonce is burnt at 100%.
-        _move_to_timestamp(lot_start + 20 * STEP_DURATION)
-        rest_out = quote * 6000 // HUNDRED_PERCENT
-        target._mint_for_testing(executor, rest_out + 1000)
-        before = target.balanceOf(fee_collector)
+        # The whole order through swapSettle, overpaid: the surplus above
+        # expectedAmount is split with the protocol, the FeeCollector gets
+        # the signed floor and its half; the nonce is burnt.
+        target._mint_for_testing(executor, 1000)
         with boa.env.prank(agent):
-            delta.swapSettleFillable(
+            delta.swapSettle(
                 _order_with_sig(order, signature),
-                _executor_data(target, rest_out + 1000),
+                _executor_data(target, quote + 1000),
                 executor,
-                6000,
                 b"",
             )
-        assert target.balanceOf(fee_collector) - before == rest_out + 1000 - 1000 // 2
-        assert delta.swapFilledAmount(order) == quarter
+        assert target.balanceOf(fee_collector) == quote + 1000 - 1000 // 2
         assert delta.isNonceUsed(burner, NONCE)
         assert sell_token.balanceOf(burner) == initial_amount - quarter
 
+        _move_to_timestamp(lot_start + 20 * STEP_DURATION)
         # A fresh fill-or-kill order for the remainder through swapSettle.
         remainder = burner.available(sell_token)
         order2, signature2 = adapter.order_for(burner.address, sell_token.address, NONCE + 1)
