@@ -67,13 +67,48 @@ def emergency_owner():
 
 
 @pytest.fixture(scope="module")
-def settler():
-    return boa.env.generate_address("input_settler")
+def escrow():
+    return boa.load("contracts/testing/dutch_auction/OifEscrowMock.vy")
 
 
 @pytest.fixture(scope="module")
-def output_settler():
-    return boa.env.generate_address("output_settler")
+def output_settler_mock():
+    return boa.load("contracts/testing/dutch_auction/OifOutputSettlerMock.vy")
+
+
+@pytest.fixture(scope="module")
+def settler(escrow):
+    return escrow.address
+
+
+@pytest.fixture(scope="module")
+def output_settler(output_settler_mock):
+    return output_settler_mock.address
+
+
+@pytest.fixture(scope="module")
+def solver():
+    return boa.env.generate_address("solver")
+
+
+@pytest.fixture
+def fill_output(escrow, output_settler_mock, want, solver):
+    """Fill an order's output the way a solver does before opening: pay the
+    signed amount to the recipient through the output settler, under the
+    escrow's id of the order."""
+
+    def _fill(order: tuple) -> bytes:
+        output = order[7][0]
+        want._mint_for_testing(solver, output[4])
+        with boa.env.prank(solver):
+            want.approve(output_settler_mock.address, output[4])
+            return bytes(
+                output_settler_mock.fill(
+                    escrow.orderIdentifier(order), output, order[4], identifier(solver)
+                )
+            )
+
+    return _fill
 
 
 @pytest.fixture(scope="module")
@@ -229,6 +264,18 @@ def _validate(harness, adapter, order: tuple, signature: bytes | None = None, do
     )
 
 
+@pytest.fixture
+def validate_filled(harness, adapter, fill_output):
+    """Validate an order whose output a solver has filled first: the only
+    state the adapter signs an open in."""
+
+    def _validate_filled(order: tuple, signature: bytes | None = None):
+        fill_output(order)
+        return _validate(harness, adapter, order, signature)
+
+    return _validate_filled
+
+
 def _normalized(order: Any) -> tuple:
     order = tuple(order)
     outputs = [
@@ -258,6 +305,17 @@ def test_deploy_rejects_zero_dependencies(adapter_deployer, settler, output_sett
         adapter_deployer.deploy(settler, output_settler, ZERO_ADDRESS)
 
 
+def test_deploy_rejects_settlers_of_another_kind(
+    adapter_deployer, settler, output_settler, permit2, want
+):
+    # The escrow must answer orderIdentifier, the output settler getFillRecord.
+    for bad in (want.address, boa.env.generate_address("not_a_contract")):
+        with boa.reverts():
+            adapter_deployer.deploy(bad, output_settler, permit2)
+        with boa.reverts():
+            adapter_deployer.deploy(settler, bad, permit2)
+
+
 def test_deploy_rejects_missing_domain_separator(
     permit2_deployer, adapter_deployer, settler, output_settler
 ):
@@ -269,25 +327,25 @@ def test_deploy_rejects_missing_domain_separator(
 # Routing: the OIF rail is a regular registry adapter behind the prefix
 
 
-def test_prefixed_bare_order_is_valid_and_unprefixed_is_not(harness, adapter, make_order):
+def test_prefixed_bare_order_is_valid_and_unprefixed_is_not(
+    harness, adapter, make_order, validate_filled
+):
     order = make_order()
-    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
+    assert validate_filled(order) == ERC1271_MAGIC_VALUE
     # No fallback route: the unprefixed encoding selects no adapter.
-    assert _validate(harness, adapter, order, _bare(order)) == ERC1271_INVALID
+    assert validate_filled(order, _bare(order)) == ERC1271_INVALID
     # The escrow's signature-type byte never reaches the auction: with it
     # still in front, the prefix is not an adapter.
-    assert _validate(harness, adapter, order, _escrow_signature(adapter, order)) == (
-        ERC1271_INVALID
-    )
+    assert validate_filled(order, _escrow_signature(adapter, order)) == (ERC1271_INVALID)
 
 
 def test_disabled_adapter_is_invalid_not_reverting(
-    harness, adapter, make_order, registry, emergency_owner
+    harness, adapter, make_order, registry, emergency_owner, validate_filled
 ):
     order = make_order()
     with boa.env.prank(emergency_owner):
         registry.disable_adapter(adapter)
-    assert _validate(harness, adapter, order) == ERC1271_INVALID
+    assert validate_filled(order) == ERC1271_INVALID
 
 
 # Transport encoding
@@ -418,12 +476,12 @@ def test_exclusive_context_invalid(harness, adapter, make_order):
 
 
 @pytest.mark.parametrize("context", [b"", b"\x00"])
-def test_signed_amount_contexts_valid(harness, adapter, make_order, context):
-    assert _validate(harness, adapter, make_order(context=context)) == ERC1271_MAGIC_VALUE
+def test_signed_amount_contexts_valid(harness, adapter, make_order, context, validate_filled):
+    assert validate_filled(make_order(context=context)) == ERC1271_MAGIC_VALUE
 
 
-def test_nonce_passes_through(harness, adapter, make_order):
-    assert _validate(harness, adapter, make_order(nonce=0)) == ERC1271_MAGIC_VALUE
+def test_nonce_passes_through(harness, adapter, make_order, validate_filled):
+    assert validate_filled(make_order(nonce=0)) == ERC1271_MAGIC_VALUE
 
 
 @pytest.mark.parametrize("offset", [1, 2**32 - 1, -1])
@@ -442,12 +500,14 @@ def test_expires_other_than_the_fill_deadline_invalid(harness, adapter, make_ord
 # Every branch of check_order is covered directly in test_erc1271_dispatcher.
 
 
-def test_auction_economics_revert_bubbles_through_adapter(harness, adapter, make_order, sell_token):
+def test_auction_economics_revert_bubbles_through_adapter(
+    harness, adapter, make_order, sell_token, validate_filled
+):
     quote = harness.getAmountNeeded(sell_token.address, LOT_AMOUNT)
     with boa.reverts(custom_err("BadBuyAmount()")):
         _validate(harness, adapter, make_order(buy_amount=quote - 1))
     # Overpriced orders are always fine for the receiver.
-    assert _validate(harness, adapter, make_order(buy_amount=quote + 1)) == ERC1271_MAGIC_VALUE
+    assert validate_filled(make_order(buy_amount=quote + 1)) == ERC1271_MAGIC_VALUE
 
 
 def test_other_recipient_or_token_fails_the_auction_check(
@@ -467,14 +527,13 @@ def test_fill_deadline_past_the_window_invalid(harness, adapter, make_order):
         _validate(harness, adapter, make_order(fill_deadline=harness.frame_end() + 1))
 
 
-def test_fill_deadline_past_the_horizon_invalid(harness, adapter, make_order):
-    # Regression: anyone can openFor a burner intent, which moves the lot into
-    # the escrow before any payment, and an unfilled one returns only after
-    # expires (= fill deadline). A deadline far from the open, with an output
-    # nobody fills, would keep the lot from every rail for the whole window.
+def test_fill_deadline_past_the_horizon_invalid(harness, adapter, make_order, validate_filled):
+    # The horizon no longer bounds an unpaid open (there is none: the output
+    # is filled first); it stays as a bound on how long anything sits in the
+    # escrow that does not rest on the output settler's records.
     latest = _now() + MAX_FILL_WINDOW
     assert latest < harness.frame_end()
-    assert _validate(harness, adapter, make_order(fill_deadline=latest)) == ERC1271_MAGIC_VALUE
+    assert validate_filled(make_order(fill_deadline=latest)) == ERC1271_MAGIC_VALUE
     for deadline in (latest + 1, harness.frame_end()):
         with boa.reverts(custom_err("OrderNotValid(string)", "BadFillDeadline")):
             _validate(harness, adapter, make_order(fill_deadline=deadline))
@@ -482,20 +541,89 @@ def test_fill_deadline_past_the_horizon_invalid(harness, adapter, make_order):
     # within the horizon of the block that opens it.
     order = make_order(fill_deadline=latest)
     boa.env.time_travel(seconds=MAX_FILL_WINDOW)
-    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
+    assert validate_filled(order) == ERC1271_MAGIC_VALUE
 
 
-def test_partial_amount_order_valid(harness, adapter, make_order):
-    assert _validate(harness, adapter, make_order(sell_amount=LOT_AMOUNT // 3)) == (
-        ERC1271_MAGIC_VALUE
-    )
+def test_partial_amount_order_valid(harness, adapter, make_order, validate_filled):
+    assert validate_filled(make_order(sell_amount=LOT_AMOUNT // 3)) == (ERC1271_MAGIC_VALUE)
 
 
 # Publisher helper: order + escrow signature for the burner
 
 
+# Paid before opened: anyone may openFor, and the escrow pulls the lot on the
+# auction's signature before it looks at any fill.
+
+
+def test_unfilled_output_is_not_openable(
+    harness, adapter, make_order, fill_output, want, proceeds_receiver
+):
+    order = make_order()
+    # Shape and economics pass; nothing has been paid, so the open that
+    # would park the lot in the escrow gets no signature.
+    with boa.reverts(custom_err("OrderNotValid(string)", "OutputNotFilled")):
+        _validate(harness, adapter, order)
+    assert fill_output(order) != bytes(32)
+    assert want.balanceOf(proceeds_receiver) == order[7][0][4]
+    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
+
+
+def test_repeated_fresh_nonce_intents_cannot_reserve_the_lot(harness, adapter, make_order):
+    # The audited scenario: overpriced intents nobody will fill, reopened
+    # under fresh nonces to keep the lot off every rail. None of them opens.
+    quote = make_order()[7][0][4]
+    for nonce in range(NONCE, NONCE + 4):
+        order = make_order(nonce=nonce, buy_amount=10 * quote)
+        with boa.reverts(custom_err("OrderNotValid(string)", "OutputNotFilled")):
+            _validate(harness, adapter, order)
+        boa.env.time_travel(seconds=MAX_FILL_WINDOW + 1)
+
+
+def test_fill_record_backs_one_order_and_one_output(
+    harness, adapter, make_order, fill_output, escrow, output_settler_mock
+):
+    order = make_order()
+    fill_output(order)
+    assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
+    # Another nonce is another escrow order id: the payment does not carry over.
+    other = make_order(nonce=NONCE + 1)
+    assert escrow.orderIdentifier(other) != escrow.orderIdentifier(order)
+    with boa.reverts(custom_err("OrderNotValid(string)", "OutputNotFilled")):
+        _validate(harness, adapter, other)
+    # Nor does it to another output of the same order id space.
+    cheaper = make_order(nonce=NONCE + 2, context=b"\x00")
+    fill_output(cheaper)
+    plain = make_order(nonce=NONCE + 2)
+    assert bytes(
+        output_settler_mock.getFillRecord(escrow.orderIdentifier(cheaper), plain[7][0])
+    ) == bytes(32)
+
+
+def test_economics_are_judged_before_the_fill(harness, adapter, make_order, sell_token):
+    # An eth_call classifies an unfilled order: a typed economic error means
+    # do not fill, OutputNotFilled means everything else passed.
+    quote = harness.getAmountNeeded(sell_token.address, LOT_AMOUNT)
+    with boa.reverts(custom_err("BadBuyAmount()")):
+        _validate(harness, adapter, make_order(buy_amount=quote - 1))
+    harness.set_sellable(sell_token.address, False)
+    with boa.reverts(custom_err("LotInactive()")):
+        _validate(harness, adapter, make_order(buy_amount=quote))
+
+
+def test_a_filled_order_still_needs_a_live_lot(
+    harness, adapter, make_order, fill_output, sell_token
+):
+    # The solver's gap: paid, then stopped before the open. The payment
+    # stays with the receiver and the open is refused.
+    order = make_order()
+    fill_output(order)
+    harness.set_sellable(sell_token.address, False)
+    with boa.reverts(custom_err("LotInactive()")):
+        _validate(harness, adapter, order)
+
+
 def test_order_for_builds_the_publishable_pair(
-    harness, adapter, sell_token, want, proceeds_receiver, output_settler, lot
+    harness, adapter, sell_token, want, proceeds_receiver, output_settler, lot, validate_filled
 ):
     order, signature = adapter.order_for(harness.address, sell_token.address, NONCE)
     order = _normalized(order)
@@ -521,7 +649,7 @@ def test_order_for_builds_the_publishable_pair(
     # The signature is the documented template and validates end-to-end
     # once the escrow strips its type byte.
     assert bytes(signature) == _escrow_signature(adapter, order)
-    assert _validate(harness, adapter, order, bytes(signature)[1:]) == ERC1271_MAGIC_VALUE
+    assert validate_filled(order, bytes(signature)[1:]) == ERC1271_MAGIC_VALUE
 
     # A partial amount with a shorter fill deadline is priced proportionally.
     deadline = _now() + 600
@@ -532,19 +660,19 @@ def test_order_for_builds_the_publishable_pair(
     assert partial[3] == partial[4] == deadline
     assert partial[6] == [[int(sell_token.address, 16), LOT_AMOUNT // 4]]
     assert partial[7][0][4] == harness.getAmountNeeded(sell_token.address, LOT_AMOUNT // 4)
-    assert _validate(harness, adapter, partial, bytes(partial_signature)[1:]) == (
-        ERC1271_MAGIC_VALUE
-    )
+    assert validate_filled(partial, bytes(partial_signature)[1:]) == (ERC1271_MAGIC_VALUE)
 
 
-def test_order_for_stays_valid_as_the_curve_decays(harness, adapter, sell_token, lot):
+def test_order_for_stays_valid_as_the_curve_decays(
+    harness, adapter, sell_token, lot, validate_filled
+):
     now = boa.env.evm.vm.state.timestamp
     harness.set_frame(now)
     order, signature = adapter.order_for(harness.address, sell_token.address, NONCE)
     boa.env.time_travel(seconds=10 * STEP_DURATION)
     order = _normalized(order)
     assert harness.getAmountNeeded(sell_token.address, LOT_AMOUNT) < order[7][0][4]
-    assert _validate(harness, adapter, order, bytes(signature)[1:]) == ERC1271_MAGIC_VALUE
+    assert validate_filled(order, bytes(signature)[1:]) == ERC1271_MAGIC_VALUE
 
 
 def test_order_for_rejects_empty_lots_and_bad_deadlines(

@@ -1,10 +1,12 @@
 """Mainnet fork simulation of the OIF escrow rail as deployed by LI.FI: the
 real InputSettlerEscrowLIFI, OutputSettlerSimple and Permit2 settle intents
 built by OifEscrowAdapter.order_for against a DutchAuctionBurner behind a
-FeeCollector, through the atomic openForAndFinalise (a solver fills and
-attests the output, then opens and claims the input in one go), the
-two-step openFor (anyone opens, the input sits in the escrow) plus finalise
-by the solver, and the refund of an expired open intent.
+FeeCollector. The adapter signs an open only for an output the solver has
+already filled, so: an unpaid openFor is refused, under any number of fresh
+nonces; the atomic path (the solver fills and attests the output, then
+openForAndFinalise opens and claims the input) settles; so does a paid
+output opened by anyone and finalised by the solver later; and a paid,
+opened intent nobody finalises is refunded to the burner after it expires.
 
 Skips without a mainnet RPC (ETH_RPC_URL / MAINNET_RPC_URL, or an
 ALCHEMY_API_TOKEN / DRPC_API_KEY to build one); set REQUIRE_MAINNET_FORK=1 to
@@ -303,8 +305,23 @@ def test_mainnet_real_escrow_settles_published_intents():
         assert order[4] == min(lot_end, boa.env.evm.vm.state.timestamp + MAX_FILL_WINDOW)
         assert signature[0] == 0
         digest = permit_digest_reference(order, LIFI_INPUT_SETTLER, PERMIT2_MAINNET_DOMAIN)
-        assert bytes(burner.isValidSignature(digest, signature[1:])) == bytes.fromhex("1626ba7e")
+        # Shape and economics pass; nothing is paid yet, so the signature
+        # is withheld by name: an eth_call classifies the intent as ready.
+        with boa.reverts(custom_err("OrderNotValid(string)", "OutputNotFilled")):
+            burner.isValidSignature(digest, signature[1:])
         order_id = bytes(escrow.orderIdentifier(order))
+
+        # Anyone may call openFor, and the real escrow pulls the input before
+        # it looks at any fill: without a paid output the pull gets no
+        # signature, so the lot cannot be parked in the escrow for free.
+        with (
+            boa.env.prank(keeper),
+            boa.reverts(custom_err("OrderNotValid(string)", "OutputNotFilled", nested=True)),
+        ):
+            escrow.openFor(order, burner.address, signature)
+        assert sell_token.balanceOf(burner) == initial_amount
+        assert escrow.orderStatus(order_id) == STATUS_NONE
+        assert not _nonce_used(permit2, burner.address, NONCE)
 
         # Atomic settlement: the solver fills the output (paying the
         # FeeCollector the signed amount), attests its own fill on the output
@@ -313,6 +330,9 @@ def test_mainnet_real_escrow_settles_published_intents():
         now = boa.env.evm.vm.state.timestamp
         with boa.env.prank(solver):
             output_settler.fill(order_id, output, order[4], solver_id)
+            assert bytes(burner.isValidSignature(digest, signature[1:])) == bytes.fromhex(
+                "1626ba7e"
+            )
             output_settler.setAttestation(order_id, solver_id, now, output)
             escrow.openForAndFinalise(order, burner.address, signature, solver, b"")
         assert target.balanceOf(fee_collector) == quote
@@ -322,10 +342,33 @@ def test_mainnet_real_escrow_settles_published_intents():
         assert escrow.orderStatus(order_id) == STATUS_CLAIMED
         assert _nonce_used(permit2, burner.address, NONCE)
 
-        # Two-step settlement later on the curve: anyone opens the intent
-        # (the input moves into the escrow, nothing is paid yet), then the
-        # solver fills, attests and finalises to claim the input.
+        # Reservation attempts later on the curve: overpriced intents nobody
+        # would fill, opened under fresh nonces one after another. Each is
+        # refused; the lot stays with the burner and on every other rail.
         _move_to_timestamp(lot_start + 20 * STEP_DURATION)
+        for nonce in range(NONCE + 10, NONCE + 13):
+            parked, parked_signature = adapter.order_for(
+                burner.address, sell_token.address, nonce, quarter
+            )
+            parked = _normalized(parked)
+            parked_output = parked[7][0]
+            overpriced = (
+                *parked[:7],
+                [(*parked_output[:4], 10 * parked_output[4], *parked_output[5:])],
+            )
+            overpriced_signature = bytes(parked_signature)[:21] + encode([ORDER_ABI], [overpriced])
+            with (
+                boa.env.prank(keeper),
+                boa.reverts(custom_err("OrderNotValid(string)", "OutputNotFilled", nested=True)),
+            ):
+                escrow.openFor(overpriced, burner.address, overpriced_signature)
+            boa.env.time_travel(seconds=MAX_FILL_WINDOW + 1)
+        assert sell_token.balanceOf(burner) == initial_amount - quarter
+        assert burner.available(sell_token) == initial_amount - quarter
+
+        # Two steps: the solver fills (the FeeCollector is paid), anyone opens
+        # the now-paid intent, and the solver attests and finalises to claim
+        # the input.
         order2, signature2 = adapter.order_for(
             burner.address, sell_token.address, NONCE + 1, quarter
         )
@@ -335,6 +378,11 @@ def test_mainnet_real_escrow_settles_published_intents():
         quote2 = output2[4]
         assert quote2 < quote
         order_id2 = bytes(escrow.orderIdentifier(order2))
+        target._mint_for_testing(solver, quote2)
+        now = boa.env.evm.vm.state.timestamp
+        with boa.env.prank(solver):
+            output_settler.fill(order_id2, output2, order2[4], solver_id)
+        assert target.balanceOf(fee_collector) == quote + quote2
         with boa.env.prank(keeper):
             escrow.openFor(order2, burner.address, signature2)
         assert sell_token.balanceOf(burner) == initial_amount - 2 * quarter
@@ -345,23 +393,25 @@ def test_mainnet_real_escrow_settles_published_intents():
         with boa.env.prank(keeper), boa.reverts():
             escrow.openFor(order2, burner.address, signature2)
         boa.env.time_travel(seconds=STEP_DURATION)
-        target._mint_for_testing(solver, quote2)
-        now = boa.env.evm.vm.state.timestamp
         with boa.env.prank(solver):
-            output_settler.fill(order_id2, output2, order2[4], solver_id)
             output_settler.setAttestation(order_id2, solver_id, now, output2)
             escrow.finalise(order2, [(now, solver_id)], solver_id, b"")
-        assert target.balanceOf(fee_collector) == quote + quote2
         assert sell_token.balanceOf(solver) == 2 * quarter
         assert escrow.orderStatus(order_id2) == STATUS_CLAIMED
 
-        # An opened intent nobody fills is refundable after it expires.
+        # A paid, opened intent the solver never finalises is refundable to
+        # the burner after it expires: the FeeCollector keeps the payment and
+        # the lot comes back.
         now = boa.env.evm.vm.state.timestamp
         order3, signature3 = adapter.order_for(
             burner.address, sell_token.address, NONCE + 2, quarter, now + 600
         )
         order3 = _normalized(order3)
+        output3 = order3[7][0]
         order_id3 = bytes(escrow.orderIdentifier(order3))
+        target._mint_for_testing(solver, output3[4])
+        with boa.env.prank(solver):
+            output_settler.fill(order_id3, output3, order3[4], solver_id)
         with boa.env.prank(keeper):
             escrow.openFor(order3, burner.address, bytes(signature3))
         assert sell_token.balanceOf(burner) == initial_amount - 3 * quarter
@@ -370,6 +420,7 @@ def test_mainnet_real_escrow_settles_published_intents():
             escrow.refund(order3)
         assert sell_token.balanceOf(burner) == initial_amount - 2 * quarter
         assert escrow.orderStatus(order_id3) == STATUS_REFUNDED
+        assert target.balanceOf(fee_collector) == quote + quote2 + output3[4]
 
         # The burner's typed economic revert reaches the solver through the
         # real escrow and Permit2: an underpriced copy is rejected before any
