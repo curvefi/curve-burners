@@ -280,9 +280,33 @@
         },
         // RPC URL templates per provider; `${key}` is replaced with the stored key.
         providers: {
-          drpc: { polygon: "https://lb.drpc.org/ogrpc?network=polygon&dkey=${key}", fraxtal: "https://lb.drpc.org/ogrpc?network=fraxtal&dkey=${key}", logsSpan: 100 },
-          ankr: { polygon: "https://rpc.ankr.com/polygon/${key}", fraxtal: "https://rpc.ankr.com/fraxtal/${key}", logsSpan: 10000 },
-          alchemy: { polygon: "https://polygon-mainnet.g.alchemy.com/v2/${key}", fraxtal: "https://frax-mainnet.g.alchemy.com/v2/${key}", logsSpan: 2000 },
+          drpc: {
+            polygon: "https://lb.drpc.org/ogrpc?network=polygon&dkey=${key}",
+            fraxtal: "https://lb.drpc.org/ogrpc?network=fraxtal&dkey=${key}",
+            ethereum: "https://lb.drpc.org/ogrpc?network=ethereum&dkey=${key}",
+            gnosis: "https://lb.drpc.org/ogrpc?network=gnosis&dkey=${key}",
+            arbitrum: "https://lb.drpc.org/ogrpc?network=arbitrum&dkey=${key}",
+            base: "https://lb.drpc.org/ogrpc?network=base&dkey=${key}",
+            logsSpan: 100,
+          },
+          ankr: {
+            polygon: "https://rpc.ankr.com/polygon/${key}",
+            fraxtal: "https://rpc.ankr.com/fraxtal/${key}",
+            ethereum: "https://rpc.ankr.com/eth/${key}",
+            gnosis: "https://rpc.ankr.com/gnosis/${key}",
+            arbitrum: "https://rpc.ankr.com/arbitrum/${key}",
+            base: "https://rpc.ankr.com/base/${key}",
+            logsSpan: 10000,
+          },
+          alchemy: {
+            polygon: "https://polygon-mainnet.g.alchemy.com/v2/${key}",
+            fraxtal: "https://frax-mainnet.g.alchemy.com/v2/${key}",
+            ethereum: "https://eth-mainnet.g.alchemy.com/v2/${key}",
+            gnosis: "https://gnosis-mainnet.g.alchemy.com/v2/${key}",
+            arbitrum: "https://arb-mainnet.g.alchemy.com/v2/${key}",
+            base: "https://base-mainnet.g.alchemy.com/v2/${key}",
+            logsSpan: 2000,
+          },
         },
         networks: [
           {
@@ -335,6 +359,106 @@
                 "Legacy fee receiver": "0x8b3EFBEfa6eD222077455d6f0DCdA3bF4f3F57A6",
               },
               known: {},
+            },
+          },
+          {
+            key: "ethereum",
+            name: "Ethereum",
+            chainId: 1,
+            rpc: "https://ethereum-rpc.publicnode.com",
+            explorer: "https://etherscan.io",
+            cow: "mainnet",
+            cowExplorer: "", // explorer.cow.fi serves mainnet at the root
+            since: 1794268800, // burner deployed 2026-11-10 (FeeCollector still points to the previous burner)
+            logsRange: 10000,
+            blockTime: 12,
+            target: { address: "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E", symbol: "crvUSD", decimals: 18 },
+            contracts: {
+              settings: {
+                FeeCollector: "0xa2Bcd1a4Efbd04B63cd03f5aFf2561106ebCCE00",
+                DutchAuctionBurner: "0xc014A92C76709D6c7f7c7841823b7164D6D2AbD4",
+                AdapterRegistry: "0xea982B86c6b8a4DFB10eA128522567F02794B9B3",
+              },
+              collection: {},
+              known: {
+                CowAdapter: "0xbC80ef170705232A82752d87334429218d988996",
+                "CowSwapBurner (previous)": "0xC0fC3dDfec95ca45A0D2393F518D3EA1ccF44f8b",
+              },
+            },
+          },
+          {
+            key: "gnosis",
+            name: "Gnosis",
+            chainId: 100,
+            rpc: "https://gnosis-rpc.publicnode.com",
+            explorer: "https://gnosisscan.io",
+            cow: "xdai",
+            cowExplorer: "gc", // explorer.cow.fi path, when it differs from the orderbook slug
+            since: 1794268800, // burner deployed 2026-11-10
+            logsRange: 10000,
+            blockTime: 5,
+            target: { address: "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d", symbol: "WXDAI", decimals: 18 },
+            contracts: {
+              settings: {
+                FeeCollector: "0xBb7404F9965487a9DdE721B3A5F0F3CcfA9aa4C5",
+                DutchAuctionBurner: "0xCfAaAf26C60Ba300F95220b8c3D99D23F962A2A3",
+                AdapterRegistry: "0xF072011852521D27543e44B19eFc32868eD09ebE",
+                AuctionTaker: "0xDdd5c7D3dc8f1B7dC9B1eBCb74112C8c1BA5117b",
+                Bridger: "0xc4AA2fB0A8837a06d296b1c0DE1990E401659449",
+              },
+              collection: {},
+              known: {
+                CowAdapter: "0x2F810660d6C81F3d710d966aFb55e0E75549D4fa",
+                "CowSwapBurner (previous)": "0x566b9F24200A9B51b76792D4e81B569AF27eda83",
+              },
+            },
+          },
+          {
+            key: "arbitrum",
+            name: "Arbitrum",
+            chainId: 42161,
+            rpc: "https://arbitrum-one-rpc.publicnode.com",
+            explorer: "https://arbiscan.io",
+            cow: "arbitrum_one",
+            cowExplorer: "arb1", // explorer.cow.fi path, when it differs from the orderbook slug
+            since: 1794268800, // burner deployed 2026-11-10 (FeeCollector still points to the previous burner)
+            logsRange: 10000,
+            blockTime: 0.25,
+            target: { address: "0x498Bf2B1e120FeD3ad3D42EA2165E9b73f99C1e5", symbol: "crvUSD", decimals: 18 },
+            contracts: {
+              settings: {
+                FeeCollector: "0x68E7F1e30E0BC195B19C0441Cdb34c0eD513F8Dd",
+                DutchAuctionBurner: "0x66a81a7f703C8306b425C397E8E85965cdf71698",
+                AdapterRegistry: "0x02D5F6a7c021C17224e2cc772eCDFf5F06FF3cE2",
+              },
+              collection: {},
+              known: {
+                CowAdapter: "0xc9c4EFd63DD4175B55d24F352eB6e71B79D06b15",
+              },
+            },
+          },
+          {
+            key: "base",
+            name: "Base",
+            chainId: 8453,
+            rpc: "https://base-rpc.publicnode.com",
+            explorer: "https://basescan.org",
+            cow: "base",
+            cowExplorer: "base", // explorer.cow.fi path, when it differs from the orderbook slug
+            since: 1794268800, // burner deployed 2026-11-10 (FeeCollector still points to the previous burner)
+            logsRange: 10000,
+            blockTime: 2,
+            target: { address: "0x417Ac0e078398C154EdFadD9Ef675d30Be60Af93", symbol: "crvUSD", decimals: 18 },
+            contracts: {
+              settings: {
+                FeeCollector: "0x56Ba5C600db7524c5Ec253567f8821AaadfCdbEA",
+                DutchAuctionBurner: "0x275cABb174d5962B5e532e49bcC7e546Da570a31",
+                AdapterRegistry: "0xc10ddf15512462f02156f2a3F4898BfF6002699c",
+              },
+              collection: {},
+              known: {
+                CowAdapter: "0x3Ab83b1D20315C751dE9a5d7328A2d74c4659B74",
+              },
             },
           },
         ],
@@ -406,6 +530,11 @@
         const s = loadSettings();
         return { weekMode: s.weekMode || "week", tz: s.tz || "local", provider: s.provider || "public", keys: s.keys || {}, custom: s.custom || {}, logsSpan: s.logsSpan || {} };
       };
+      // explorer.cow.fi path prefix of a network ("" for mainnet)
+      function cowPath(net) {
+        const slug = net.cowExplorer ?? net.cow;
+        return slug ? "/" + slug : "";
+      }
       // RPC URL and eth_getLogs span for a network under the chosen provider.
       function rpcFor(net) {
         const p = prefs();
@@ -996,7 +1125,7 @@
           if (t.cow) {
             td(row, "CoW solver");
             const a = document.createElement("a");
-            a.href = `https://explorer.cow.fi/${net.cow}/orders/${t.uid}`;
+            a.href = `https://explorer.cow.fi${cowPath(net)}/orders/${t.uid}`;
             a.target = "_blank";
             a.rel = "noreferrer";
             a.textContent = "order " + t.uid.slice(0, 10) + "…";
@@ -1321,7 +1450,7 @@
         if (!net.cow) return;
         const owner = net.contracts.settings.DutchAuctionBurner;
         line.textContent = "";
-        line.appendChild(link(`https://explorer.cow.fi/${net.cow}`, owner, "All orders of the burner on the CoW explorer", "address"));
+        line.appendChild(link(`https://explorer.cow.fi${cowPath(net)}`, owner, "All orders of the burner on the CoW explorer", "address"));
         let orders;
         try {
           orders = await fetchCowOrders(net);
@@ -1353,7 +1482,7 @@
           td(row, amt(o.executedBuyAmount, o.buyToken), "num");
           td(row, fmtTs(o.validTo));
           const a = document.createElement("a");
-          a.href = `https://explorer.cow.fi/${net.cow}/orders/${o.uid}`;
+          a.href = `https://explorer.cow.fi${cowPath(net)}/orders/${o.uid}`;
           a.target = "_blank";
           a.rel = "noreferrer";
           a.textContent = (o.uid || "").slice(0, 10) + "…";
