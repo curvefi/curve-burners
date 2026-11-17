@@ -37,6 +37,8 @@ max_open_orders: 8
 # adapters. Sends only in mode keeper; offline simulates and reports.
 native:
   enabled: false
+  backends: [curve]     # routers: curve (router NG over catalogue routes), electric (see below); with several the best quote wins
+  workers: 4            # lots quoted at once
   margin: 0.005         # take when the quote is this far under the Curve route quote
   max_impact: 0.01      # chunk so the route's price impact stays under 1%
   poll: 30              # try a lot near its route quote this often, whatever the full cycle does
@@ -47,6 +49,22 @@ native:
   # profit_receiver: "0x..."   # the sender by default
   # routes:             # explicit routes instead of the search
   #   "0xTOKEN": {path: ["0xTOKEN", "0xPOOL", "0xWANT"], params: [[0, 1, 1, 1, 2]]}
+  # The electric backend routes through michwill/electric-router: its `erouter`
+  # command line finds a split route over the whole pool graph and returns the
+  # ElectricRouter.execute call. Install it in its own environment
+  # (pip install git+https://github.com/michwill/electric-router) and point
+  # command at it. The curve-only settings above (router, chain, api_url,
+  # min_pool_usd, max_hops, routes) do not apply to it.
+  # electric:
+  #   command: [/path/to/electric-router-venv/bin/erouter]   # `erouter` on PATH by default
+  #   chain: fraxtal      # erouter chain name; defaults by chain id
+  #   rpc_url: "https://..."   # the tool's own endpoint by default
+  #   router: "0xf5438dafc165b466f4a61ce57bd3aa59bcd5979e"   # refuse any other target
+  #   slippage_bp: 30     # whole-route tolerance; per-pool rule by default
+  #   max_legs: 16        # the AuctionTaker takes 1888 bytes of calldata per step
+  #   min_tvl: 10000
+  #   timeout: 180        # seconds per erouter run
+  #   cache: 30           # seconds an answer is reused
 state_path: auction_keeper_state.json   # published orders and the LotStaged scan cursor
 # offline (default): read the chain and post orders, never send a transaction.
 # keeper: also send the on-chain housekeeping (executor allowance syncs); needs keeper_key_env.

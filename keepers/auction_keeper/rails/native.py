@@ -1,10 +1,18 @@
-"""The native rail: fill a lot through the AuctionTaker with a Curve swap.
+"""The native rail: fill a lot through the AuctionTaker with a router swap.
 
 Where no settlement adapter is active (or alongside them), the keeper can
 take a lot itself: the ``AuctionTaker`` receives the lot, swaps it to want
-on Curve through the router, pays the auction's quote from the proceeds and
-sends the rest to the keeper. It needs only gas, and it works on any chain
-with Curve pools.
+through a router, pays the auction's quote from the proceeds and sends the
+rest to the keeper. It needs only gas, and it works on any chain with Curve
+pools.
+
+The routers are ``native.backends`` (``BACKENDS`` below): ``curve`` is the
+Curve router NG over routes found from the pool catalogue
+(``keepers.auction_keeper.routing.curve_router``), ``electric`` is the
+electric router, which solves splits over the whole pool graph off-chain
+(``keepers.auction_keeper.routing.electric_router``). With several, every
+lot is quoted on all of them at once and swapped through the one that pays
+more, so a lot one cannot route, or a router that is down, costs nothing.
 
 Each cycle, per live lot, the taker
 
@@ -23,7 +31,10 @@ the schedule's band above the route quote.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Any, Protocol
 
 from eth_utils import to_checksum_address
 
@@ -31,20 +42,117 @@ from keepers.auction_keeper.chain.abi import CallReverted
 from keepers.auction_keeper.chain.client import ChainClient
 from keepers.auction_keeper.chain.contracts import Auction, LotView
 from keepers.auction_keeper.config import NetworkConfig
-from keepers.auction_keeper.execute import Executor, TakePlan, approve_call
-from keepers.auction_keeper.routing.curve_router import CurveRouter, Route
+from keepers.auction_keeper.execute import Call, Executor, TakePlan
+from keepers.auction_keeper.routing.curve_router import curve_router_for
+from keepers.auction_keeper.routing.electric_router import electric_router_for
 
 log = logging.getLogger(__name__)
 
-# Chunk search: the small probe amount as a fraction of the lot, and the
-# bisection steps (each one router call).
-PROBE_FRACTION = 1000
-CHUNK_STEPS = 8
+
+class Router(Protocol):
+    """What the rail needs from a router; a route is the router's own type."""
+
+    def best_route(self, token: str, want: str, amount: int) -> tuple[Any, int] | None:
+        """The best route for ``amount`` and the want it pays; None when nothing routes."""
+
+    def chunk(
+        self, route: Any, available: int, max_impact: float
+    ) -> tuple[Any, int, int, float] | None:
+        """The largest amount up to ``available`` whose price impact stays under
+        ``max_impact``: (route, amount, dy, impact); None when the route pays nothing."""
+
+    def swap_calls(self, route: Any, amount: int, min_dy: int, receiver: str) -> list[Call]:
+        """The AuctionTaker's route steps swapping ``amount`` to ``receiver``."""
+
+
+# The routers by name (``native.backends``). Adding one is a module with the
+# ``Router`` methods, a line here and its name in config.native.NATIVE_BACKENDS.
+BACKENDS: dict[str, Callable[[NetworkConfig, ChainClient], Router]] = {
+    "curve": curve_router_for,
+    "electric": electric_router_for,
+}
+
+
+@dataclass(frozen=True)
+class Routed:
+    """A route with the router it belongs to, and the other routers' answers
+    for the same lot, best first, to fall back on."""
+
+    router: Any
+    route: Any
+    others: tuple[tuple[Any, Any], ...] = ()
+
+    def __str__(self) -> str:
+        return str(self.route)
+
+
+class BestRouter:
+    """Several routers asked for every lot; the one paying the most swaps it.
+
+    The routers are independent: one that fails (the electric router's tool
+    missing or timing out, a catalogue that does not load) is logged and
+    left out of that quote, and when the winner cannot chunk the lot the
+    next best answer is used. They are asked at once (``parallel``), so the
+    quote takes as long as the slowest of them, not their sum."""
+
+    def __init__(self, routers: Sequence[Router], *, parallel: bool = True):
+        self.routers = list(routers)
+        self._pool = (
+            ThreadPoolExecutor(len(self.routers), thread_name_prefix="router")
+            if parallel and len(self.routers) > 1
+            else None
+        )
+
+    @staticmethod
+    def _ask(router: Router, token: str, want: str, amount: int) -> tuple[Any, int] | None:
+        try:
+            return router.best_route(token, want, amount)
+        except Exception as exc:  # noqa: BLE001 - the other routers still answer
+            log.warning("%s failed for %s: %s", type(router).__name__, token, exc)
+            return None
+
+    def best_route(self, token: str, want: str, amount: int) -> tuple[Routed, int] | None:
+        def ask(router: Router) -> tuple[Any, int] | None:
+            return self._ask(router, token, want, amount)
+
+        answers = list(self._pool.map(ask, self.routers) if self._pool else map(ask, self.routers))
+        found = [(router, *answer) for router, answer in zip(self.routers, answers) if answer]
+        if not found:
+            return None
+        found.sort(key=lambda item: -item[2])
+        (router, route, dy), *rest = found
+        return Routed(router, route, tuple((other, alt) for other, alt, _ in rest)), dy
+
+    def chunk(
+        self, route: Routed, available: int, max_impact: float
+    ) -> tuple[Routed, int, int, float] | None:
+        for router, inner in ((route.router, route.route), *route.others):
+            try:
+                chunked = router.chunk(inner, available, max_impact)
+            except Exception as exc:  # noqa: BLE001 - the next best router is tried
+                log.warning("%s failed to chunk %s: %s", type(router).__name__, inner, exc)
+                continue
+            if chunked is not None:
+                inner, amount, dy, impact = chunked
+                return Routed(router, inner), amount, dy, impact
+        return None
+
+    def swap_calls(self, route: Routed, amount: int, min_dy: int, receiver: str) -> list[Call]:
+        return route.router.swap_calls(route.route, amount, min_dy, receiver)
+
+
+def router_for(config: NetworkConfig, client: ChainClient) -> Router:
+    """The router of the network's ``native.backends``: the one named, or all
+    of them behind a ``BestRouter``."""
+    routers = [BACKENDS[name](config, client) for name in config.native.backends]
+    if len(routers) == 1:
+        return routers[0]
+    return BestRouter(routers, parallel=getattr(client, "concurrent", False))
 
 
 @dataclass(frozen=True)
 class TakeQuote:
-    route: Route
+    route: Any  # the router's own route for the chunk
     amount: int  # the chunk to take
     dy: int  # want the route pays for the chunk
     payment: int  # want the auction asks for the chunk
@@ -73,7 +181,7 @@ class NativeTaker:
         self,
         config: NetworkConfig,
         client: ChainClient,
-        router: CurveRouter,
+        router: Router,
         *,
         taker: str,
         profit_receiver: str | None = None,
@@ -86,58 +194,45 @@ class NativeTaker:
 
     # Quotes
 
-    def chunk(self, route: Route, available: int) -> tuple[int, int, float] | None:
-        """The largest amount up to ``available`` whose impact stays under
-        ``max_impact``: (amount, dy, impact); None when the route pays nothing."""
-        probe = max(available // PROBE_FRACTION, 1)
-        probe_dy = self.router.get_dy(route, probe)
-        if probe_dy <= 0:
-            return None
-        unit = probe_dy / probe
-
-        def impact_of(amount: int) -> tuple[int, float]:
-            dy = self.router.get_dy(route, amount)
-            return dy, 1.0 - (dy / amount) / unit if dy else 1.0
-
-        dy, impact = impact_of(available)
-        if impact <= self.settings.max_impact:
-            return available, dy, impact
-        lo, hi = probe, available  # impact(lo) ~ 0 by construction
-        best = (probe, probe_dy, 0.0)
-        for _ in range(CHUNK_STEPS):
-            mid = (lo + hi) // 2
-            if mid <= lo:
-                break
-            dy, impact = impact_of(mid)
-            if impact <= self.settings.max_impact:
-                best, lo = (mid, dy, impact), mid
-            else:
-                hi = mid
-        return best
-
     def quote(self, auction: Auction, lot: LotView) -> TakeQuote | None:
         best = self.router.best_route(lot.token, lot.want, lot.available)
         if best is None:
             return None
         route, _ = best
-        chunked = self.chunk(route, lot.available)
+        chunked = self.router.chunk(route, lot.available, self.settings.max_impact)
         if chunked is None:
             return None
-        amount, dy, impact = chunked
+        route, amount, dy, impact = chunked
         payment = auction.get_amount_needed(lot.token, amount)
         return TakeQuote(route, amount, dy, payment, impact)
 
     # Execution
 
-    def attempt(self, auction: Auction, lot: LotView, *, dry_run: bool) -> NativeResult:
-        """One try at the lot: take (or simulate) when the quote is under the route."""
+    def try_quote(self, auction: Auction, lot: LotView) -> TakeQuote | NativeResult:
+        """The quote, or the result the lot ends with when there is none. Only
+        reads, so the keeper calls it for several lots at once."""
         try:
             quote = self.quote(auction, lot)
         except Exception as exc:  # noqa: BLE001 - a dead API or router must not stop the loop
             log.warning("%s: native quote failed: %s", lot.token, exc)
             return NativeResult("failed", f"quote: {exc}")
         if quote is None:
-            return NativeResult("unroutable", "no Curve route pays for the lot")
+            return NativeResult("unroutable", "no route pays for the lot")
+        return quote
+
+    def attempt(
+        self,
+        auction: Auction,
+        lot: LotView,
+        *,
+        dry_run: bool,
+        quoted: TakeQuote | NativeResult | None = None,
+    ) -> NativeResult:
+        """One try at the lot: take (or simulate) when the quote is under the
+        route. ``quoted`` is a ``try_quote`` answer made ahead for this lot."""
+        quote = quoted if quoted is not None else self.try_quote(auction, lot)
+        if isinstance(quote, NativeResult):
+            return quote
         near = quote.payment <= quote.dy * (1 + self.config.ttl.near_above)
         if quote.payment > quote.dy * (1 - self.settings.margin):
             log.info("%s: waiting, %s", lot.token, quote)
@@ -150,12 +245,9 @@ class NativeTaker:
             auction.address,
             lot.token,
             max_amount=quote.amount,
-            route=[
-                approve_call(lot.token, self.router.address, quote.amount),
-                self.router.exchange_call(
-                    quote.route, quote.amount, quote.payment, self.executor.taker.address
-                ),
-            ],
+            route=self.router.swap_calls(
+                quote.route, quote.amount, quote.payment, self.executor.taker.address
+            ),
             min_profit=0,
             profit_receiver=to_checksum_address(receiver),
         )
@@ -174,4 +266,13 @@ class NativeTaker:
         return NativeResult("taken", f"tx {result.tx_hash} {quote}", near)
 
 
-__all__ = ["NativeResult", "NativeTaker", "TakeQuote"]
+__all__ = [
+    "BACKENDS",
+    "BestRouter",
+    "NativeResult",
+    "NativeTaker",
+    "Routed",
+    "Router",
+    "TakeQuote",
+    "router_for",
+]

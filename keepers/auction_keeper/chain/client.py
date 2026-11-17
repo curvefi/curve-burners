@@ -7,7 +7,8 @@ through a Titanoboa-backed client (see tests/keeper/conftest.py).
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -70,8 +71,35 @@ class ChainClient(Protocol):
         ...
 
 
+# A read that died on the connection (an RPC closing a kept-alive socket, a
+# reset under parallel quotes) is repeated this many times before it fails.
+READ_RETRIES = 2
+READ_RETRY_DELAY = 0.5
+
+
+def retry_read[T](read: Callable[[], T], *, sleep: Callable[[float], None] = time.sleep) -> T:
+    """``read()`` again after a connection error or a timeout. Only for reads:
+    an answer the RPC did give (a revert, an error payload) is not retried."""
+    from requests.exceptions import ConnectionError as ConnectionFailed
+    from requests.exceptions import Timeout
+
+    for attempt in range(READ_RETRIES + 1):
+        try:
+            return read()
+        except (ConnectionFailed, Timeout) as exc:
+            if attempt == READ_RETRIES:
+                raise
+            log.debug("rpc read failed (%s); retrying", exc)
+            sleep(READ_RETRY_DELAY * (attempt + 1))
+    raise AssertionError("unreachable")
+
+
 class Web3Client:
     """``ChainClient`` over web3.py. A private key enables ``send``."""
+
+    # Reads may be made from several threads at once (the native rail quotes
+    # lots in parallel); a client without the attribute is used from one.
+    concurrent = True
 
     def __init__(
         self,
@@ -108,25 +136,24 @@ class Web3Client:
         if sender:
             tx["from"] = to_checksum_address(sender)
         try:
-            return bytes(self.w3.eth.call(tx))
+            return bytes(retry_read(lambda: self.w3.eth.call(tx)))
         except ContractLogicError as exc:
             raise CallReverted(_revert_payload(exc)) from exc
 
     def latest_block(self) -> Block:
-        block = self.w3.eth.get_block("latest")
+        block = retry_read(lambda: self.w3.eth.get_block("latest"))
         return Block(number=int(block["number"]), timestamp=int(block["timestamp"]))
 
     def get_logs(
         self, address: str, topics: Sequence[bytes | None], from_block: int, to_block: int
     ) -> list[Log]:
-        entries = self.w3.eth.get_logs(
-            {
-                "address": to_checksum_address(address),
-                "topics": [None if t is None else "0x" + t.hex() for t in topics],
-                "fromBlock": from_block,
-                "toBlock": to_block,
-            }
-        )
+        query = {
+            "address": to_checksum_address(address),
+            "topics": [None if t is None else "0x" + t.hex() for t in topics],
+            "fromBlock": from_block,
+            "toBlock": to_block,
+        }
+        entries = retry_read(lambda: self.w3.eth.get_logs(query))
         return [
             Log(
                 address=to_checksum_address(entry["address"]),

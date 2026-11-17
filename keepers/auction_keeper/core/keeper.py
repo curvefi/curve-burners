@@ -13,7 +13,7 @@ One ``NetworkKeeper`` serves one network. Each cycle it
    order is missing, expired, or built for a previous lot window, while
    the adapter's open orders stay within ``max_open_orders``; and
 6. with the native rail enabled, tries to take each lot through the
-   AuctionTaker with a Curve swap (``keepers.auction_keeper.rails.native``), alongside
+   AuctionTaker with a router swap (``keepers.auction_keeper.rails.native``), alongside
    whatever the adapters publish.
 
 Between cycles the loop sleeps until the next recorded expiry (at most the
@@ -28,6 +28,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 from keepers.auction_keeper.chain.client import ChainClient, Web3Client
@@ -42,8 +43,7 @@ from keepers.auction_keeper.core import schedule
 from keepers.auction_keeper.core.state import KeeperState, OrderRecord
 from keepers.auction_keeper.pricing import MarketPricer, build_sources
 from keepers.auction_keeper.rails import AdapterPublisher, publisher_classes
-from keepers.auction_keeper.rails.native import NativeTaker
-from keepers.auction_keeper.routing.curve_router import curve_router_for
+from keepers.auction_keeper.rails.native import NativeResult, NativeTaker, TakeQuote, router_for
 
 log = logging.getLogger(__name__)
 
@@ -107,7 +107,7 @@ class NetworkKeeper:
             self.native = NativeTaker(
                 config,
                 self.client,
-                curve_router_for(config, self.client),
+                router_for(config, self.client),
                 taker=config.auction_taker,
             )
         self.auctions = [Auction(self.client, address) for address in config.auctions]
@@ -268,10 +268,42 @@ class NetworkKeeper:
                 outcomes.append(outcome)
                 self.fast_lane()
         if self.native is not None:
-            for lot, _ in live:
-                outcomes.append(self._take(auction, lot))
+            lots = [lot for lot, _ in live]
+            quotes = self._quote_all([(auction, lot) for lot in lots])
+            for lot, (_, quoted) in zip(lots, quotes, strict=True):
+                outcomes.append(self._take(auction, lot, quoted))
                 self.fast_lane()
         return outcomes
+
+    def _quote_all(
+        self, lots: list[tuple[Auction, LotView | str]]
+    ) -> list[tuple[LotView | None, TakeQuote | NativeResult | None]]:
+        """The native rail's quote for every lot, ``native.workers`` at a time:
+        a quote is a handful of calls to a router, or seconds of a route
+        solver, and the lots do not depend on each other. A lot given as a
+        token is read first; one that is no longer active has no quote. The
+        takes that follow are sent one by one."""
+        assert self.native is not None
+        native = self.native
+
+        def one(item: tuple[Auction, LotView | str]):
+            auction, lot = item
+            try:
+                if isinstance(lot, str):
+                    lot = auction.lot_view(lot)
+                if not lot.active:
+                    return lot, None
+                return lot, native.try_quote(auction, lot)
+            except Exception as exc:  # noqa: BLE001 - one lot must not stop the others
+                token = lot if isinstance(lot, str) else lot.token
+                log.warning("%s: native quote failed: %s", token, exc)
+                return None, None
+
+        workers = min(self.config.native.workers, len(lots))
+        if workers <= 1 or not getattr(self.client, "concurrent", False):
+            return [one(item) for item in lots]
+        with ThreadPoolExecutor(workers, thread_name_prefix="quote") as pool:
+            return list(pool.map(one, lots))
 
     def fast_lane(self) -> list[Outcome]:
         """Try the lots near their route quote again when ``native.poll``
@@ -284,23 +316,28 @@ class NetworkKeeper:
             return []
         self._fast_at = time.monotonic()
         outcomes = []
-        for key, (auction, lot) in list(self._near.items()):
+        near = list(self._near.items())
+        quotes = self._quote_all([(auction, lot or key[1]) for key, (auction, lot) in near])
+        for (key, (auction, _)), (lot, quoted) in zip(near, quotes, strict=True):
+            if lot is None:
+                continue  # reading or quoting failed: tried again next pass
+            if quoted is None:
+                self._near.pop(key, None)  # no longer active
+                continue
             try:
-                if lot is None:
-                    lot = auction.lot_view(key[1])
-                if not lot.active:
-                    self._near.pop(key, None)
-                    continue
-                outcomes.append(self._take(auction, lot))
+                outcomes.append(self._take(auction, lot, quoted))
             except Exception as exc:  # noqa: BLE001 - the full cycle retries the lot
                 log.warning("%s: fast lane failed: %s", key[1], exc)
         return outcomes
 
-    def _take(self, auction: Auction, lot: LotView) -> Outcome:
-        """The native rail's try at the lot; offline mode only simulates."""
+    def _take(
+        self, auction: Auction, lot: LotView, quoted: TakeQuote | NativeResult | None = None
+    ) -> Outcome:
+        """The native rail's try at the lot (with the quote made ahead for it,
+        if any); offline mode only simulates."""
         assert self.native is not None
         dry_run = self.dry_run or not self.config.onchain
-        result = self.native.attempt(auction, lot, dry_run=dry_run)
+        result = self.native.attempt(auction, lot, dry_run=dry_run, quoted=quoted)
         # A lot taken in chunks is taken back to back: the curve keeps
         # falling between cycles, so a chunk left for the next one pays the
         # auction less for the same route quote.

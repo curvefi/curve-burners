@@ -10,7 +10,17 @@ from typing import Any
 
 from keepers.auction_keeper.config.common import ConfigError, fraction, positive_int
 
-PRICE_SOURCES = ("curve", "llama", "coingecko", "cow", "kyber", "velora", "oneinch", "router")
+PRICE_SOURCES = (
+    "curve",
+    "llama",
+    "coingecko",
+    "cow",
+    "kyber",
+    "velora",
+    "oneinch",
+    "router",
+    "electric",
+)
 DEFAULT_PRICE_SOURCES = ("curve", "llama", "cow")
 DEFAULT_PRICE_CACHE = 60
 DEFAULT_PRICE_CROSS_CHECK = 0.25

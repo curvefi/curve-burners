@@ -49,7 +49,9 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `ttl.near_above`, `ttl.near_below` | 0.2, 0.1 | The band around the market: a quote at most 20% above or 10% below it is "near". |
 | `ttl.min` | 60 | Order validity inside the band (the CoW orderbook minimum; one or two curve steps). |
 | `ttl.max` | 7200 | Longest validity far above the market, where one order waits for the curve to reach the band. |
-| `native.enabled` | `false` | The native rail: take lots through the `AuctionTaker` with a Curve router swap, alongside the adapters (see below). Needs `auction_taker`; sends in `keeper` mode, simulates and reports in `offline` mode. |
+| `native.enabled` | `false` | The native rail: take lots through the `AuctionTaker` with a router swap, alongside the adapters (see below). Needs `auction_taker`; sends in `keeper` mode, simulates and reports in `offline` mode. |
+| `native.backends` | `[curve]` | The routers of the rail, a list out of `curve` (router NG over routes from the pool catalogue) and `electric` (the electric router, see below). With several, every lot is quoted on all of them at once and swapped through the one that pays more; a router that is down or cannot route the lot is left out of that quote. |
+| `native.workers` | 4 | Lots quoted at once (threads). The takes themselves are sent one by one. |
 | `native.margin` | 0.005 | Take when the auction's quote for the chunk is at least this far under the Curve route quote (the keeper's profit). |
 | `native.max_impact` | 0.01 | Chunk the take so the route's price impact stays under this fraction; the rest of the lot is quoted again next poll. |
 | `native.poll` | 30 | Seconds between tries of a lot whose quote is within `ttl.near_above` of its route quote. These lots are on a fast lane of their own, tried between the steps of the full cycle and while it waits, so the full cycle's length does not delay them. |
@@ -57,6 +59,12 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `native.min_pool_usd`, `native.max_hops` | 1000, 5 | Pools below this TVL are not routed through; hops per route (the router takes five at most). |
 | `native.routes` | `{}` | Explicit routes by lot token, `{token: {path: [token, pool, token, ...], params: [[i, j, swap_type, pool_type, n_coins], ...], pools: [pool or zero per hop]}}`, used instead of the search (`pools` only for zap hops, swap type 3). |
 | `native.profit_receiver` | the sender | Where the take's profit and any unspent lot go. |
+| `native.electric.command` | `[erouter]` | The electric router's command line (a path, or the words of a command). |
+| `native.electric.chain`, `native.electric.rpc_url` | by chain id, the tool's own | `erouter` chain name (`electric_router.CHAINS`) and the RPC endpoint it reads the chain through. |
+| `native.electric.router` | unset | Refuse a call whose target is not this `ElectricRouter` address. Unset, the address in the tool's report is used. |
+| `native.electric.slippage_bp` | unset | Whole-route tolerance in bp, divided between the legs by the tool; unset, each leg gets the tool's per-pool rule. |
+| `native.electric.max_legs`, `native.electric.min_tvl` | 16, the tool's 10000 | Legs per route (the `AuctionTaker` takes 1888 bytes of calldata per step) and the pool TVL floor in USD. |
+| `native.electric.timeout`, `native.electric.cache` | 180, 30 | Seconds one `erouter` run may take, and how long its answer for an amount is reused. |
 | `max_open_orders` | 8 | Open orders per adapter at once; lots farthest from the market wait for a slot. The CoW orderbook rejects an owner's eleventh open outside-market order (`TooManyLimitOrders`). |
 | `tokens.whitelist` | `[]` | Non-empty: sell only these. |
 | `tokens.blacklist` | `[]` | Never sell these (wins over the whitelist). |
@@ -131,6 +139,76 @@ A lot within `ttl.near_above` of its route quote is tried every
 
 The same router quote is available to the schedule as the `router` price
 source (`pricing.sources`), which needs no feed and no key.
+
+### The native rail (electric router)
+
+With `electric` in `native.backends` the swap can go through
+[electric-router](https://github.com/michwill/electric-router)
+(`keepers/auction_keeper/routing/electric_router.py`). It solves the whole pool graph as a
+resistor network, so one lot can be split across pools and pass through LP
+tokens, vaults and wrappers, and it settles through its `ElectricRouter`
+contract with a minimum rate on every leg. The rest of the rail is the same:
+chunk by `native.max_impact`, take at `native.margin` under the route quote,
+simulate first.
+
+Route finding is off-chain, so the keeper runs the tool's command line once
+per quote and executes the call from its JSON report as it is:
+
+```
+erouter route --chain fraxtal --from TOKEN --to WANT --amount-wei N \
+    --calldata needed --receiver AUCTION_TAKER --max-legs 16 --json OUT.json
+```
+
+Install it in its own environment and point `native.electric.command` at it:
+
+```
+python -m venv ~/electric-router-venv
+~/electric-router-venv/bin/pip install git+https://github.com/michwill/electric-router
+```
+
+It stays a separate process because it is AGPL-licensed, pins its own
+dependencies and changes fast; nothing of it is imported or vendored here.
+The call is opaque bytes to the keeper, so a leg kind added to the tool
+needs no change on this side. What the keeper checks in a report: the
+amount, pair and receiver are the ones asked for, the output was verified
+on-chain, the calldata fits the `AuctionTaker`'s 1888-byte step, and, when
+`native.electric.router` is set, the target address. Beyond that the take
+protects itself: it reverts unless the swap leaves the auction's payment in
+want on the taker.
+
+How it differs in operation from the Curve backend:
+
+- A quote is one `erouter` run: about 20 seconds cold on Fraxtal, against
+  one `eth_call` for router NG. Answers are reused for `native.electric.cache`
+  seconds, and the chunk search scales the amount by the price impact the
+  tool reports (at most three more runs) where the Curve backend bisects.
+- A route is priced for one amount at one block. Its per-leg minimum rates
+  make a take that lands after the pools moved revert; the simulation
+  catches that and the lot is quoted again next poll.
+- The tool exits with code 2 when nothing routes (reported as `unroutable`);
+  any other failure of the tool is reported as `failed` and retried.
+
+### Several routers, many lots
+
+`native.backends: [curve, electric]` asks both routers for every lot, at the
+same time, and takes through the better quote. The routers are independent:
+if one fails (the tool missing or timing out, a catalogue that does not
+load) or cannot route the lot, the quote is the other's, and if the winner
+then cannot chunk the lot the next best answer is used. Only a lot no
+router can quote is `unroutable` or `failed`, and that never stops the
+other lots. A router is one entry of `BACKENDS` in `rails/native.py` (a
+module with `best_route`, `chunk` and `swap_calls`) plus its name in
+`config/native.py`.
+
+Quotes are the slow part (a handful of `eth_call`s for router NG, seconds
+of solving for the electric router), so the lots of a cycle, and the lots
+on the fast lane, are quoted `native.workers` at a time in threads. The
+takes are then simulated and sent one by one from the keeper's account. A
+quote that aged while others were taken is harmless: the auction's price
+only falls, and the take is simulated before it is sent.
+
+The `electric` price source (`pricing.sources`) is the same quote for the
+whole lot; with the native rail on the same network it shares the cache.
 
 The CoW publisher builds the GPv2 order (`sellAmount` = available,
 `buyAmount` = live quote, `validTo` = the scheduled validity, never past

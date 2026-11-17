@@ -18,10 +18,12 @@ Two kinds of source (``pricing/sources/``):
   ``cow`` (the CoW orderbook ``/quote``, the same quote it later uses for
   its outside-market check), ``kyber`` (KyberSwap aggregator routes),
   ``velora`` (Velora / ParaSwap ``/prices``), ``oneinch`` (1inch swap quote,
-  needs the Developer Portal key; UNVERIFIED against the live API), and
+  needs the Developer Portal key; UNVERIFIED against the live API),
   ``router`` (the Curve router's own ``get_dy`` over the best route from
   the pool catalogue: on-chain, any chain with Curve pools, and exactly
-  what the native rail would be paid).
+  what the native rail would be paid), and ``electric`` (the electric
+  router's verified quote for its own split route: what the native rail is
+  paid through it; one ``erouter`` run per quote).
 
 Adding a source is one module in ``pricing/sources/`` with a class carrying
 ``name`` and ``quote(lot) -> int | None``, plus a line in ``build_sources``
@@ -43,6 +45,7 @@ from keepers.auction_keeper.pricing.sources.base import PriceSource, UsdFeedSour
 from keepers.auction_keeper.pricing.sources.coingecko import CoinGeckoSource
 from keepers.auction_keeper.pricing.sources.cow import CowQuoteSource
 from keepers.auction_keeper.pricing.sources.curve import CurvePricesSource
+from keepers.auction_keeper.pricing.sources.electric import ElectricRouterSource
 from keepers.auction_keeper.pricing.sources.kyber import KyberQuoteSource
 from keepers.auction_keeper.pricing.sources.llama import LlamaSource
 from keepers.auction_keeper.pricing.sources.oneinch import OneInchQuoteSource
@@ -50,6 +53,7 @@ from keepers.auction_keeper.pricing.sources.router import CurveRouterSource
 from keepers.auction_keeper.pricing.sources.velora import VELORA_CHAINS, VeloraQuoteSource
 from keepers.auction_keeper.rails.cow import ORDERBOOK_URLS
 from keepers.auction_keeper.routing.curve_router import curve_router_for
+from keepers.auction_keeper.routing.electric_router import electric_router_for
 
 log = logging.getLogger(__name__)
 
@@ -252,6 +256,8 @@ def build_sources(
             sources.append(VeloraQuoteSource(chain_id, client, http=http))
         elif name == "router":
             sources.append(CurveRouterSource(curve_router_for(config, client, http=http)))
+        elif name == "electric":
+            sources.append(ElectricRouterSource(electric_router_for(config, client)))
         elif name == "oneinch":
             key = pricing.oneinch_api_key
             if not key:
@@ -273,6 +279,7 @@ __all__ = [
     "CowQuoteSource",
     "CurvePricesSource",
     "CurveRouterSource",
+    "ElectricRouterSource",
     "KyberQuoteSource",
     "LlamaSource",
     "MarketPricer",

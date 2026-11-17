@@ -39,6 +39,7 @@ replaces the search for a token.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
@@ -50,7 +51,7 @@ from eth_utils import to_checksum_address
 
 from keepers.auction_keeper.chain.abi import CallReverted, selector
 from keepers.auction_keeper.chain.client import ChainClient
-from keepers.auction_keeper.execute import Call, curve_router_exchange
+from keepers.auction_keeper.execute import Call, approve_call, curve_router_exchange
 from keepers.auction_keeper.rails.common import JsonClient
 
 log = logging.getLogger(__name__)
@@ -152,9 +153,11 @@ LENDING_REGISTRIES = ("main",)
 # Route search bound: paths explored per (token, want) before ranking.
 MAX_PATHS = 20000
 GET_DY = selector("get_dy(address[11],uint256[5][5],uint256,address[5])")
-# The small amount, as a fraction of the lot, a route is quoted for when the
-# whole lot pays nothing on any candidate.
+# The small probe amount as a fraction of the lot (the reference price of the
+# chunk search, and the size a route is quoted for when the whole lot pays
+# nothing), and the bisection steps of the chunk search (each one router call).
 PROBE_FRACTION = 1000
+CHUNK_STEPS = 8
 
 
 @dataclass(frozen=True)
@@ -489,8 +492,14 @@ class PoolCatalog:
         self.clock = clock
         self._graph: PoolGraph | None = None
         self._loaded_at = 0.0
+        # Lots are quoted from several threads: one of them refreshes.
+        self._lock = threading.Lock()
 
     def graph(self) -> PoolGraph:
+        with self._lock:
+            return self._load()
+
+    def _load(self) -> PoolGraph:
         now = self.clock()
         if self._graph is None or now - self._loaded_at >= self.ttl:
             try:
@@ -712,6 +721,45 @@ class CurveRouter:
                 self._best[key] = (best[0], size == amount, time.monotonic())
                 return best if size == amount else (best[0], best[1] * amount // size)
         return None
+
+    def chunk(
+        self, route: Route, available: int, max_impact: float
+    ) -> tuple[Route, int, int, float] | None:
+        """The largest amount up to ``available`` whose impact on ``route`` stays
+        under ``max_impact``: (route, amount, dy, impact); None when the route
+        pays nothing."""
+        probe = max(available // PROBE_FRACTION, 1)
+        probe_dy = self.get_dy(route, probe)
+        if probe_dy <= 0:
+            return None
+        unit = probe_dy / probe
+
+        def impact_of(amount: int) -> tuple[int, float]:
+            dy = self.get_dy(route, amount)
+            return dy, 1.0 - (dy / amount) / unit if dy else 1.0
+
+        dy, impact = impact_of(available)
+        if impact <= max_impact:
+            return route, available, dy, impact
+        lo, hi = probe, available  # impact(lo) ~ 0 by construction
+        best = (route, probe, probe_dy, 0.0)
+        for _ in range(CHUNK_STEPS):
+            mid = (lo + hi) // 2
+            if mid <= lo:
+                break
+            dy, impact = impact_of(mid)
+            if impact <= max_impact:
+                best, lo = (route, mid, dy, impact), mid
+            else:
+                hi = mid
+        return best
+
+    def swap_calls(self, route: Route, amount: int, min_dy: int, receiver: str) -> list[Call]:
+        """The AuctionTaker's route steps: approve the router, exchange."""
+        return [
+            approve_call(route.path[0], self.address, amount),
+            self.exchange_call(route, amount, min_dy, receiver),
+        ]
 
     def exchange_call(self, route: Route, amount: int, min_dy: int, receiver: str) -> Call:
         return curve_router_exchange(

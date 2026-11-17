@@ -253,6 +253,56 @@ def test_native_section_parses_and_needs_a_taker():
         )
 
 
+def test_native_electric_backend_parses():
+    from keepers.auction_keeper.config import ElectricSettings
+
+    router = "0xf5438dafc165b466f4a61ce57bd3aa59bcd5979e"
+    config = parse_config(
+        {
+            "native": {"electric": {"command": "/opt/er/bin/erouter", "max_legs": 12}},
+            "networks": {
+                "a": {
+                    "rpc": "r",
+                    "auctions": [AUCTION],
+                    "auction_taker": "0x" + "ee" * 20,
+                    "pricing": {"sources": ["electric"]},
+                    "native": {
+                        "enabled": True,
+                        "backends": ["curve", "electric"],
+                        "workers": 2,
+                        "electric": {
+                            "chain": "fraxtal",
+                            "rpc_url": "https://rpc",
+                            "router": router,
+                            "slippage_bp": 30,
+                            "min_tvl": 5000,
+                            "timeout": 60,
+                            "cache": 10,
+                        },
+                    },
+                },
+                "b": {"rpc": "r", "auctions": [AUCTION]},
+            },
+        }
+    )
+    a, b = config.network("a"), config.network("b")
+    assert a.native.backends == ("curve", "electric") and a.native.workers == 2
+    assert a.pricing.sources == ("electric",)
+    assert a.native.electric == ElectricSettings(
+        command=("/opt/er/bin/erouter",),
+        chain="fraxtal",
+        rpc_url="https://rpc",
+        router="0xf5438DAfC165b466f4a61ce57Bd3aA59bCd5979e",
+        slippage_bp=30.0,
+        max_legs=12,
+        min_tvl=5000.0,
+        timeout=60,
+        cache=10,
+    )
+    assert b.native.backends == ("curve",) and b.native.workers == 4
+    assert b.native.electric == ElectricSettings(command=("/opt/er/bin/erouter",), max_legs=12)
+
+
 @pytest.mark.parametrize(
     "section",
     [
@@ -264,6 +314,18 @@ def test_native_section_parses_and_needs_a_taker():
         {"native": {"routes": {TOKEN_A: {"path": [TOKEN_A], "params": []}}}},
         {"native": {"min_pool_usd": -1}},
         {"native": {"feed": 1}},
+        {"native": {"backends": ["uniswap"]}},
+        {"native": {"backends": "curve"}},
+        {"native": {"backends": []}},
+        {"native": {"backends": ["curve", "curve"]}},
+        {"native": {"workers": 0}},
+        {"native": {"electric": {"command": []}}},
+        {"native": {"electric": {"command": ["erouter", 1]}}},
+        {"native": {"electric": {"router": "nope"}}},
+        {"native": {"electric": {"max_legs": 0}}},
+        {"native": {"electric": {"slippage_bp": -1}}},
+        {"native": {"electric": {"timeout": "long"}}},
+        {"native": {"electric": {"solver": "rust"}}},
     ],
 )
 def test_native_section_rejects_bad_settings(section):

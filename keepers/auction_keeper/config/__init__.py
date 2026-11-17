@@ -23,6 +23,7 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
     max_open_orders: 8      # open orders per adapter at once (CoW caps outside-market orders at 10)
     native:                 # the native rail: take lots through the AuctionTaker with a Curve swap
       enabled: false        # needs auction_taker; sends only in mode keeper (offline: simulates)
+      backends: [curve]     # routers: curve (router NG), electric (michwill/electric-router); the best quote wins
       margin: 0.005         # take when the quote is this far under the Curve route quote
       max_impact: 0.01      # chunk the take so the route's price impact stays under this
       poll: 30              # poll this often while a lot is near its route quote
@@ -70,7 +71,7 @@ from keepers.auction_keeper.config.core import (
     parse_config,
     parse_network,
 )
-from keepers.auction_keeper.config.native import NativeSettings
+from keepers.auction_keeper.config.native import ElectricSettings, NativeSettings
 from keepers.auction_keeper.config.pricing import (
     DEFAULT_PRICE_CACHE,
     DEFAULT_PRICE_CROSS_CHECK,
@@ -96,6 +97,7 @@ __all__ = [
     "ConfigError",
     "CowSettings",
     "KeeperConfig",
+    "ElectricSettings",
     "NativeSettings",
     "NetworkConfig",
     "PricingSettings",
