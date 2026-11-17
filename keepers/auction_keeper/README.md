@@ -42,7 +42,7 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `order_ttl` | 300 | Seconds a published order stays valid when the schedule has no market for the lot, or the quote is already below it. Reposted at the live quote when it expires, never past the lot window. |
 | `pricing.sources` | `[curve, llama, cow]` | Market estimate sources in priority order; the first with a price wins, `[]` disables pricing (uniform TTL). USD feeds: `curve` (prices.curve.finance), `llama` (coins.llama.fi), `coingecko`. Swap quotes for the exact lot: `cow` (the orderbook `/quote`), `kyber` (KyberSwap routes), `velora` (ParaSwap `/prices`), `oneinch` (swap quote with `pricing.oneinch_api_key_env`, skipped without the key; UNVERIFIED). |
 | `pricing.cache` | 60 | Seconds a lot's market estimate is reused. |
-| `pricing.cross_check` | 0.25 | The winning source must agree with the next source that has a price within this fraction; otherwise the lot has no market this round (uniform TTL) and both prices are logged. `0` disables. |
+| `pricing.cross_check` | 0.25 | The winning source must agree with the next source that has a price within this fraction; otherwise every source is asked and believed: the market is the span of their answers, so orders turn dense (`ttl.min`) from `ttl.near_above` over the highest down to `ttl.near_below` under the lowest, and the prices are logged. `0` disables. |
 | `pricing.chains` | by chain id | Chain slug per feed (`{curve: polygon, llama: polygon, coingecko: polygon-pos, kyber: polygon}`); the defaults in `pricing.CHAINS` cover Ethereum, Polygon, Arbitrum, Base, Optimism, Gnosis, Avalanche, BSC, Fantom and Fraxtal where the feed does (Kyber and Velora do not serve Fraxtal or Gnosis). |
 | `pricing.coingecko_api_key_env`, `pricing.coingecko_url` | `COINGECKO_API_KEY`, `https://api.coingecko.com/api/v3` | CoinGecko demo key and API base; a pro key goes with `https://pro-api.coingecko.com/api/v3`. |
 | `pricing.oneinch_api_key_env` | `ONEINCH_API_KEY` | Developer Portal key for the `oneinch` quote source. |
@@ -52,10 +52,10 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `native.enabled` | `false` | The native rail: take lots through the `AuctionTaker` with a Curve router swap, alongside the adapters (see below). Needs `auction_taker`; sends in `keeper` mode, simulates and reports in `offline` mode. |
 | `native.margin` | 0.005 | Take when the auction's quote for the chunk is at least this far under the Curve route quote (the keeper's profit). |
 | `native.max_impact` | 0.01 | Chunk the take so the route's price impact stays under this fraction; the rest of the lot is quoted again next poll. |
-| `native.poll` | 30 | Seconds between polls while a lot's quote is within `ttl.near_above` of its route quote. |
+| `native.poll` | 30 | Seconds between tries of a lot whose quote is within `ttl.near_above` of its route quote. These lots are on a fast lane of their own, tried between the steps of the full cycle and while it waits, so the full cycle's length does not delay them. |
 | `native.router`, `native.chain`, `native.api_url` | by chain id | Curve router NG address, `api.curve.finance` chain slug and pool-list base URL (`curve_router.ROUTERS` / `API_CHAINS` cover Ethereum, Optimism, Gnosis, Polygon, Fantom, Fraxtal, Base, Arbitrum, Avalanche). |
-| `native.min_pool_usd`, `native.max_hops` | 1000, 2 | Pools below this TVL are not routed through; hops per route (plain `exchange` only). |
-| `native.routes` | `{}` | Explicit routes by lot token, `{token: {path: [token, pool, token, ...], params: [[i, j, swap_type, pool_type, n_coins], ...]}}`, used instead of the search (metapool underlying swaps, zaps). |
+| `native.min_pool_usd`, `native.max_hops` | 1000, 5 | Pools below this TVL are not routed through; hops per route (the router takes five at most). |
+| `native.routes` | `{}` | Explicit routes by lot token, `{token: {path: [token, pool, token, ...], params: [[i, j, swap_type, pool_type, n_coins], ...], pools: [pool or zero per hop]}}`, used instead of the search (`pools` only for zap hops, swap type 3). |
 | `native.profit_receiver` | the sender | Where the take's profit and any unspent lot go. |
 | `max_open_orders` | 8 | Open orders per adapter at once; lots farthest from the market wait for a slot. The CoW orderbook rejects an owner's eleventh open outside-market order (`TooManyLimitOrders`). |
 | `tokens.whitelist` | `[]` | Non-empty: sell only these. |
@@ -107,15 +107,27 @@ the taker receives the lot, swaps it to want on Curve through the router
 NG, pays the auction's quote from the proceeds and sends the rest to the
 keeper. It needs only gas and works on any chain with Curve pools.
 
-Routes come from the `api.curve.finance` pool list (`keepers/auction_keeper/routing/curve_router.py`):
-plain `exchange` hops, up to `native.max_hops`, through pools above
-`native.min_pool_usd`, ranked by the router's own `get_dy` so the quote the
-keeper acts on is what the swap pays. The take is chunked: the largest
-amount whose price impact on the route stays under `native.max_impact` is
-taken, the rest stays in the lot and is quoted again next poll, so a thin
-pool is hit in pieces that arbitrage refills in between. A chunk is taken
-when the auction's quote for it is `native.margin` under the route quote,
-after a simulation; a reverted simulation is reported and retried.
+Routes are found in `keepers/auction_keeper/routing/curve_router.py` from
+Curve's own data: `api.curve.finance` pools and lending vaults,
+`prices.curve.finance` crvUSD markets, and the chain for what no API says.
+Every operation of the router is a hop kind: `exchange`,
+`exchange_underlying` (metapools, lending pools), zaps, `add_liquidity` and
+`remove_liquidity_one_coin` (so LP token lots unwrap and a path can cross a
+base pool), LLAMMAs, the wrapped native token and the Ethereum wrappers,
+ERC4626 vaults. Paths run up to `native.max_hops` through pools above
+`native.min_pool_usd` and are ranked by the router's own `get_dy`, so the
+quote the keeper acts on is what the swap pays; a hop the deployed router
+does not take reverts there and its route is dropped. The best route of a
+lot is kept for two minutes, so a retry costs one quote, not a search.
+
+The take is chunked: the largest amount whose price impact on the route
+stays under `native.max_impact` is taken, so a thin pool is hit in pieces.
+A chunk is taken when the auction's quote for it is `native.margin` under
+the route quote, after a simulation; a reverted simulation is reported and
+retried. After a take the next chunk of the lot is tried at once (up to 16
+in a row) rather than next cycle, since the curve keeps falling in between.
+A lot within `ttl.near_above` of its route quote is tried every
+`native.poll` seconds whatever the full cycle is busy with.
 
 The same router quote is available to the schedule as the `router` price
 source (`pricing.sources`), which needs no feed and no key.

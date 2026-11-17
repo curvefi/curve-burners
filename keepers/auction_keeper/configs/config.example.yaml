@@ -16,7 +16,7 @@ order_ttl: 300          # order validity without a market estimate (or below it)
 pricing:
   sources: [curve, llama, cow]
   cache: 60             # seconds a lot's estimate is reused
-  cross_check: 0.25     # the winner must agree with the next source within 25%, else no market this round
+  cross_check: 0.25     # the winner must agree with the next source within 25%, else every source is believed (dense from the highest down to the lowest)
   # chains: {curve: polygon, llama: polygon, coingecko: polygon-pos, kyber: polygon}  # defaults by chain id
   # coingecko_api_key_env: COINGECKO_API_KEY   # demo key; a pro key goes with
   # coingecko_url: https://pro-api.coingecko.com/api/v3
@@ -39,11 +39,11 @@ native:
   enabled: false
   margin: 0.005         # take when the quote is this far under the Curve route quote
   max_impact: 0.01      # chunk so the route's price impact stays under 1%
-  poll: 30              # poll this often while a lot is near its route quote
+  poll: 30              # try a lot near its route quote this often, whatever the full cycle does
   # router: "0x..."     # Curve router NG; defaults by chain id
   # chain: fraxtal      # api.curve.finance slug; defaults by chain id
   # min_pool_usd: 1000
-  # max_hops: 2
+  # max_hops: 5         # the router takes five at most
   # profit_receiver: "0x..."   # the sender by default
   # routes:             # explicit routes instead of the search
   #   "0xTOKEN": {path: ["0xTOKEN", "0xPOOL", "0xWANT"], params: [[0, 1, 1, 1, 2]]}

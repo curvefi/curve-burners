@@ -114,6 +114,11 @@ class NetworkKeeper:
         self._publishers: dict[str, AdapterPublisher] = {}
         # Set when a lot sits near its route quote: the loop polls at native.poll.
         self._fast_poll = False
+        # The fast lane: lots near their route quote, tried every native.poll
+        # seconds whatever the full cycle is busy with (kept across cycles).
+        # The lot snapshot is reused until a take or a failure changes it.
+        self._near: dict[tuple[str, str], tuple[Auction, LotView | None]] = {}
+        self._fast_at = time.monotonic()
         self._unknown_adapters: set[str] = set()
         # This cycle's schedule per (auction, token), read by the publishers' planner hook.
         self._plans: dict[tuple[str, str], schedule.Plan] = {}
@@ -245,6 +250,7 @@ class NetworkKeeper:
             planned = self.plan_for(auction, lot)
             log.debug("%s: %s", lot.token, planned)
             live.append((lot, planned))
+            self.fast_lane()
         # Nearest the market first: a far lot waits for a budget slot, a near one never.
         live.sort(key=lambda item: (ZONE_RANK[item[1].zone], item[1].band_entry or 0))
         for publisher in publishers:
@@ -260,17 +266,64 @@ class NetworkKeeper:
                 if outcome.action == "posted":
                     budget -= 1
                 outcomes.append(outcome)
+                self.fast_lane()
         if self.native is not None:
             for lot, _ in live:
                 outcomes.append(self._take(auction, lot))
+                self.fast_lane()
+        return outcomes
+
+    def fast_lane(self) -> list[Outcome]:
+        """Try the lots near their route quote again when ``native.poll``
+        seconds have passed since the last try. Called between the steps of a
+        cycle and while the loop waits, so a lot at the trigger is never left
+        for longer than that, however long the full cycle takes."""
+        if self.native is None or not self._near:
+            return []
+        if time.monotonic() - self._fast_at < self.config.native.poll:
+            return []
+        self._fast_at = time.monotonic()
+        outcomes = []
+        for key, (auction, lot) in list(self._near.items()):
+            try:
+                if lot is None:
+                    lot = auction.lot_view(key[1])
+                if not lot.active:
+                    self._near.pop(key, None)
+                    continue
+                outcomes.append(self._take(auction, lot))
+            except Exception as exc:  # noqa: BLE001 - the full cycle retries the lot
+                log.warning("%s: fast lane failed: %s", key[1], exc)
         return outcomes
 
     def _take(self, auction: Auction, lot: LotView) -> Outcome:
         """The native rail's try at the lot; offline mode only simulates."""
         assert self.native is not None
-        result = self.native.attempt(auction, lot, dry_run=self.dry_run or not self.config.onchain)
+        dry_run = self.dry_run or not self.config.onchain
+        result = self.native.attempt(auction, lot, dry_run=dry_run)
+        # A lot taken in chunks is taken back to back: the curve keeps
+        # falling between cycles, so a chunk left for the next one pays the
+        # auction less for the same route quote.
+        taken = result
+        for _ in range(MAX_TAKES_PER_CYCLE - 1):
+            if result.action != "taken":
+                break
+            lot = auction.lot_view(lot.token)
+            if not lot.active:
+                break
+            result = self.native.attempt(auction, lot, dry_run=dry_run)
+            if result.action == "taken":
+                taken = result
+        key = (auction.address.lower(), lot.token.lower())
         if result.near:
             self._fast_poll = True
+            # After a take or a failure the snapshot is stale: read it again.
+            fresh = result.action == "waiting" and taken.action != "taken"
+            self._near[key] = (auction, lot if fresh else None)
+        else:
+            self._near.pop(key, None)
+        if taken.action == "taken":
+            result = taken
         return Outcome(auction.address, lot.token, NATIVE, result.action, result.detail)
 
     def _publish(
@@ -332,7 +385,7 @@ class NetworkKeeper:
         """Sleep until the next recorded expiry or the poll interval, whichever
         is sooner (never below one second once something is due)."""
         remaining = self.config.poll_interval - elapsed
-        if self._fast_poll:
+        if self._fast_poll and not self._near:
             remaining = min(remaining, self.config.native.poll - elapsed)
         if self._next_expiry is not None and self._cycle_timestamp is not None:
             until_expiry = self._next_expiry - self._cycle_timestamp - elapsed
@@ -364,11 +417,29 @@ class NetworkKeeper:
                 if (count := sum(1 for o in outcomes if o.action == action))
             }
             log.info("%s: %s", self.config.name, summary)
-            if wait(self.wait_seconds(time.monotonic() - started)):
+            # With lots near their route quote the wait is cut into
+            # native.poll slices, each ending in a fast-lane pass; the next
+            # full cycle still comes after the usual wait.
+            stopped = False
+            while not stopped:
+                remaining = self.wait_seconds(time.monotonic() - started)
+                if self.native is None or not self._near:
+                    stopped = wait(remaining)
+                    break
+                until_fast = self.config.native.poll - (time.monotonic() - self._fast_at)
+                full_due = self.config.poll_interval - (time.monotonic() - started)
+                if full_due <= 0:
+                    break
+                stopped = wait(max(0.0, min(until_fast, full_due)))
+                if not stopped:
+                    self.fast_lane()
+            if stopped:
                 break
 
 
 ZONE_RANK = {"near": 0, "below": 1, "blind": 2, "far": 3}
+# Chunks of one lot the native rail takes in a row within a cycle.
+MAX_TAKES_PER_CYCLE = 16
 
 
 def run_networks(

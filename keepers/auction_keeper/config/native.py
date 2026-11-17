@@ -30,16 +30,18 @@ class NativeSettings:
     max_impact: float = 0.01
     # Seconds between polls while a lot's quote is within the band above the route.
     poll: int = 30
-    # Pools below this TVL (USD) are not routed through; hops per route.
+    # Pools below this TVL (USD) are not routed through; hops per route (the
+    # router takes five at most).
     min_pool_usd: float = 1000.0
-    max_hops: int = 2
+    max_hops: int = 5
     # api.curve.finance pool list: base URL and chain slug (defaults by chain id).
     api_url: str = "https://api.curve.finance/v1/getPools/all"
     chain: str | None = None
     # Receiver of the take's profit (the sender by default).
     profit_receiver: str | None = None
     # Explicit routes by lot token, used instead of the search:
-    # {token: {path: [token, pool, token, ...], params: [[i, j, swap, pool_type, n], ...]}}
+    # {token: {path: [token, pool, token, ...], params: [[i, j, swap, pool_type, n], ...],
+    #          pools: [pool or zero per hop]}}  (pools only for zap hops, swap type 3)
     routes: dict[str, Any] = field(default_factory=dict)
 
 

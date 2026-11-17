@@ -84,3 +84,19 @@ def test_band_entry_is_the_window_end_when_never_reached(auction, sell_token, lo
     planned = plan(auction, view, market(1), SETTINGS, ORDER_TTL)
     assert planned.zone == "far" and planned.band_entry == view.end
     assert planned.valid_to == view.end
+
+
+def test_disagreeing_sources_keep_the_band_from_the_highest_to_the_lowest(auction, sell_token, lot):
+    view = auction.lot_view(sell_token.address)
+    needed = view.amount_needed
+    # The curve is at the highest answer, far above the lowest: dense already,
+    # and still dense where the quote alone against the highest would be "below".
+    for high, low in ((needed, needed // 100), (needed * 2, needed // 2)):
+        span = MarketQuote(high, "test", 0.0, low=low)
+        planned = plan(auction, view, span, SETTINGS, ORDER_TTL)
+        assert planned.zone == "near", (high, low)
+        assert planned.valid_to == view.timestamp + SETTINGS.min_ttl
+    # Far above both: the wait ends at the band of the highest answer.
+    far = plan(auction, view, MarketQuote(needed // 2, "test", 0.0, low=1), SETTINGS, ORDER_TTL)
+    alone = plan(auction, view, market(needed // 2), SETTINGS, ORDER_TTL)
+    assert far.zone == "far" and far.band_entry == alone.band_entry

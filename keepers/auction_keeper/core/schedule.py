@@ -16,6 +16,10 @@ schedule therefore spends validity where it matters:
   estimate was wrong or no one is filling): the uniform ``order_ttl``.
 * ``blind`` (no market): the uniform ``order_ttl``, the pre-pricing policy.
 
+A market the sources disagree on is a span (``MarketQuote.low`` up to
+``want_amount``): the band runs from ``near_above`` over its highest answer
+down to ``near_below`` under its lowest.
+
 Every validity is clipped to the lot window end.
 """
 
@@ -81,7 +85,8 @@ def plan(
     if market is None or market.want_amount <= 0:
         return Plan(uniform_valid_to(lot, order_ttl), "blind")
     upper = int(market.want_amount * (1 + settings.near_above))
-    lower = int(market.want_amount * (1 - settings.near_below))
+    low = market.want_amount if market.low is None else market.low
+    lower = int(low * (1 - settings.near_below))
     if lot.amount_needed > upper:
         entry = band_entry(auction, lot, upper, now, lot.end)
         valid_to = min(max(entry, now + settings.min_ttl), now + settings.max_ttl, lot.end)

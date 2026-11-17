@@ -23,7 +23,8 @@ class PricingSettings:
     sources: tuple[str, ...] = DEFAULT_PRICE_SOURCES
     cache: int = DEFAULT_PRICE_CACHE
     # Largest relative disagreement tolerated between the winning source and
-    # the next one with a price; beyond it the lot has no market. 0 disables.
+    # the next one with a price; beyond it every source is asked and the
+    # market is the span of their answers. 0 disables.
     cross_check: float = DEFAULT_PRICE_CROSS_CHECK
     # Chain slug per source (curve, llama, coingecko, kyber); defaults by chain id.
     chains: dict[str, str] = field(default_factory=dict)

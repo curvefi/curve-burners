@@ -113,6 +113,9 @@ class MarketQuote:
     want_amount: int
     source: str
     at: float
+    # Sources that disagree are all believed: ``want_amount`` is then the
+    # highest answer and ``low`` the lowest (None: one estimate).
+    low: int | None = None
 
 
 class MarketPricer:
@@ -120,11 +123,14 @@ class MarketPricer:
     lookup per lot per ``cache_ttl`` seconds, whatever the poll interval).
 
     The first source with a price wins, but it is cross-checked against the
-    next one that has a price: when the two disagree by more than
-    ``cross_check`` (relative to the larger), neither is trusted and the lot
-    has no market this round (uniform TTL), with a warning naming both. A
-    feed that misprices a token (a stale or zero USD price) would otherwise
-    park one long order far above the real market for ``ttl.max``.
+    next one that has a price. When the two disagree by more than
+    ``cross_check`` (relative to the larger) there is no telling which one
+    misprices the token (a feed that does not really cover it answers with
+    a stale or near-zero price), so every source is asked and every answer
+    believed: the market is the whole span from the lowest to the highest,
+    with a warning naming them. The schedule then turns dense as soon as
+    the curve nears the most expensive answer and stays dense down to the
+    cheapest, so the real market is not slept through whichever it is.
     """
 
     def __init__(
@@ -159,28 +165,33 @@ class MarketPricer:
             return cached
         self._cache.pop(key, None)
         answers: list[tuple[PriceSource, int]] = []
+        disagree = False
         for source in self.sources:
             amount = self._ask(source, lot)
-            if amount is not None:
-                answers.append((source, amount))
-            if len(answers) == (2 if self.cross_check else 1):
+            if amount is None:
+                continue
+            answers.append((source, amount))
+            if not self.cross_check:
                 break
+            if len(answers) == 2:
+                (_, first), (_, second) = answers
+                disagree = abs(first - second) > self.cross_check * max(first, second)
+                if not disagree:
+                    break
         if not answers:
             return None
-        (first, amount), *rest = answers
-        if rest:
-            (second, other) = rest[0]
-            if abs(amount - other) > self.cross_check * max(amount, other):
-                log.warning(
-                    "%s: price sources disagree (%s: %s, %s: %s); no market this round",
-                    lot.token,
-                    first.name,
-                    amount,
-                    second.name,
-                    other,
-                )
-                return None
-        quote = MarketQuote(want_amount=amount, source=first.name, at=now)
+        if disagree:
+            log.warning(
+                "%s: price sources disagree (%s); believing all of them",
+                lot.token,
+                ", ".join(f"{source.name}: {amount}" for source, amount in answers),
+            )
+            high_source, high = max(answers, key=lambda answer: answer[1])
+            low = min(amount for _, amount in answers)
+            quote = MarketQuote(want_amount=high, source=high_source.name, at=now, low=low)
+        else:
+            source, amount = answers[0]
+            quote = MarketQuote(want_amount=amount, source=source.name, at=now)
         self._cache[key] = quote
         return quote
 

@@ -299,18 +299,20 @@ def test_pricer_cross_checks_the_winner_against_the_next_source(sell_token, want
     assert (quote.want_amount, quote.source) == (100, "curve")
     assert (curve.calls, cow.calls, third.calls) == (1, 1, 0)
 
-    # A mispriced winner (a stale feed) is caught: no market, both prices logged.
+    # A disagreement (one feed misprices the token, no telling which): every
+    # source is asked and believed, the market spans lowest to highest.
     curve.answer = 5
     clock[0] += 61
     with caplog.at_level("WARNING"):
-        assert pricer.market(lot) is None
-    assert "curve: 5, cow: 130" in caplog.text
-    assert pricer.market(lot) is None  # not cached either way
-    assert (curve.calls, cow.calls) == (3, 3)
+        quote = pricer.market(lot)
+    assert (quote.want_amount, quote.source, quote.low) == (130, "cow", 1)
+    assert "curve: 5, cow: 130, third: 1" in caplog.text
+    assert pricer.market(lot) is quote  # cached like any estimate
+    assert (curve.calls, cow.calls, third.calls) == (2, 2, 1)
 
     # Only one source has a price: nothing to check against, it wins.
     cow.answer = None
     third.answer = None
     clock[0] += 61
     assert pricer.market(lot).want_amount == 5
-    assert third.calls == 1
+    assert third.calls == 2

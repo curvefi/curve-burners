@@ -14,7 +14,7 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
       sources: [curve, llama, cow]  # priority order: first source with a price wins; [] = no market
                             # curve, llama, coingecko (USD feeds); cow, kyber, velora, oneinch (swap quotes)
       cache: 60             # seconds a lot's market estimate is reused
-      cross_check: 0.25     # the winner must agree with the next source within 25%, else no market
+      cross_check: 0.25     # the winner must agree with the next source within 25%, else all sources are believed
     ttl:                    # validity by distance of the curve quote from the market
       near_above: 0.2       # band upper edge: quote at most 20% above the market
       near_below: 0.1       # band lower edge: quote at most 10% below the market
