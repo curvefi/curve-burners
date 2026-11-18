@@ -316,6 +316,7 @@
             rpc: "https://polygon-bor-rpc.publicnode.com", // polygon-rpc.com answers 403 as of 2026-10-31
             explorer: "https://polygonscan.com",
             cow: "polygon", // CoW orderbook chain slug; null = native take only
+            cowExplorer: "pol", // explorer.cow.fi path, when it differs from the orderbook slug
             since: 1791158400, // burner deployed 2026-10-05: first week in the history selector
             logsRange: 10000, // eth_getLogs block span the RPC accepts (publicnode and drpc: 10000)
             blockTime: 2.1, // seconds, only a first guess for timestamp -> block
@@ -1476,7 +1477,10 @@
         for (const o of shown) {
           const row = tbody.appendChild(document.createElement("tr"));
           td(row, fmtTs(Math.floor(Date.parse(o.creationDate) / 1000)));
-          td(row, o.status).className = o.status === "fulfilled" ? "good" : "";
+          const status = td(row, o.status);
+          status.className = o.status === "fulfilled" ? "good" : "";
+          // The orderbook's answer ages: an open order is watched until its validTo.
+          if (o.status === "open") status.dataset.validTo = o.validTo;
           td(row, amt(o.sellAmount, o.sellToken), "num");
           td(row, amt(o.buyAmount, o.buyToken), "num");
           td(row, amt(o.executedBuyAmount, o.buyToken), "num");
@@ -1487,6 +1491,17 @@
           a.rel = "noreferrer";
           a.textContent = (o.uid || "").slice(0, 10) + "…";
           td(row, a);
+        }
+        ageOrders();
+      }
+      // An order fetched as open whose validity has passed since is expired
+      // (unless it filled in between: refresh to see).
+      function ageOrders() {
+        for (const cell of $("orders").querySelectorAll("td[data-valid-to]")) {
+          if (Number(cell.dataset.validTo) > nowTs()) continue;
+          cell.textContent = "expired";
+          cell.title = "open when fetched, validity passed since; refresh for fills";
+          delete cell.dataset.validTo;
         }
       }
 
@@ -1566,6 +1581,7 @@
 
       renderCalendar();
       setInterval(renderCalendar, 1000);
+      setInterval(ageOrders, 1000);
       const initial = readHash();
       setView(initial.net, initial.week);
     </script>
