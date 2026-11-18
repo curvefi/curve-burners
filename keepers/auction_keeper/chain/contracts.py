@@ -109,6 +109,7 @@ class Auction(Contract):
     )
     IS_VALID_SIGNATURE = Function("isValidSignature(bytes32,bytes)", ("bytes4",))
     SYNC_EXECUTOR_APPROVALS = Function("sync_executor_approvals(address,address[])")
+    PUSH_TARGET = Function("push_target()", ("uint256",))
     TAKE = Function("take(address,uint256,address,bytes)", ("uint256",))
     TAKE_WITH_LIMITS = Function(
         "take_with_limits(address,uint256,uint256,uint256,address,uint256,bytes)",
@@ -197,6 +198,10 @@ class Auction(Contract):
     def sync_executor_approvals_calldata(self, executor: str, tokens: list[str]) -> bytes:
         return self.SYNC_EXECUTOR_APPROVALS.encode(executor, tokens)
 
+    def push_target_calldata(self) -> bytes:
+        """The permissionless forward of ``want`` held by the burner to the FeeCollector."""
+        return self.PUSH_TARGET.encode()
+
     def take_calldata(self, token: str, max_amount: int, receiver: str, data: bytes = b"") -> bytes:
         return self.TAKE.encode(token, max_amount, receiver, data)
 
@@ -284,6 +289,434 @@ class CowAdapterContract(AdapterContract):
         return bytes(self._read_one(self.APP_DATA))
 
 
+# OKX Intent Swap order as signed (adapters/okx/intent_swap.vy): the eleven
+# EIP-712 fields, commissions (feePercent, referrerWalletAddress, flag) last.
+OKX_COMMISSION_ABI = "(uint256,address,uint256)"
+OKX_ORDER_ABI = (
+    "(address,address,address,address,uint256,uint256,uint32,bytes32,bytes32,bool,"
+    f"{OKX_COMMISSION_ABI}[])"
+)
+
+
+class OKXIntentAdapterContract(AdapterContract):
+    SETTLEMENT = Function("settlement()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    TOKEN_APPROVE = Function("token_approve()", ("address",))
+    ORDER_FOR = Function("order_for(address,address,uint256,bytes32)", (OKX_ORDER_ABI, "bytes"))
+    DESCRIBE = Function("describe(bytes)", (OKX_ORDER_ABI, "bytes32", "bytes"))
+
+    def settlement(self) -> str:
+        return to_checksum_address(self._read_one(self.SETTLEMENT))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def token_approve(self) -> str:
+        return to_checksum_address(self._read_one(self.TOKEN_APPROVE))
+
+    def order_for(
+        self, auction: str, token: str, sell_amount: int = 0, app_data: bytes = bytes(32)
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(self.ORDER_FOR, auction, token, sell_amount, app_data)
+        return tuple(order), bytes(signature)
+
+    def describe(self, payload: bytes) -> tuple[tuple, bytes, bytes]:
+        """(order, digest, uid) of a bare ``abi_encode(order)`` payload."""
+        order, digest, uid = self._read(self.DESCRIBE, payload)
+        return tuple(order), bytes(digest), bytes(uid)
+
+
+# KyberSwap DSLO order (adapters/kyber/dslo.vy): nine static fields, then
+# makerAssetData, takerAssetData, getMakerAmount, getTakerAmount, predicate,
+# interaction.
+DSLO_ORDER_ABI = (
+    "(uint256,address,address,address,address,address,uint256,uint256,uint256,"
+    "bytes,bytes,bytes,bytes,bytes,bytes)"
+)
+
+
+class KyberDsloAdapterContract(AdapterContract):
+    PROTOCOL = Function("protocol()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function("order_for(address,address,uint256,uint256)", (DSLO_ORDER_ABI, "bytes"))
+    DESCRIBE = Function(
+        f"describe({DSLO_ORDER_ABI})", ("address", "address", "uint256", "bool", "uint256")
+    )
+
+    def protocol(self) -> str:
+        return to_checksum_address(self._read_one(self.PROTOCOL))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(
+        self, auction: str, token: str, salt: int, sell_amount: int = 0
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(self.ORDER_FOR, auction, token, salt, sell_amount)
+        return tuple(order), bytes(signature)
+
+    def describe(self, order: tuple) -> tuple[str, str, int, bool, int]:
+        """(receiver, fee recipient, fee percent 1e-5, taker-asset fee, last fillable timestamp)."""
+        receiver, fee_recipient, fee_percent, taker_fee, valid_to = self._read(self.DESCRIBE, order)
+        return (
+            to_checksum_address(receiver),
+            to_checksum_address(fee_recipient),
+            fee_percent,
+            taker_fee,
+            valid_to,
+        )
+
+
+# Velora Delta order (adapters/velora/delta.vy): fourteen fields, the
+# Bridge (protocolSelector, destinationChainId, outputToken, scalingFactor,
+# protocolData) last.
+DELTA_BRIDGE_ABI = "(bytes4,uint256,address,int8,bytes)"
+DELTA_ORDER_ABI = (
+    "(address,address,address,address,uint256,uint256,uint256,uint256,uint8,uint256,uint256,"
+    f"bytes,bytes,{DELTA_BRIDGE_ABI})"
+)
+
+
+class VeloraDeltaAdapterContract(AdapterContract):
+    SETTLEMENT = Function("settlement()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function("order_for(address,address,uint256,uint256)", (DELTA_ORDER_ABI, "bytes"))
+    DESCRIBE = Function("describe(uint256)", ("address", "uint256", "bool", "bool"))
+
+    def settlement(self) -> str:
+        return to_checksum_address(self._read_one(self.SETTLEMENT))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(
+        self, auction: str, token: str, nonce: int, sell_amount: int = 0
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(self.ORDER_FOR, auction, token, nonce, sell_amount)
+        return tuple(order), bytes(signature)
+
+    def describe(self, partner_and_fee: int) -> tuple[str, int, bool, bool]:
+        """(partner, fee bps, partner takes surplus, cap surplus) of a packed partnerAndFee."""
+        partner, fee_bps, takes_surplus, cap_surplus = self._read(self.DESCRIBE, partner_and_fee)
+        return to_checksum_address(partner), fee_bps, takes_surplus, cap_surplus
+
+
+# 0x Settler gasless order (adapters/zerox/settler.vy): the Permit2 permit
+# (token, amount, nonce, deadline), the AllowedSlippage (recipient, buyToken,
+# minAmountOut) and the Settler's hash of the signed action list.
+ZEROX_PERMIT_ABI = "(address,uint256,uint256,uint256)"
+ZEROX_SLIPPAGE_ABI = "(address,address,uint256)"
+ZEROX_ORDER_ABI = f"({ZEROX_PERMIT_ABI},{ZEROX_SLIPPAGE_ABI},bytes32)"
+
+
+class ZeroExSettlerAdapterContract(AdapterContract):
+    SETTLER = Function("settler()", ("address",))
+    INTENT = Function("intent()", ("bool",))
+    PERMIT2 = Function("permit2()", ("address",))
+    DEPLOYER = Function("deployer()", ("address",))
+    FEATURE = Function("feature()", ("uint256",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    HASH_ACTIONS = Function("hash_actions(bytes[])", ("bytes32",))
+    ORDER_FOR = Function(
+        "order_for(address,address,uint256,uint256,uint256,bytes32)", (ZEROX_ORDER_ABI, "bytes")
+    )
+    DESCRIBE = Function("describe(bytes)", (ZEROX_ORDER_ABI, "bytes32"))
+
+    def settler(self) -> str:
+        return to_checksum_address(self._read_one(self.SETTLER))
+
+    def intent(self) -> bool:
+        """True for a SettlerIntent adapter (Slippage witness), False for SettlerMetaTxn."""
+        return bool(self._read_one(self.INTENT))
+
+    def permit2(self) -> str:
+        return to_checksum_address(self._read_one(self.PERMIT2))
+
+    def deployer(self) -> str:
+        """The 0x Settler deployer/registry the adapter checks its Settler against."""
+        return to_checksum_address(self._read_one(self.DEPLOYER))
+
+    def feature(self) -> int:
+        """The registry feature (ERC-721 token id) of the pinned flavor: 3 MetaTxn, 4 Intent."""
+        return int(self._read_one(self.FEATURE))
+
+    def domain_separator(self) -> bytes:
+        """Permit2's EIP-712 domain separator, as pinned by the adapter."""
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def hash_actions(self, actions: list[bytes]) -> bytes:
+        """The Settler's hash of an action list (the actions_hash of a MetaTxn order)."""
+        return bytes(self._read_one(self.HASH_ACTIONS, actions))
+
+    def order_for(
+        self,
+        auction: str,
+        token: str,
+        nonce: int,
+        sell_amount: int = 0,
+        deadline: int = 0,
+        actions_hash: bytes = bytes(32),
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(
+            self.ORDER_FOR, auction, token, nonce, sell_amount, deadline, actions_hash
+        )
+        return tuple(order), bytes(signature)
+
+    def describe(self, payload: bytes) -> tuple[tuple, bytes]:
+        """(order, Permit2 digest) of a bare ``abi_encode(order)`` payload."""
+        order, digest = self._read(self.DESCRIBE, payload)
+        return tuple(order), bytes(digest)
+
+
+class ZeroExDeployerRegistry(Contract):
+    """The 0x Settler deployer/registry: whether a Settler is still its
+    feature's current (``ownerOf``) or previous (``prev``) instance, 0x's
+    ``requireGenuineSettler`` and the adapter's own liveness check. A
+    reverting view (no instance left) counts as not listed."""
+
+    OWNER_OF = Function("ownerOf(uint256)", ("address",))
+    PREV = Function("prev(uint128)", ("address",))
+
+    def owner_of(self, feature: int) -> str | None:
+        try:
+            return to_checksum_address(self._read_one(self.OWNER_OF, feature))
+        except CallReverted:
+            return None
+
+    def prev(self, feature: int) -> str | None:
+        try:
+            return to_checksum_address(self._read_one(self.PREV, feature))
+        except CallReverted:
+            return None
+
+    def lists(self, feature: int, settler: str) -> bool:
+        """One call while the Settler is current, two once it is the previous one."""
+        settler = to_checksum_address(settler)
+        if self.owner_of(feature) == settler:
+            return True
+        return self.prev(feature) == settler
+
+
+class ZeroExSettlerContract(Contract):
+    """A 0x Settler (MetaTxn or Intent flavor): the relay entrypoint's calldata."""
+
+    EXECUTE_META_TXN = Function(
+        "executeMetaTxn((address,address,uint256),bytes[],bytes32,address,bytes)", ("bool",)
+    )
+
+    def execute_meta_txn_calldata(
+        self,
+        slippage: tuple[str, str, int],
+        actions: list[bytes],
+        zid: bytes,
+        msg_sender: str,
+        sig: bytes,
+    ) -> bytes:
+        return self.EXECUTE_META_TXN.encode(slippage, actions, zid, msg_sender, sig)
+
+
+# Hashflow RFQ-m quote as signed by the trader (adapters/hashflow/hashflow.vy
+# Quote): the nine EIP-712 fields, txid first; and the protocol's RFQMQuote
+# calldata (calldata order, then the taker and maker signatures).
+HASHFLOW_QUOTE_ABI = "(bytes32,address,address,address,address,address,uint256,uint256,uint256)"
+HASHFLOW_RFQM_CALLDATA_ABI = (
+    "(address,address,address,address,address,uint256,uint256,uint256,bytes32,bytes,bytes)"
+)
+
+
+class HashflowAdapterContract(AdapterContract):
+    ROUTER = Function("router()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function("order_for(address,address,uint256)", (HASHFLOW_QUOTE_ABI,))
+    SIGNATURE_FOR = Function(f"signature_for({HASHFLOW_QUOTE_ABI})", ("bytes",))
+    DESCRIBE = Function("describe(bytes)", (HASHFLOW_QUOTE_ABI, "bytes32"))
+
+    def router(self) -> str:
+        return to_checksum_address(self._read_one(self.ROUTER))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(self, auction: str, token: str, sell_amount: int = 0) -> tuple:
+        """The trader side of a quote request (maker fields zero); typed reverts bubble."""
+        return tuple(self._read_one(self.ORDER_FOR, auction, token, sell_amount))
+
+    def signature_for(self, quote: tuple) -> bytes:
+        return bytes(self._read_one(self.SIGNATURE_FOR, quote))
+
+    def describe(self, payload: bytes) -> tuple[tuple, bytes]:
+        """(quote, digest) of a bare ``abi_encode(quote)`` payload."""
+        quote, digest = self._read(self.DESCRIBE, payload)
+        return tuple(quote), bytes(digest)
+
+
+class HashflowRouter(Contract):
+    """``HashflowRouter``: the RFQ-m settlement entrypoint and the txid replay map."""
+
+    TRADE_RFQM = Function(f"tradeRFQM({HASHFLOW_RFQM_CALLDATA_ABI})")
+    USED_TXIDS = Function("usedTxids(bytes32)", ("bool",))
+
+    def trade_rfqm_calldata(self, quote: tuple) -> bytes:
+        return self.TRADE_RFQM.encode(quote)
+
+    def used_txid(self, txid: bytes) -> bool:
+        return self._read_one(self.USED_TXIDS, txid)
+
+
+class HashflowPool(Contract):
+    """``HashflowPool``: the market maker's signer and killswitch (IHashflowPool)."""
+
+    SIGNER_CONFIGURATION = Function("signerConfiguration()", ("address", "bool"))
+
+    def signer_configuration(self) -> tuple[str, bool]:
+        signer, enabled = self._read(self.SIGNER_CONFIGURATION)
+        return to_checksum_address(signer), bool(enabled)
+
+
+# 1inch Limit Order Protocol v4 order (adapters/oneinch/oneinch.vy Order):
+# salt, maker, receiver, makerAsset, takerAsset, makingAmount, takingAmount,
+# makerTraits.
+ONEINCH_ORDER_ABI = "(uint256,address,address,address,address,uint256,uint256,uint256)"
+ONEINCH_FEES_ABI = "(uint256,uint256,uint256,uint256)"
+ONEINCH_RECEIVERS_ABI = "(address,address,address)"
+ONEINCH_AUCTION_ABI = "(uint256,uint256,uint256,uint256,uint256,uint256)"
+ONEINCH_SURPLUS_ABI = "(uint256,uint256)"
+
+
+class OneInchAdapterContract(AdapterContract):
+    """``OneInchAdapter``: the plain LOP v4 adapter (the FeeTaker and Fusion
+    adapters export the same protocol and domain getters)."""
+
+    LIMIT_ORDER_PROTOCOL = Function("limit_order_protocol()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function("order_for(address,address,uint256,uint256)", (ONEINCH_ORDER_ABI, "bytes"))
+
+    def limit_order_protocol(self) -> str:
+        return to_checksum_address(self._read_one(self.LIMIT_ORDER_PROTOCOL))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(
+        self, auction: str, token: str, salt: int, sell_amount: int = 0
+    ) -> tuple[tuple, bytes]:
+        """The adapter's publishable (order, signature) for a live lot; typed reverts bubble."""
+        order, signature = self._read(self.ORDER_FOR, auction, token, salt, sell_amount)
+        return tuple(order), bytes(signature)
+
+
+class OneInchFeeTakerAdapterContract(OneInchAdapterContract):
+    FEE_TAKER = Function("fee_taker()", ("address",))
+    ORDER_FOR_EXT = Function(
+        "order_for(address,address,uint256,uint256,bytes)", (ONEINCH_ORDER_ABI, "bytes")
+    )
+    DESCRIBE = Function("describe(bytes)", (ONEINCH_FEES_ABI, ONEINCH_RECEIVERS_ABI, "uint256"))
+
+    def fee_taker(self) -> str:
+        return to_checksum_address(self._read_one(self.FEE_TAKER))
+
+    def order_for_extension(
+        self, auction: str, token: str, salt: int, sell_amount: int, extension: bytes
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(
+            self.ORDER_FOR_EXT, auction, token, salt, sell_amount, extension
+        )
+        return tuple(order), bytes(signature)
+
+    def describe(self, extension: bytes) -> tuple:
+        """(fees, receivers, whitelist size) after the adapter's shape checks."""
+        return self._read(self.DESCRIBE, extension)
+
+
+class OneInchFusionAdapterContract(OneInchFeeTakerAdapterContract):
+    SETTLEMENT = Function("settlement()", ("address",))
+    DESCRIBE = Function(
+        "describe(bytes)",
+        (
+            ONEINCH_FEES_ABI,
+            ONEINCH_RECEIVERS_ABI,
+            "uint256",
+            ONEINCH_AUCTION_ABI,
+            ONEINCH_SURPLUS_ABI,
+        ),
+    )
+
+    def settlement(self) -> str:
+        return to_checksum_address(self._read_one(self.SETTLEMENT))
+
+    def fee_taker(self) -> str:
+        return self.settlement()
+
+
+# UniswapX ExclusiveDutchOrder (adapters/uniswapx/uniswapx.vy): info (reactor,
+# swapper, nonce, deadline, validation contract, validation data), decay
+# window, exclusivity, input, outputs.
+UNISWAPX_ORDER_ABI = (
+    "((address,address,uint256,uint256,address,bytes),uint256,uint256,address,uint256,"
+    "(address,uint256,uint256),(address,uint256,uint256,address)[])"
+)
+
+
+class UniswapXAdapterContract(AdapterContract):
+    REACTOR = Function("reactor()", ("address",))
+    PERMIT2 = Function("permit2()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function(
+        "order_for(address,address,uint256,uint256)", (UNISWAPX_ORDER_ABI, "bytes")
+    )
+
+    def reactor(self) -> str:
+        return to_checksum_address(self._read_one(self.REACTOR))
+
+    def permit2(self) -> str:
+        return to_checksum_address(self._read_one(self.PERMIT2))
+
+    def domain_separator(self) -> bytes:
+        """Permit2's EIP-712 domain separator, as pinned by the adapter."""
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(
+        self, auction: str, token: str, nonce: int, sell_amount: int = 0
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(self.ORDER_FOR, auction, token, nonce, sell_amount)
+        return tuple(order), bytes(signature)
+
+
+# Bebop JamOrder as signed (adapters/bebop/jam.vy): the twelve EIP-712 fields.
+JAM_ORDER_ABI = (
+    "(address,address,uint256,uint256,uint256,address,uint256,"
+    "address[],address[],uint256[],uint256[],bytes32)"
+)
+
+
+class BebopJamAdapterContract(AdapterContract):
+    SETTLEMENT = Function("settlement()", ("address",))
+    BALANCE_MANAGER = Function("balance_manager()", ("address",))
+    DOMAIN_SEPARATOR = Function("domain_separator()", ("bytes32",))
+    ORDER_FOR = Function("order_for(address,address,uint256,uint256)", (JAM_ORDER_ABI, "bytes"))
+    DESCRIBE = Function("describe(uint256)", ("address", "uint256", "uint256"))
+
+    def settlement(self) -> str:
+        return to_checksum_address(self._read_one(self.SETTLEMENT))
+
+    def balance_manager(self) -> str:
+        return to_checksum_address(self._read_one(self.BALANCE_MANAGER))
+
+    def domain_separator(self) -> bytes:
+        return bytes(self._read_one(self.DOMAIN_SEPARATOR))
+
+    def order_for(
+        self, auction: str, token: str, nonce: int, sell_amount: int = 0
+    ) -> tuple[tuple, bytes]:
+        order, signature = self._read(self.ORDER_FOR, auction, token, nonce, sell_amount)
+        return tuple(order), bytes(signature)
+
+    def describe(self, partner_info: int) -> tuple[str, int, int]:
+        """(partner, partner fee bps, protocol fee bps) of a packed partnerInfo."""
+        partner, partner_fee, protocol_fee = self._read(self.DESCRIBE, partner_info)
+        return to_checksum_address(partner), partner_fee, protocol_fee
+
+
 class AuctionTaker(Contract):
     """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route."""
 
@@ -307,18 +740,41 @@ class AuctionTaker(Contract):
 
 
 __all__ = [
+    "DELTA_ORDER_ABI",
+    "DSLO_ORDER_ABI",
     "ERC1271_INVALID",
     "ERC1271_MAGIC_VALUE",
+    "HASHFLOW_QUOTE_ABI",
+    "HASHFLOW_RFQM_CALLDATA_ABI",
+    "JAM_ORDER_ABI",
     "LOT_STAGED_TOPIC",
+    "OKX_ORDER_ABI",
+    "ONEINCH_ORDER_ABI",
+    "UNISWAPX_ORDER_ABI",
+    "ZEROX_ORDER_ABI",
     "AdapterConfig",
     "AdapterContract",
     "AdapterRegistry",
     "Auction",
     "AuctionTaker",
+    "BebopJamAdapterContract",
     "CowAdapterContract",
     "Erc20",
+    "HashflowAdapterContract",
+    "HashflowPool",
+    "HashflowRouter",
+    "KyberDsloAdapterContract",
     "Lot",
     "LotView",
+    "OKXIntentAdapterContract",
+    "OneInchAdapterContract",
+    "OneInchFeeTakerAdapterContract",
+    "OneInchFusionAdapterContract",
+    "UniswapXAdapterContract",
+    "VeloraDeltaAdapterContract",
+    "ZeroExDeployerRegistry",
+    "ZeroExSettlerAdapterContract",
+    "ZeroExSettlerContract",
     "address_word",
     "lot_staged_token",
 ]

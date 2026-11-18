@@ -355,6 +355,15 @@ def test_partial_fill_order_valid(harness, adapter, make_order):
     assert _validate(harness, adapter, order) == ERC1271_MAGIC_VALUE
 
 
+def test_receiver_is_the_proceeds_receiver_or_the_auction(harness, adapter, make_order):
+    # The auction itself is the one other receiver check_order accepts (the
+    # proceeds are forwarded by the importer); everything else is rejected.
+    assert _validate(harness, adapter, make_order(receiver=harness.address)) == ERC1271_MAGIC_VALUE
+    for receiver in (boa.env.generate_address("thief"), adapter.address, ZERO_ADDRESS):
+        with boa.reverts(custom_err("BadReceiver()")):
+            _validate(harness, adapter, make_order(receiver=receiver))
+
+
 # Read-only reentrancy: nothing about signed orders is readable mid-take
 
 

@@ -1857,6 +1857,51 @@ def test_push_target_and_recovery_only_return_assets_to_fee_collector(
     assert boa.env.get_balance(deployment.owner) == 0
 
 
+def test_erc1271_accepts_the_burner_as_receiver_and_push_target_forwards(
+    deployment: AuctionDeployment,
+):
+    """A signed order may credit the burner itself (protocols without a
+    receiver field); the proceeds then reach the FeeCollector through the
+    permissionless push_target, which forward() calls as well."""
+    _configure_and_enable_cow(deployment)
+    _activate_lot(deployment, deployment.sell_token, 100 * WAD)
+    domain_separator = deployment.settlement.domainSeparator()
+    order = list(_cow_order(deployment, deployment.sell_token))
+    order[ORDER_RECEIVER] = deployment.burner.address
+    assert (
+        deployment.burner.isValidSignature(
+            _gpv2_order_digest(order, domain_separator),
+            _encode_erc1271_signature(order, deployment.cow_adapter),
+        )
+        == ERC1271_MAGIC_VALUE
+    )
+
+    # The fill credits the burner: the executor pulls the lot, the payment
+    # lands on the burner, where it is not inventory.
+    payment = order[ORDER_BUY_AMOUNT]
+    with boa.env.prank(deployment.relayer):
+        deployment.sell_token.transferFrom(
+            deployment.burner, deployment.taker_receiver, order[ORDER_SELL_AMOUNT]
+        )
+    deployment.target._mint_for_testing(deployment.burner, payment)
+    assert deployment.burner.available(deployment.target) == 0
+    assert deployment.burner.getAmountNeeded(deployment.target) == 0
+    with boa.reverts(custom_err("LotInactive()")):
+        deployment.burner.check_order(
+            deployment.target.address,
+            deployment.target.address,
+            deployment.burner.address,
+            payment,
+            payment,
+            _timestamp(),
+        )
+    with boa.env.prank(deployment.keeper):
+        assert deployment.burner.push_target() == payment
+    assert deployment.target.balanceOf(deployment.fee_collector) == payment
+    assert deployment.target.balanceOf(deployment.burner) == 0
+    assert deployment.burner.push_target() == 0
+
+
 def test_full_lifecycle_collect_cow_and_native_fills_then_forward(
     deployment: AuctionDeployment,
 ):
