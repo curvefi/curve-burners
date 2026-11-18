@@ -1,14 +1,14 @@
 import boa
 import pytest
 
-from .conftest import Epoch, ETH_ADDRESS, ZERO_ADDRESS, WEEK
+from tests.conftest import ETH_ADDRESS, WEEK, ZERO_ADDRESS, Epoch
 
 
 @pytest.fixture(scope="module", autouse=True)
 def preset(burner, hooker, admin):
     # Increase hooker.buffer_amount
     with boa.env.prank(admin):
-        hooker.set_hooks([(ZERO_ADDRESS, b"", (10 ** 9, (0, 0, 0), 0, 0, False), False)])
+        hooker.set_hooks([(ZERO_ADDRESS, b"", (10**9, (0, 0, 0), 0, 0, False), False)])
 
 
 @pytest.fixture(scope="module")
@@ -18,21 +18,21 @@ def coins(coins, target):
 
 def test_burn(fee_collector, arve, weth):
     # raw ETH
-    boa.env.set_balance(arve, 10 ** 18)
+    boa.env.set_balance(arve, 10**18)
     with boa.env.prank(arve):
         assert weth.balanceOf(fee_collector) == 0
-        fee_collector.burn(ETH_ADDRESS, value=10 ** 18)
+        fee_collector.burn(ETH_ADDRESS, value=10**18)
         assert boa.env.get_balance(arve) == 0
         assert boa.env.get_balance(fee_collector.address) == 0
-        assert weth.balanceOf(fee_collector) == 10 ** 18
+        assert weth.balanceOf(fee_collector) == 10**18
 
     # ERC20
-    weth._mint_for_testing(arve, 10 ** 18)
+    weth._mint_for_testing(arve, 10**18)
     with boa.env.prank(arve):
-        weth.approve(fee_collector, 10 ** 18)
+        weth.approve(fee_collector, 10**18)
         fee_collector.burn(weth)
         assert weth.balanceOf(arve) == 0
-        assert weth.balanceOf(fee_collector) == 2 * 10 ** 18
+        assert weth.balanceOf(fee_collector) == 2 * 10**18
 
 
 def test_collect(fee_collector, set_epoch, coins, weth, arve, burle, burner):
@@ -58,14 +58,16 @@ def test_transfer(fee_collector, burner, arve, burle, coins, set_epoch):
     set_epoch(Epoch.COLLECT)
     # Partial transfer
     with boa.env.prank(burner.address):
-        fee_collector.transfer([(coin, arve, amount // 100) for coin, amount in zip(coins, amounts)])
+        fee_collector.transfer(
+            [(coin, arve, amount // 100) for coin, amount in zip(coins, amounts)]
+        )
     for coin, amount in zip(coins, amounts):
         assert coin.balanceOf(arve) == amount // 100
 
     set_epoch(Epoch.EXCHANGE)
     # Whole balance transfer
     with boa.env.prank(burner.address):
-        fee_collector.transfer([(coin, burle, 2 ** 256 - 1) for coin, amount in zip(coins, amounts)])
+        fee_collector.transfer([(coin, burle, 2**256 - 1) for coin, amount in zip(coins, amounts)])
     for coin, amount in zip(coins, amounts):
         assert coin.balanceOf(burle) == amount - amount // 100
 
@@ -88,7 +90,11 @@ def test_forward(fee_collector, set_epoch, target, arve, burle, hooker):
     assert target.balanceOf(arve) == 0
     assert target.balanceOf(fee_collector) == hooker.buffer_amount()
     received_amount = 10 ** target.decimals() - hooker.buffer_amount()
-    assert 0 < target.balanceOf(burle) <= received_amount * fee_collector.max_fee(Epoch.FORWARD) // 10 ** 18
+    assert (
+        0
+        < target.balanceOf(burle)
+        <= received_amount * fee_collector.max_fee(Epoch.FORWARD) // 10**18
+    )
     assert target.balanceOf(burle) + target.balanceOf(hooker) == received_amount
     assert target.allowance(fee_collector, hooker) == hooker.buffer_amount()
 
@@ -174,10 +180,18 @@ def test_admin(fee_collector, admin, emergency_admin, arve, burner, hooker, targ
             fee_collector.set_owner(arve)
 
 
-@pytest.mark.parametrize("to_kill", [
-    Epoch.COLLECT, Epoch.EXCHANGE, Epoch.FORWARD,
-    Epoch.COLLECT | Epoch.EXCHANGE, Epoch.COLLECT | Epoch.FORWARD, Epoch.EXCHANGE | Epoch.FORWARD,
-    Epoch.COLLECT | Epoch.EXCHANGE | Epoch.FORWARD])
+@pytest.mark.parametrize(
+    "to_kill",
+    [
+        Epoch.COLLECT,
+        Epoch.EXCHANGE,
+        Epoch.FORWARD,
+        Epoch.COLLECT | Epoch.EXCHANGE,
+        Epoch.COLLECT | Epoch.FORWARD,
+        Epoch.EXCHANGE | Epoch.FORWARD,
+        Epoch.COLLECT | Epoch.EXCHANGE | Epoch.FORWARD,
+    ],
+)
 def test_killed_all(fee_collector, set_epoch, weth, target, admin, arve, to_kill):
     killed = [(ZERO_ADDRESS, to_kill)]
     with boa.env.prank(admin):
@@ -205,8 +219,12 @@ def test_killed_all(fee_collector, set_epoch, weth, target, admin, arve, to_kill
 
 
 def test_killed(fee_collector, set_epoch, coins, target, admin, burner):
-    killed = [(coin.address, to_kill) for coin, to_kill in
-              zip(coins[:3], [Epoch.COLLECT, Epoch.EXCHANGE, Epoch.COLLECT | Epoch.EXCHANGE])]
+    killed = [
+        (coin.address, to_kill)
+        for coin, to_kill in zip(
+            coins[:3], [Epoch.COLLECT, Epoch.EXCHANGE, Epoch.COLLECT | Epoch.EXCHANGE]
+        )
+    ]
     with boa.env.prank(admin):
         fee_collector.set_killed(killed)
 
@@ -277,8 +295,9 @@ def test_epoch(fee_collector):
 
 
 def test_fee(fee_collector, admin):
-    for epoch, max_fee in zip([Epoch.COLLECT, Epoch.EXCHANGE, Epoch.FORWARD],
-                              [2 * 10 ** 16, 3 * 10 ** 16, 4 * 10 ** 16]):
+    for epoch, max_fee in zip(
+        [Epoch.COLLECT, Epoch.EXCHANGE, Epoch.FORWARD], [2 * 10**16, 3 * 10**16, 4 * 10**16]
+    ):
         with boa.env.prank(admin):
             fee_collector.set_max_fee(epoch, max_fee)
         start, end = fee_collector.epoch_time_frame(epoch)
@@ -292,9 +311,9 @@ def test_fee(fee_collector, admin):
 
     with boa.env.prank(admin):
         with boa.reverts("Bad Epoch"):
-            fee_collector.set_max_fee(Epoch.COLLECT | Epoch.FORWARD, 10 ** 16)
+            fee_collector.set_max_fee(Epoch.COLLECT | Epoch.FORWARD, 10**16)
         with boa.reverts("Bad max_fee"):
-            fee_collector.set_max_fee(Epoch.COLLECT, 10 ** 18 + 1)
+            fee_collector.set_max_fee(Epoch.COLLECT, 10**18 + 1)
 
 
 def test_recover(fee_collector, coins, admin, arve):
@@ -303,21 +322,26 @@ def test_recover(fee_collector, coins, admin, arve):
         for coin in coins:
             coin._mint_for_testing(fee_collector, 10 ** coin.decimals())
             amounts.append(10 ** coin.decimals())
-    amounts[0] = 2 ** 256 - 1
+    amounts[0] = 2**256 - 1
     amounts[-1] //= 2
 
-    boa.env.set_balance(fee_collector.address, 10 ** 18)
+    boa.env.set_balance(fee_collector.address, 10**18)
     coins.append(ETH_ADDRESS)
-    amounts.append(10 ** 18 // 3)
+    amounts.append(10**18 // 3)
 
     with boa.env.prank(admin):
-        fee_collector.recover([(coin if hasattr(coin, "address") else coin, amount)
-                               for coin, amount in zip(coins, amounts)], arve)
+        fee_collector.recover(
+            [
+                (coin if hasattr(coin, "address") else coin, amount)
+                for coin, amount in zip(coins, amounts)
+            ],
+            arve,
+        )
 
     for coin in coins[:-2]:
         assert coin.balanceOf(fee_collector) == 0
         assert coin.balanceOf(arve) == 10 ** coin.decimals()
     assert coins[-2].balanceOf(fee_collector) == 10 ** coins[-2].decimals() - amounts[-2]
     assert coins[-2].balanceOf(arve) == amounts[-2]
-    assert boa.env.get_balance(fee_collector.address) == 10 ** 18 - amounts[-1]
+    assert boa.env.get_balance(fee_collector.address) == 10**18 - amounts[-1]
     assert boa.env.get_balance(arve) == amounts[-1]

@@ -1,469 +1,360 @@
-# @version 0.3.10
+# pragma version 0.5.0b1
+# pragma optimize codesize
+# The core's unbounded callback type (Bytes[INF]) requires the Venom backend.
+# pragma experimental-codegen
+# pragma nonreentrancy on
+# pragma evm-version cancun
+# SPDX-License-Identifier: MIT
 """
 @title DutchAuctionBurner
-@license MIT
 @author Curve Finance
-@notice Exchange tokens using Dutch auction
+@license MIT
+@notice Thin FeeCollector wrapper around the Dutch auction core: stages weekly
+        fee-token lots and sells them along a geometric Dutch curve through
+        native takes and registry adapters (CoW among them) reached by the
+        prefix-based ERC-1271 signature router.
+@custom:kill Nothing to kill here: FeeCollector kill masks stop all fills,
+             and the AdapterRegistry disables adapters (routing stops at once
+             for every auction reading it). The owner can recover inventory —
+             only back to FeeCollector. Native take and push_target stay
+             permissionless while a lot is alive. Disabling an adapter does
+             not clear its executor's allowances: batch the registry disable
+             with sync_executor_approvals in one transaction.
+@custom:migration FeeCollector.set_burner only redirects future staging;
+                  nothing detaches here. Calm path: let live lots trade out
+                  their window (proceeds still reach FeeCollector), then run
+                  the emergency runbook (README) and return leftovers with
+                  recover() + push_target(). To stop fills at once, batch
+                  recover with FeeCollector.set_killed.
+@custom:security The configured start total assumes every staged lot is worth no
+                 more than that amount. Inventory accounting is balance-based:
+                 available = min(initial_amount, balanceOf), so tokens donated
+                 after the weekly snapshot can be resold along the same curve —
+                 always at or above the curve price and always in favor of
+                 FeeCollector; available never exceeds the snapshot.
+                 Executor approvals are infinite but only toward executors of
+                 active registry adapters, and only through the permissionless
+                 sync. Signature validation is routed to registry adapters;
+                 the core's check_order is the economic check offered to
+                 them, not enforced by the router, so an adapter that skips
+                 it sells by its own rules and listing one is the owner's
+                 review. Tokens with transfer fees, rebases, callbacks, or
+                 blacklist behavior are best-effort integrations.
 """
 
+from ethereum.ercs import IERC20
 
-interface ERC20:
-    def approve(_to: address, _value: uint256) -> bool: nonpayable
-    def transfer(_to: address, _value: uint256) -> bool: nonpayable
-    def transferFrom(_from: address, _to: address, _value: uint256) -> bool: nonpayable
-    def balanceOf(_owner: address) -> uint256: view
+from contracts.interfaces import IBurner
+from contracts.interfaces import IDutchAuction
+from contracts.interfaces import IFeeCollector
+from contracts.interfaces import IYearnAuction
+from contracts.utils import constants as c
+from contracts.utils import recovery
+from contracts.utils import roles
+from contracts.burners.adapters import adapters
+from contracts.burners.auction import dutch_auction
+from contracts.burners.auction import yearn_auction
 
-
-interface FeeCollector:
-    def target() -> ERC20: view
-    def owner() -> address: view
-    def emergency_owner() -> address: view
-    def epoch(ts: uint256=block.timestamp) -> Epoch: view
-    def epoch_time_frame(_epoch: Epoch, _ts: uint256=block.timestamp) -> (uint256, uint256): view
-    def fee(_epoch: Epoch=empty(Epoch), _ts: uint256=block.timestamp) -> uint256: view
-    def can_exchange(_coins: DynArray[ERC20, MAX_LEN]) -> bool: view
-    def transfer(_transfers: DynArray[Transfer, MAX_LEN]): nonpayable
-
-
-interface Multicall:
-    def aggregate3Value(calls: DynArray[Call3Value, MAX_CALL_LEN]) -> DynArray[MulticallResult, MAX_CALL_LEN]: payable
-
-
-event Exchanged:
-    coin: indexed(ERC20)
-    keeper: indexed(address)
-    exchange_amount: uint256
-    target_amount: uint256
-
-
-enum Epoch:
-    SLEEP  # 1
-    COLLECT  # 2
-    EXCHANGE  # 4
-    FORWARD  # 8
-
-
-struct Transfer:
-    coin: ERC20
-    to: address
-    amount: uint256  # 2^256-1 for the whole balance
-
-
-struct Call3Value:
-    target: address
-    allow_failure: bool
-    value: uint256
-    call_data: Bytes[8192]
-
-struct MulticallResult:
-    success: bool
-    return_data: Bytes[1024]
-
-
-struct WeightedPrice:
-    exchange_amount: uint256
-    target_amount: uint256
-
-struct PriceRecord:
-    prev: WeightedPrice
-    cur: WeightedPrice
-    cur_week: uint256
-
-struct PriceRecordInput:
-    coin: ERC20
-    record: PriceRecord
+implements: IBurner
+implements: IDutchAuction
+implements: IYearnAuction
+initializes: roles
+initializes: dutch_auction
+initializes: yearn_auction[dutch_auction := dutch_auction]
+initializes: adapters
+# Module surfaces are exported method-by-method on purpose: a new external
+# function added to a module never enters the burner ABI unreviewed.
+# price/getAmountNeeded with a non-current `_ts`: the sellability policy is
+# FeeCollector.can_exchange, gated by the live epoch and kill masks, so the
+# projection answers 0 outside an open EXCHANGE frame.
+exports: (
+    dutch_auction.auction_length,
+    dutch_auction.want,
+    dutch_auction.receiver,
+    dutch_auction.start_total,
+    dutch_auction.floor_total,
+    dutch_auction.step_duration,
+    dutch_auction.lots,
+    dutch_auction.window,
+    dutch_auction.available,
+    dutch_auction.price,
+    dutch_auction.getAmountNeeded,
+    dutch_auction.take,
+    dutch_auction.take_with_limits,
+    dutch_auction.check_order,
+)
+# Yearn-only views; to shed them, remove every yearn_auction mention from
+# this file.
+exports: (
+    yearn_auction.isActive,
+    yearn_auction.auctionLength,
+    yearn_auction.auctions,
+)
+exports: roles.owner
+exports: (
+    adapters.registry,
+    adapters.sync_executor_approvals,
+    adapters.isValidSignature,
+)
 
 
-ETH_ADDRESS: constant(address) = 0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE
-ONE: constant(uint256) = 10 ** 18  # Precision
-MAX_LEN: constant(uint256) = 64
-MAX_CALL_LEN: constant(uint256) = 64
-SUPPORTED_INTERFACES: constant(bytes4[2]) = [
-    # ERC165: method_id("supportsInterface(bytes4)") == 0x01ffc9a7
-    0x01ffc9a7,
-    # Burner:
-    #   method_id("burn(address[],address)") == 0x72a436a8
-    #   method_id("push_target()") == 0x2eb078cd
-    #   method_id("VERSION()") == 0xffa1ad74
-    0xa3b5e311,
-]
+error BadFeeCollector:
+    pass
+
+
+error BadTarget:
+    pass
+
+
+error BadExchangeFrame:
+    pass
+
+
+error OnlyFeeCollector:
+    pass
+
+
+error TargetChanged:
+    pass
+
+
+error NotSleepEpoch:
+    pass
+
+
 VERSION: public(constant(String[20])) = "DutchAuction"
-balances: HashMap[ERC20, uint256]
 
-WEEK: constant(uint256) = 7 * 24 * 3600
-
-fee_collector: public(immutable(FeeCollector))
-multicall: public(immutable(Multicall))
-
-target_threshold: public(uint256)  # min amount to exchange
-max_price_amplifier: public(uint256)
-
-records: public(HashMap[ERC20, PriceRecord])
-records_smoothing: public(uint256)
-
-base: public(uint256)
-ln_base: public(uint256)
+# FeeCollector integration fixed at deployment. The payment token lives in the
+# core as `want`: it mirrors fee_collector.target() at deploy and follows it
+# only through the owner's resync_target, so the denomination can never switch
+# under a live window.
+fee_collector: public(immutable(IFeeCollector))
 
 
-@external
+@deploy
 def __init__(
-    _fee_collector: FeeCollector,
-    _target_threshold: uint256, _max_price_amplifier: uint256,
-    _initial_records: DynArray[PriceRecordInput, MAX_LEN], _records_smoothing: uint256):
+    _fee_collector: IFeeCollector,
+    _start_total: uint256,
+    _floor_total: uint256,
+    _step_duration: uint256,
+    _registry: address,
+):
     """
-    @notice Contract constructor
-    @param _fee_collector FeeCollector contract it is used with
-    @param _target_threshold Minimum amount of target to receive, with base=10**18
-    @param _max_price_amplifier Spread of maximum and minimum prices, without base=10**18
-    @param _initial_records Set price records for coin cushions waiting
-    @param _records_smoothing Coefficient to reduce previous price impact, with base=10**18
+    @notice Configure the weekly-auction economics.
+    @dev Every lot trades for one EXCHANGE frame: its length becomes the
+         core's auction_length and the curve decays exponentially from
+         start_total to floor_total over it, so no calibration constant is
+         deployed.
+    @param _fee_collector FeeCollector: caller of burn, proceeds receiver,
+           role source, calendar, and the source of the payment token.
+    @param _start_total Want price of a full lot at the window start.
+    @param _floor_total Want price of a full lot at the window end.
+    @param _step_duration Seconds per price step.
+    @param _registry AdapterRegistry read for signature routing and executor
+           allowances; an empty one means native settlement only.
     """
-    fee_collector = _fee_collector
-    multicall = Multicall(0xcA11bde05977b3631167028862bE2a173976CA11)  # https://github.com/mds1/multicall/ v3
+    assert _fee_collector.address != empty(address), BadFeeCollector()
+    configured_target: address = staticcall _fee_collector.target()
+    assert configured_target != empty(address), BadTarget()
 
-    self.target_threshold = _target_threshold
-    assert _max_price_amplifier <= ONE, "max_price_amplifier has no 10^18 base"
-    self.max_price_amplifier = _max_price_amplifier
+    roles.__init__(roles.RoleSource(_fee_collector.address))
+    self.fee_collector = _fee_collector
+    exchange_start: uint256 = 0
+    exchange_end: uint256 = 0
+    exchange_start, exchange_end = self._exchange_frame(block.timestamp)
+    assert exchange_end > exchange_start, BadExchangeFrame()
+    dutch_auction.__init__(
+        IERC20(configured_target),
+        _fee_collector.address,
+        _start_total,
+        _floor_total,
+        _step_duration,
+        exchange_end - exchange_start,
+    )
+    adapters.__init__(_registry)
 
-    self._set_records(_initial_records)
-    assert _records_smoothing <= 10 ** 18, "Bad smoothing value"
-    self.records_smoothing = _records_smoothing
 
-    self.base = 2718281828459045235  # Euler's number
-    self.ln_base = ONE
+# Shared helpers
+
+
+@internal
+@view
+def _target_is_current() -> bool:
+    return staticcall self.fee_collector.target() == dutch_auction.want.address
+
+
+@internal
+@view
+def _exchange_frame(_timestamp: uint256) -> (uint256, uint256):
+    return staticcall self.fee_collector.epoch_time_frame(IFeeCollector.Epoch.EXCHANGE, _timestamp)
+
+
+# Weekly staging
 
 
 @external
-def burn(_coins: DynArray[ERC20, MAX_LEN], _receiver: address, _just_revise: bool=False):
+def burn(_coins: DynArray[IERC20, c.MAX_COINS], _receiver: address):
     """
-    @notice Post hook after collect to register coins for burn
-    @dev Pays out fee and saves coins on fee_collector.
-    @param _coins Which coins to burn
-    @param _receiver Receiver of profit
-    @param _just_revise Revise balances of coins without paying out
+    @notice Pay the COLLECT incentive, take custody, and snapshot upcoming lots.
+    @dev Staging touches no allowances: the keeper follows up with the
+         permissionless sync_executor_approvals so the staged tokens become
+         pullable by active adapters. Restaging a leftover lot needs no fresh
+         fees: a permissionless FeeCollector.collect during any later COLLECT
+         frame re-snapshots the burner's full balance for the upcoming week
+         from the top of the curve.
+    @param _coins Sorted tokens supplied by FeeCollector.
+    @param _receiver Receiver of the FeeCollector COLLECT incentive.
     """
-    if not _just_revise:
-        assert msg.sender == fee_collector.address, "Only FeeCollector"
+    assert msg.sender == self.fee_collector.address, OnlyFeeCollector()
+    assert self._target_is_current(), TargetChanged()
 
-        fee: uint256 = fee_collector.fee(Epoch.COLLECT)
-        fee_payouts: DynArray[Transfer, MAX_LEN] = []
-        for coin in _coins:
-            amount: uint256 = (coin.balanceOf(fee_collector.address) - self.balances[coin]) * fee / ONE
-            fee_payouts.append(Transfer({coin: coin, to: _receiver, amount: amount}))
-        fee_collector.transfer(fee_payouts)
-    else:
-        assert fee_collector.epoch() != Epoch.EXCHANGE,  "Can't update at Exchange"
+    fee: uint256 = staticcall self.fee_collector.fee(IFeeCollector.Epoch.COLLECT, block.timestamp)
+    fee_payouts: DynArray[IFeeCollector.Transfer, c.MAX_COINS] = []
+    custody_transfers: DynArray[IFeeCollector.Transfer, c.MAX_COINS] = []
 
-    for coin in _coins:
-        self.balances[coin] = coin.balanceOf(fee_collector.address)
+    for coin: IERC20 in _coins:
+        collector_balance: uint256 = staticcall coin.balanceOf(self.fee_collector.address)
+        fee_payouts.append(
+            IFeeCollector.Transfer(
+                coin=coin.address,
+                to=_receiver,
+                amount=collector_balance * fee // c.WAD,
+            )
+        )
+        custody_transfers.append(
+            IFeeCollector.Transfer(coin=coin.address, to=self, amount=max_value(uint256))
+        )
 
+    extcall self.fee_collector.transfer(fee_payouts)
+    extcall self.fee_collector.transfer(custody_transfers)
 
-# https://github.com/pcaversaccio/snekmate/blob/3dff18ae4bbc4b0a98a57cfbce4994c7739a991f/src/snekmate/utils/Math.vy#L420C1-L485C57
-@internal
-@pure
-def _wad_exp(x: int256) -> int256:
-    """
-    @dev Calculates the natural exponential function of a signed integer with
-         a precision of 1e18.
-    @notice Note that this function consumes about 810 gas units. The implementation
-            is inspired by Remco Bloemen's implementation under the MIT license here:
-            https://xn--2-umb.com/22/exp-ln.
-    @param x The 32-byte variable.
-    @return int256 The 32-byte calculation result.
-    """
-    value: int256 = x
-
-    # If the result is `< 1`, we return zero. This happens when we have the following:
-    # "x <= (log(1e-18) * 1e18) ~ -4.15e19".
-    if (x <= -41_446_531_673_892_822_313):
-        return empty(int256)
-
-    # When the result is "> (2 ** 255 - 1) / 1e18" we cannot represent it as a signed integer.
-    # This happens when "x >= floor(log((2 ** 255 - 1) / 1e18) * 1e18) ~ 135".
-    assert x < 135_305_999_368_893_231_589, "Math: wad_exp overflow"
-
-    # `x` is now in the range "(-42, 136) * 1e18". Convert to "(-42, 136) * 2 ** 96" for higher
-    # intermediate precision and a binary base. This base conversion is a multiplication with
-    # "1e18 / 2 ** 96 = 5 ** 18 / 2 ** 78".
-    value = unsafe_div(x << 78, 5 ** 18)
-
-    # Reduce the range of `x` to "(-½ ln 2, ½ ln 2) * 2 ** 96" by factoring out powers of two
-    # so that "exp(x) = exp(x') * 2 ** k", where `k` is a signer integer. Solving this gives
-    # "k = round(x / log(2))" and "x' = x - k * log(2)". Thus, `k` is in the range "[-61, 195]".
-    k: int256 = unsafe_add(unsafe_div(value << 96, 54_916_777_467_707_473_351_141_471_128), 2 ** 95) >> 96
-    value = unsafe_sub(value, unsafe_mul(k, 54_916_777_467_707_473_351_141_471_128))
-
-    # Evaluate using a "(6, 7)"-term rational approximation. Since `p` is monic,
-    # we will multiply by a scaling factor later.
-    y: int256 = unsafe_add(unsafe_mul(unsafe_add(value, 1_346_386_616_545_796_478_920_950_773_328), value) >> 96, 57_155_421_227_552_351_082_224_309_758_442)
-    p: int256 = unsafe_add(unsafe_mul(unsafe_add(unsafe_mul(unsafe_sub(unsafe_add(y, value), 94_201_549_194_550_492_254_356_042_504_812), y) >> 96,\
-                           28_719_021_644_029_726_153_956_944_680_412_240), value), 4_385_272_521_454_847_904_659_076_985_693_276 << 96)
-
-    # We leave `p` in the "2 ** 192" base so that we do not have to scale it up
-    # again for the division.
-    q: int256 = unsafe_add(unsafe_mul(unsafe_sub(value, 2_855_989_394_907_223_263_936_484_059_900), value) >> 96, 50_020_603_652_535_783_019_961_831_881_945)
-    q = unsafe_sub(unsafe_mul(q, value) >> 96, 533_845_033_583_426_703_283_633_433_725_380)
-    q = unsafe_add(unsafe_mul(q, value) >> 96, 3_604_857_256_930_695_427_073_651_918_091_429)
-    q = unsafe_sub(unsafe_mul(q, value) >> 96, 14_423_608_567_350_463_180_887_372_962_807_573)
-    q = unsafe_add(unsafe_mul(q, value) >> 96, 26_449_188_498_355_588_339_934_803_723_976_023)
-
-    # The polynomial `q` has no zeros in the range because all its roots are complex.
-    # No scaling is required, as `p` is already "2 ** 96" too large. Also,
-    # `r` is in the range "(0.09, 0.25) * 2**96" after the division.
-    r: int256 = unsafe_div(p, q)
-
-    # To finalise the calculation, we have to multiply `r` by:
-    #   - the scale factor "s = ~6.031367120",
-    #   - the factor "2 ** k" from the range reduction, and
-    #   - the factor "1e18 / 2 ** 96" for the base conversion.
-    # We do this all at once, with an intermediate result in "2**213" base,
-    # so that the final right shift always gives a positive value.
-
-    # Note that to circumvent Vyper's safecast feature for the potentially
-    # negative parameter value `r`, we first convert `r` to `bytes32` and
-    # subsequently to `uint256`. Remember that the EVM default behaviour is
-    # to use two's complement representation to handle signed integers.
-    return convert(unsafe_mul(convert(convert(r, bytes32), uint256), 3_822_833_074_963_236_453_042_738_258_902_158_003_155_416_615_667) >>\
-           convert(unsafe_sub(195, k), uint256), int256)
+    for coin: IERC20 in _coins:
+        dutch_auction._stage_lot(coin)
 
 
-@internal
+# Auction core integration hooks
+
+
+@override(dutch_auction)
 @view
-def _low(current_amount: uint256, target_amount: uint256, price_record: PriceRecord) -> uint256:
-    """
-    @notice Get lowest price in auction
-    """
-    t: uint256 = target_amount + price_record.prev.target_amount + price_record.cur.target_amount
-    a: uint256 = current_amount + price_record.prev.exchange_amount + price_record.cur.exchange_amount
-    return t * ONE / a
+def _lot_start(_token: IERC20, _staged_at: uint256) -> uint256:
+    # The calendar decision lives here, not in the core: a lot staged during
+    # a distribution period (its COLLECT frame) trades in that period's
+    # EXCHANGE frame, read from the FeeCollector so the calendar is defined
+    # in one place. Every token shares the frame; a per-token slot inside it
+    # would be this hook's decision alone.
+    exchange_start: uint256 = 0
+    exchange_end: uint256 = 0
+    exchange_start, exchange_end = self._exchange_frame(_staged_at)
+    return exchange_start
 
 
-@internal
+@override(dutch_auction)
 @view
-def _get_price_record(coin: ERC20, week: uint256, smoothing: uint256) -> PriceRecord:
-    """
-    @notice Get price record applying new week
-    """
-    price_record: PriceRecord = self.records[coin]
-    if price_record.cur_week < week:
-        if week - price_record.cur_week > 4:
-            price_record.prev = price_record.cur
-        else:
-            price_record.prev.exchange_amount += price_record.cur.exchange_amount
-            price_record.prev.target_amount += price_record.cur.target_amount
-            for i in range(week - price_record.cur_week, bound=4):
-                price_record.prev.exchange_amount = price_record.prev.exchange_amount * smoothing / ONE
-                price_record.prev.target_amount = price_record.prev.target_amount * smoothing / ONE
-
-        price_record.cur = empty(WeightedPrice)
-        price_record.cur_week = week
-
-    return price_record
+def _sellable(_token: address) -> bool:
+    # The core already excludes the want token; this adds the FeeCollector
+    # target-migration and kill-mask checks.
+    return self._target_is_current() and staticcall self.fee_collector.can_exchange([_token])
 
 
-@internal
-@view
-def _price(low_price: uint256, time_amplifier: uint256) -> uint256:
-    # low + high * log_scale(time)
-    # high = max_price_amplifier * low
-    return low_price + self.max_price_amplifier * low_price * time_amplifier / ONE
-
-
-@internal
-@view
-def _get_week_from_ts(ts: uint256) -> uint256:
-    """
-    @notice Week number needed for records
-    """
-    start: uint256 = 0
-    end: uint256 = 0
-    start, end = fee_collector.epoch_time_frame(Epoch.EXCHANGE, ts)
-    return ts / WEEK
-
-
-@internal
-@view
-def _time_amplifier(ts: uint256) -> uint256:
-    start: uint256 = 0
-    end: uint256 = 0
-    start, end = fee_collector.epoch_time_frame(Epoch.EXCHANGE, ts)
-    assert start <= ts and ts < end, "Bad time"
-
-    # log_scale(time) = (base ** time - 1) / (base - 1)
-    # base ** time = e ** (time * ln(base))
-    # time = remaining / whole period
-    return (convert(self._wad_exp(convert((end - ts) * self.ln_base / (end - start), int256)), uint256) - ONE) * ONE / (self.base - ONE)
+# Economics resync
 
 
 @external
-@view
-def price(_coin: ERC20, _ts: uint256=block.timestamp) -> uint256:
+def resync_target(
+    _expected_target: address,
+    _start_total: uint256,
+    _floor_total: uint256,
+    _step_duration: uint256,
+):
     """
-    @notice Get price of `_coin` at `_ts`
-    @param _coin Coin to get price of
-    @param _ts Timestamp at which to count price
-    @return Price of coin, with base=10**18
+    @notice Re-pin the payment token to the current fee_collector.target() with
+            a curve retuned for it. Also serves as a same-target curve retune.
+    @dev The new target is read from the FeeCollector, never passed in, so the
+         owner cannot detach the payment denomination from the protocol. The
+         curve is solved over auction_length exactly like the constructor.
+         Every resync, a same-target retune included, stales
+         every lot staged up to its block (the core's resync fence).
+         Allowed only during the SLEEP phase — before the week's staging, so
+         one configuration governs the entire distribution period: staging,
+         the trading window, and forwarding. Consequences: the price within a
+         window can never change (staging is confined to COLLECT), so the
+         plain Yearn-style take() needs no payment ceiling; the fence only
+         ever stales previous weeks' lots and no week is lost; and pairing
+         FeeCollector.set_target with the resync inside one SLEEP phase never
+         halts collection (burn() rejects a diverged target only in COLLECT).
+    @param _expected_target The target the curve parameters were tuned for.
+           Governance executes at an uncontrolled time: if the FeeCollector
+           target changed again since the vote was drafted, the totals would
+           bind to the wrong denomination — execution must revert instead.
+    @param _start_total Want price of a full lot at the window start.
+    @param _floor_total Want price of a full lot at the window end.
+    @param _step_duration Seconds per price step.
     """
-    return self._price(
-            self._low(
-                _coin.balanceOf(fee_collector.address),
-                self.target_threshold,
-                self._get_price_record(_coin, self._get_week_from_ts(_ts), self.records_smoothing),
-            ),
-            self._time_amplifier(_ts),
+    roles._check_owner()
+    new_target: address = staticcall self.fee_collector.target()
+    assert new_target != empty(address), BadTarget()
+    assert new_target == _expected_target, TargetChanged()
+
+    sleep_start: uint256 = 0
+    sleep_end: uint256 = 0
+    sleep_start, sleep_end = staticcall self.fee_collector.epoch_time_frame(
+        IFeeCollector.Epoch.SLEEP, block.timestamp
+    )
+    assert sleep_start <= block.timestamp and block.timestamp < sleep_end, NotSleepEpoch()
+
+    dutch_auction._set_economics(
+        IERC20(new_target),
+        _start_total,
+        _floor_total,
+        _step_duration,
     )
 
 
-@external
-@payable
-def exchange(_transfers: DynArray[Transfer, MAX_LEN], _calls: DynArray[Call3Value, MAX_CALL_LEN]) ->\
-    (uint256, DynArray[MulticallResult, MAX_CALL_LEN]):
-    """
-    @notice Exchange coins according to internal Dutch Auction
-    @dev Coins are transferred first so they can be used for flashswap
-    @param _transfers Transfers to make from FeeCollector for buying out from auction
-    @param _calls Multicall data to initiate any callbacks
-    @return (total amount of sold target, results of _calls)
-    """
-    coins: DynArray[ERC20, MAX_LEN] = []
-    for transfer in _transfers:
-        coins.append(transfer.coin)
-    assert fee_collector.can_exchange(coins)
-
-    fee_collector.transfer(_transfers)
-
-    target_threshold: uint256 = self.target_threshold
-    week: uint256 = self._get_week_from_ts(block.timestamp)
-    time_amplifier: uint256 = self._time_amplifier(block.timestamp)
-    records_smoothing: uint256 = self.records_smoothing
-
-    target_total: uint256 = 0
-    for transfer in _transfers:
-        new_balance: uint256 = self.balances[transfer.coin]
-        price_record: PriceRecord = self._get_price_record(transfer.coin, week, records_smoothing)
-        # fee-on-transfer coins will have a small impact
-        target_amount: uint256 = self._price(
-            self._low(new_balance + transfer.amount, target_threshold, price_record),
-            time_amplifier,
-        ) * transfer.amount / ONE
-
-        assert target_amount >= target_threshold,  "Target threshold"
-        target_total += target_amount
-        price_record.cur.exchange_amount += transfer.amount
-        price_record.cur.target_amount += target_amount
-        self.records[transfer.coin] = price_record
-
-        self.balances[transfer.coin] = new_balance - transfer.amount
-        log Exchanged(transfer.coin, msg.sender, transfer.amount, target_amount)
-
-    results: DynArray[MulticallResult, MAX_CALL_LEN] = multicall.aggregate3Value(_calls, value=msg.value)
-
-    target: ERC20 = fee_collector.target()
-    target_balance: uint256 = target.balanceOf(self)
-    if target_balance >= target_total:  # without approvals
-        target.transfer(fee_collector.address, target_balance)
-    else:
-        target.transferFrom(msg.sender, fee_collector.address, target_total)
-
-    return target_total, results
+# Recovery and interface discovery
 
 
 @external
 def push_target() -> uint256:
     """
-    @notice In case target coin is left in contract can be pushed to forward
-    @return Amount of coin pushed further
+    @notice Permissionlessly return target tokens held by this burner.
+    @return Amount of target returned.
     """
-    target: ERC20 = fee_collector.target()
-    amount: uint256 = target.balanceOf(self)
-    if amount > 0:
-        target.transfer(fee_collector.address, amount)
+    amount: uint256 = staticcall dutch_auction.want.balanceOf(self)
+    if amount != 0:
+        assert extcall dutch_auction.want.transfer(
+            self.fee_collector.address, amount, default_return_value=True
+        )
     return amount
 
 
-@pure
 @external
+def recover(_coins: DynArray[IERC20, c.MAX_COINS]):
+    """
+    @notice Return ERC-20 or native balances only to FeeCollector.
+    @dev Owner-only: stopping fills is done elsewhere (FeeCollector kill
+         masks, registry adapter disable); this only moves stuck funds.
+         Emptying the balance kills the lot through the balance term of
+         available. During the same week's COLLECT frame a permissionless
+         collect can pull the token back and restage it, so an evacuation
+         batches recover with FeeCollector.set_killed.
+    @param _coins Tokens to return in full; ETH_ADDRESS for the native coin.
+    """
+    roles._check_owner()
+
+    for coin: IERC20 in _coins:
+        recovery._recover_coin(coin, self.fee_collector.address)
+
+
+# Reentrant: answers from constants only.
+@external
+@view
+@reentrant
 def supportsInterface(_interface_id: bytes4) -> bool:
     """
-    @dev Interface identification is specified in ERC-165.
-    @param _interface_id Id of the interface
-    @return True if contract supports given interface
+    @notice Return burner interfaces. ERC-1271 is always claimed: the signature
+            router stays live for adapters.
+    @param _interface_id ERC-165 interface id.
+    @return Whether the interface is supported.
     """
-    return _interface_id in SUPPORTED_INTERFACES
-
-
-@internal
-def _set_records(_records: DynArray[PriceRecordInput, MAX_LEN]):
-    for input in _records:
-        self.records[input.coin] = input.record
-
-
-@external
-def set_records(_records: DynArray[PriceRecordInput, MAX_LEN]):
-    """
-    @notice Set price records. Might be needed in anomaly coins feed.
-    @dev Callable only by owner and emergency owner
-    @param _records Records to set prices for
-    """
-    assert msg.sender in [fee_collector.owner(), fee_collector.emergency_owner()], "Only owner"
-
-    self._set_records(_records)
-
-
-@external
-def set_records_smoothing(_records_smoothing: uint256):
-    """
-    @dev Callable only by owner
-    @param _records_smoothing Coefficient to reduce previous price impact, with base=10**18
-    """
-    assert msg.sender == fee_collector.owner(), "Only owner"
-    assert _records_smoothing <= 10 ** 18, "Bad smoothing value"
-
-    self.records_smoothing = _records_smoothing
-
-
-@external
-def set_price_parameters(_target_threshold: uint256, _max_price_amplifier: uint256):
-    """
-    @dev Callable only by owner
-    @param _target_threshold Minimum amount of target to receive, with base=10**18
-    @param _max_price_amplifier Spread of maximum and minimum prices, without base=10**18
-    """
-    assert msg.sender == fee_collector.owner(), "Only owner"
-    assert _max_price_amplifier <= ONE, "max_price_amplifier has no 10^18 base"
-
-    self.target_threshold = _target_threshold
-    self.max_price_amplifier = _max_price_amplifier
-
-
-@external
-def set_time_amplifier_base(_base: uint256, _ln_base: uint256):
-    """
-    @dev Callable only by owner
-    @param _base Base to count time amplifier for, >1, with base=10 ** 18
-    @param _ln_base Approximate value of ln(base), with base=10 ** 18
-    """
-    assert msg.sender == fee_collector.owner(), "Only owner"
-    assert _base > ONE, "Bad base value"
-
-    exp_ln_base: uint256 = convert(self._wad_exp(convert(_ln_base, int256)), uint256)
-    assert exp_ln_base >= _base * 99 / 100 and exp_ln_base <= _base * 101 / 100, "Bad base value"
-
-    self.base = _base
-    self.ln_base = _ln_base
-
-
-@external
-def recover(_coins: DynArray[ERC20, MAX_LEN]):
-    """
-    @notice Recover ERC20 tokens or Ether from this contract
-    @dev Callable only by owner and emergency owner
-    @param _coins Token addresses
-    """
-    assert msg.sender in [fee_collector.owner(), fee_collector.emergency_owner()], "Only owner"
-
-    for coin in _coins:
-        if coin.address == ETH_ADDRESS:
-            raw_call(fee_collector.address, b"", value=self.balance)
-        else:
-            coin.transfer(fee_collector.address, coin.balanceOf(self), default_return_value=True)  # do not need safe transfer
+    return _interface_id in [c.ERC165_INTERFACE_ID, c.BURNER_INTERFACE_ID, c.ERC1271_MAGIC_VALUE]
