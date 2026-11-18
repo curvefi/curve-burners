@@ -66,6 +66,7 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `native.electric.max_legs`, `native.electric.min_tvl` | 16, the tool's 10000 | Legs per route (the `AuctionTaker` takes 1888 bytes of calldata per step) and the pool TVL floor in USD. |
 | `native.electric.timeout`, `native.electric.cache` | 180, 30 | Seconds one `erouter` run may take, and how long its answer for an amount is reused. |
 | `max_open_orders` | 8 | Open orders per adapter at once; lots farthest from the market wait for a slot. The CoW orderbook rejects an owner's eleventh open outside-market order (`TooManyLimitOrders`). |
+| `dust` | 0.01 | Lots the market values under this many want tokens are left alone: no orders, no takes, and no pricing again until the lot changes. A lot with no market estimate is never dust. `0` turns it off. |
 | `tokens.whitelist` | `[]` | Non-empty: sell only these. |
 | `tokens.blacklist` | `[]` | Never sell these (wins over the whitelist). |
 | `start_block` | none | Where the `LotStaged` scan starts (burner deployment block). Without it only lots staged after start-up and the whitelist are known. |

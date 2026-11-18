@@ -14,7 +14,13 @@ import yaml
 from dotenv import load_dotenv
 from eth_utils import to_checksum_address
 
-from keepers.auction_keeper.config.common import ConfigError, address, addresses, positive_int
+from keepers.auction_keeper.config.common import (
+    ConfigError,
+    address,
+    addresses,
+    non_negative,
+    positive_int,
+)
 from keepers.auction_keeper.config.native import NativeSettings, parse_native
 from keepers.auction_keeper.config.pricing import (
     PricingSettings,
@@ -29,6 +35,8 @@ DEFAULT_ORDER_TTL = 300
 DEFAULT_STATE_PATH = "auction_keeper_state.json"
 DEFAULT_LOG_CHUNK = 50_000
 DEFAULT_MAX_OPEN_ORDERS = 8
+# Want tokens: a lot the market values under this is dust.
+DEFAULT_DUST = 0.01
 # offline: never sends a transaction (reads the chain, posts to orderbooks);
 # keeper: also sends the on-chain housekeeping (executor allowance syncs).
 MODES = ("offline", "keeper")
@@ -64,6 +72,8 @@ class NetworkConfig:
     pricing: PricingSettings = PricingSettings()
     ttl: TtlSettings = TtlSettings()
     max_open_orders: int = DEFAULT_MAX_OPEN_ORDERS
+    # Lots the market values under this many want tokens are left alone (0: none).
+    dust: float = DEFAULT_DUST
     native: NativeSettings = NativeSettings()
     cow: CowSettings = CowSettings()
     # Periphery for custom executions (optional).
@@ -188,6 +198,7 @@ def parse_network(name: str, raw: dict[str, Any], defaults: dict[str, Any]) -> N
         max_open_orders=positive_int(
             raw.get("max_open_orders"), "max_open_orders", defaults["max_open_orders"]
         ),
+        dust=non_negative(raw.get("dust"), "dust", defaults["dust"]),
         native=native,
         cow=cow,
         auction_taker=taker,
@@ -211,6 +222,7 @@ def parse_config(raw: dict[str, Any]) -> KeeperConfig:
         "max_open_orders": positive_int(
             raw.get("max_open_orders"), "max_open_orders", DEFAULT_MAX_OPEN_ORDERS
         ),
+        "dust": non_negative(raw.get("dust"), "dust", DEFAULT_DUST),
         "native": parse_native(raw.get("native"), "native", NativeSettings()),
     }
     networks_raw = raw.get("networks")
@@ -237,6 +249,7 @@ def load_config(path: str | Path, *, dotenv: bool = True) -> KeeperConfig:
 
 __all__ = [
     "DEFAULT_LOG_CHUNK",
+    "DEFAULT_DUST",
     "DEFAULT_MAX_OPEN_ORDERS",
     "DEFAULT_MODE",
     "DEFAULT_ORDER_TTL",

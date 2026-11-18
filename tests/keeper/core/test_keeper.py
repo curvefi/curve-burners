@@ -6,7 +6,7 @@ import pytest
 from keepers.auction_keeper.chain.abi import address_word
 from keepers.auction_keeper.chain.boa_client import BoaClient
 from keepers.auction_keeper.chain.client import Log
-from keepers.auction_keeper.chain.contracts import LOT_STAGED_TOPIC, Auction, LotView
+from keepers.auction_keeper.chain.contracts import LOT_STAGED_TOPIC, Auction, Erc20, LotView
 from keepers.auction_keeper.config import TokenFilter
 from keepers.auction_keeper.core.keeper import NetworkKeeper, needs_publish
 from keepers.auction_keeper.core.state import KeeperState, OrderRecord
@@ -322,6 +322,44 @@ def test_open_order_budget_serves_lots_nearest_the_market_first(
     assert outcomes[near].action == "posted" and outcomes[far].action == "kept"
     assert outcomes[farther].action == "skipped"
     assert len(state.open_orders("boa", harness.address, orderbook_adapter(keeper), 0)) == 2
+
+
+def test_dust_is_left_alone_until_the_lot_changes(
+    keeper_for, client, network_config, orderbook, sell_token, harness, lot
+):
+    config = network_config(tokens=TokenFilter(whitelist=frozenset([sell_token.address])))
+    want = Auction(client, harness.address).want()
+    unit = 10 ** Erc20(client, want).decimals()
+    threshold = int(config.dust * unit)
+
+    class CountingPricer(FakePricer):
+        asked = 0
+
+        def market(self, lot):
+            self.asked += 1
+            return super().market(lot)
+
+    # Under the threshold: nothing is posted, and the lot is not priced again.
+    pricer = CountingPricer({sell_token.address: threshold - 1})
+    keeper = keeper_for(config, pricer=pricer)
+    for _ in range(2):
+        (outcome,) = keeper.cycle()
+        assert (outcome.action, outcome.detail) == ("skipped", "dust")
+    assert pricer.asked == 1 and not orderbook.posted
+
+    # A small amount is not dust; neither is a lot with no market estimate.
+    keeper = keeper_for(config, pricer=FakePricer({sell_token.address: threshold}))
+    assert actions(keeper.cycle()) == [(sell_token.address, "posted")]
+    keeper = keeper_for(config, pricer=FakePricer({}), state_=KeeperState(None))
+    assert actions(keeper.cycle()) == [(sell_token.address, "posted")]
+
+    # dust: 0 turns the check off.
+    keeper = keeper_for(
+        network_config(tokens=config.tokens, dust=0),
+        pricer=FakePricer({sell_token.address: 1}),
+        state_=KeeperState(None),
+    )
+    assert actions(keeper.cycle()) == [(sell_token.address, "posted")]
 
 
 def orderbook_adapter(keeper):

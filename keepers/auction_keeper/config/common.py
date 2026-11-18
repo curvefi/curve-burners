@@ -39,6 +39,14 @@ def positive_int(value: Any, name: str, default: int) -> int:
     return value
 
 
+def non_negative(value: Any, name: str, default: float) -> float:
+    if value is None:
+        return default
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
+        raise ConfigError(f"{name} must be a non-negative number")
+    return float(value)
+
+
 def fraction(value: Any, name: str, default: float) -> float:
     """A number in [0, 1)."""
     if value is None:
@@ -62,5 +70,6 @@ __all__ = [
     "addresses",
     "fraction",
     "non_empty_string",
+    "non_negative",
     "positive_int",
 ]

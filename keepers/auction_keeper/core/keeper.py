@@ -7,7 +7,9 @@ One ``NetworkKeeper`` serves one network. Each cycle it
 2. snapshots every candidate's lot and skips inactive ones;
 3. estimates each live lot's market (``pricing``) and plans its order
    validity (``schedule``): short inside the band around the market, one
-   long order far above it, the uniform TTL when no market is known;
+   long order far above it, the uniform TTL when no market is known; a lot
+   the market values under ``dust`` want tokens (what a fill leaves behind)
+   is left alone from here on;
 4. resolves the auction's active registry adapters to publishers;
 5. (re)publishes, lots nearest the market first, wherever the recorded
    order is missing, expired, or built for a previous lot window, while
@@ -36,6 +38,7 @@ from keepers.auction_keeper.chain.contracts import (
     AdapterContract,
     AdapterRegistry,
     Auction,
+    Erc20,
     LotView,
 )
 from keepers.auction_keeper.config import NetworkConfig
@@ -120,6 +123,10 @@ class NetworkKeeper:
         self._near: dict[tuple[str, str], tuple[Auction, LotView | None]] = {}
         self._fast_at = time.monotonic()
         self._unknown_adapters: set[str] = set()
+        # Lots found to be dust, by (auction, token): the (start, available)
+        # they had. Not priced again until the lot changes.
+        self._dust: dict[tuple[str, str], tuple[int, int]] = {}
+        self._want_units: dict[str, int] = {}
         # This cycle's schedule per (auction, token), read by the publishers' planner hook.
         self._plans: dict[tuple[str, str], schedule.Plan] = {}
         # Earliest recorded expiry seen in the last cycle (the loop's wake-up).
@@ -215,6 +222,28 @@ class NetworkKeeper:
         self._plans[key] = planned
         return planned
 
+    def is_dust(self, lot: LotView, planned: schedule.Plan | None = None) -> bool:
+        """Whether the lot is dust: the market values all of it under
+        ``dust`` want tokens. Without ``planned`` only the remembered verdict
+        answers (no pricing); a lot with no market estimate is never dust."""
+        key = (lot.auction.lower(), lot.token.lower())
+        seen = (lot.start, lot.available)
+        if planned is None:
+            return self._dust.get(key) == seen
+        if not self.config.dust or planned.market is None:
+            self._dust.pop(key, None)
+            return False
+        unit = self._want_units.get(lot.want)
+        if unit is None:
+            unit = self._want_units[lot.want] = 10 ** Erc20(self.client, lot.want).decimals()
+        if planned.market >= self.config.dust * unit:
+            self._dust.pop(key, None)
+            return False
+        self._dust[key] = seen
+        self._near.pop(key, None)
+        log.info("%s: dust (market %s want wei); left alone", lot.token, planned.market)
+        return True
+
     def planned_valid_to(self, lot: LotView) -> int | None:
         planned = self._plans.get((lot.auction.lower(), lot.token.lower()))
         return planned.valid_to if planned is not None else None
@@ -247,7 +276,13 @@ class NetworkKeeper:
             if not lot.active:
                 outcomes.append(Outcome(auction.address, token, None, "skipped", "inactive lot"))
                 continue
+            if self.is_dust(lot):
+                outcomes.append(Outcome(auction.address, token, None, "skipped", "dust"))
+                continue
             planned = self.plan_for(auction, lot)
+            if self.is_dust(lot, planned):
+                outcomes.append(Outcome(auction.address, token, None, "skipped", "dust"))
+                continue
             log.debug("%s: %s", lot.token, planned)
             live.append((lot, planned))
             self.fast_lane()

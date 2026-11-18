@@ -21,6 +21,7 @@ environment (``~/.env`` is loaded first), so API keys stay out of the file.
       min: 60               # validity inside the band (orderbook minimum)
       max: 7200             # longest validity far above the market
     max_open_orders: 8      # open orders per adapter at once (CoW caps outside-market orders at 10)
+    dust: 0.01              # lots the market values under this many want tokens are left alone (0: off)
     native:                 # the native rail: take lots through the AuctionTaker with a Curve swap
       enabled: false        # needs auction_taker; sends only in mode keeper (offline: simulates)
       backends: [curve]     # routers: curve (router NG), electric (michwill/electric-router); the best quote wins

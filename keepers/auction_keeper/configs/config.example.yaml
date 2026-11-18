@@ -32,6 +32,9 @@ ttl:
 # Open orders per adapter at once; the lots farthest from the market wait.
 # The CoW orderbook caps an owner's open outside-market orders at 10.
 max_open_orders: 8
+# Lots the market values under this many want tokens (what a fill leaves
+# behind) are left alone: no orders, no takes. 0 turns it off.
+dust: 0.01
 # The native rail: take lots through the AuctionTaker (auction_taker per
 # network) with a Curve router swap, chunked by price impact; alongside the
 # adapters. Sends only in mode keeper; offline simulates and reports.
