@@ -267,6 +267,8 @@
       // contracts.known = addresses to name in tables without listing them.
       // ---------------------------------------------------------------------
       const CONFIG = {
+        // Lots table: rows shown before 'show all', and the size (target units) under which a lot is folded away.
+        lots: { rows: 40, min: 10 },
         calendar: {
           startTime: 1600300800, // FeeCollector START_TIME (Thu 2020-09-17 00:00 UTC)
           week: 7 * 86400,
@@ -314,11 +316,12 @@
             name: "Polygon",
             chainId: 137,
             rpc: "https://polygon-bor-rpc.publicnode.com", // polygon-rpc.com answers 403 as of 2026-10-31
+            logsRpc: "https://polygon.gateway.tenderly.co",
             explorer: "https://polygonscan.com",
             cow: "polygon", // CoW orderbook chain slug; null = native take only
             cowExplorer: "pol", // explorer.cow.fi path, when it differs from the orderbook slug
             since: 1791158400, // burner deployed 2026-10-05: first week in the history selector
-            logsRange: 10000, // eth_getLogs block span the RPC accepts (publicnode and drpc: 10000)
+            logsRange: 100000, // a week is ~290k blocks; the Tenderly public gateway serves 300k+ ranges
             blockTime: 2.1, // seconds, only a first guess for timestamp -> block
             target: { address: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", symbol: "USDC", decimals: 6 },
             contracts: {
@@ -367,11 +370,12 @@
             name: "Ethereum",
             chainId: 1,
             rpc: "https://ethereum-rpc.publicnode.com",
+            logsRpc: "https://gateway.tenderly.co/public/mainnet",
             explorer: "https://etherscan.io",
             cow: "mainnet",
             cowExplorer: "", // explorer.cow.fi serves mainnet at the root
             since: 1794268800, // burner deployed 2026-11-10 (FeeCollector still points to the previous burner)
-            logsRange: 10000,
+            logsRange: 50000, // a week is ~50400 blocks; the Tenderly public gateway serves it in two requests
             blockTime: 12,
             target: { address: "0xf939E0A03FB07F59A73314E73794Be0E57ac1b4E", symbol: "crvUSD", decimals: 18 },
             contracts: {
@@ -392,11 +396,12 @@
             name: "Gnosis",
             chainId: 100,
             rpc: "https://gnosis-rpc.publicnode.com",
+            logsRpc: "https://rpc.gnosischain.com",
             explorer: "https://gnosisscan.io",
             cow: "xdai",
             cowExplorer: "gc", // explorer.cow.fi path, when it differs from the orderbook slug
             since: 1794268800, // burner deployed 2026-11-10
-            logsRange: 10000,
+            logsRange: 100000, // a week is ~121k blocks; rpc.gnosischain.com serves it in two requests
             blockTime: 5,
             target: { address: "0xe91D153E0b41518A2Ce8Dd3D7944Fa863463a97d", symbol: "WXDAI", decimals: 18 },
             contracts: {
@@ -419,11 +424,12 @@
             name: "Arbitrum",
             chainId: 42161,
             rpc: "https://arbitrum-one-rpc.publicnode.com",
+            logsRpc: "https://arb1.arbitrum.io/rpc",
             explorer: "https://arbiscan.io",
             cow: "arbitrum_one",
             cowExplorer: "arb1", // explorer.cow.fi path, when it differs from the orderbook slug
             since: 1794268800, // burner deployed 2026-11-10 (FeeCollector still points to the previous burner)
-            logsRange: 10000,
+            logsRange: 1000000, // a week is ~2.4M blocks; arb1.arbitrum.io serves it in three requests (publicnode: archive token)
             blockTime: 0.25,
             target: { address: "0x498Bf2B1e120FeD3ad3D42EA2165E9b73f99C1e5", symbol: "crvUSD", decimals: 18 },
             contracts: {
@@ -447,7 +453,7 @@
             cow: "base",
             cowExplorer: "base", // explorer.cow.fi path, when it differs from the orderbook slug
             since: 1794268800, // burner deployed 2026-11-10 (FeeCollector still points to the previous burner)
-            logsRange: 10000,
+            logsRange: 50000, // publicnode caps the range at 50000 on Base
             blockTime: 2,
             target: { address: "0x417Ac0e078398C154EdFadD9Ef675d30Be60Af93", symbol: "crvUSD", decimals: 18 },
             contracts: {
@@ -544,9 +550,16 @@
         if (prov && prov[net.key] && p.keys[p.provider]) return prov[net.key].replace("${key}", p.keys[p.provider]);
         return net.rpc;
       }
+      // Keyless default: the logs go to the public endpoint that serves the widest
+      // eth_getLogs range on that network (`logsRpc`), the calls stay on `rpc`.
+      function logsRpcFor(net) {
+        const rpc = rpcFor(net);
+        return rpc === net.rpc && net.logsRpc ? net.logsRpc : rpc;
+      }
       function logsSpanFor(net) {
         const p = prefs();
         if (p.logsSpan[p.provider]) return Number(p.logsSpan[p.provider]);
+        if (rpcFor(net) === net.rpc) return net.logsRange;
         const prov = CONFIG.providers[p.provider];
         return prov ? prov.logsSpan : net.logsRange;
       }
@@ -570,12 +583,29 @@
           else return Promise.all(reqs.map((r) => rpcBatch(rpc, [r]).then((x) => x[0])));
         }
         const byId = new Map(json.map((item) => [item.id, item]));
-        return payload.map((req) => {
+        const out = payload.map((req) => {
           const item = byId.get(req.id);
-          if (!item) return { ok: false, error: "missing batch response" };
+          if (!item) return null;
           if (item.error) return { ok: false, error: item.error.message || "rpc error" };
           return { ok: true, value: item.result };
         });
+        // Some endpoints (publicnode) answer a batch with only part of its items:
+        // ask for the dropped ones again, one request per call, a few at a time.
+        if (payload.length > 1) {
+          const missing = out.map((x, i) => (x === null ? i : -1)).filter((i) => i >= 0);
+          for (let k = 0; k < missing.length; k += 4) {
+            await Promise.all(
+              missing.slice(k, k + 4).map(async (i) => {
+                try {
+                  out[i] = (await rpcBatch(rpc, [reqs[i]]))[0];
+                } catch (e) {
+                  out[i] = { ok: false, error: e.message || "rpc error" };
+                }
+              }),
+            );
+          }
+        }
+        return out.map((x) => x ?? { ok: false, error: "missing batch response" });
       }
 
       // Chunked so public endpoints do not reject a 400-request batch; a transport
@@ -618,17 +648,38 @@
         return est;
       }
 
-      // eth_getLogs over [from, to] in spans the endpoint accepts, batched 10 per request.
-      async function getLogs(rpc, address, topics, from, to, span, onProgress) {
-        const reqs = [];
-        for (let a = from; a <= to; a += span) {
-          const b = Math.min(to, a + span - 1);
-          reqs.push({ method: "eth_getLogs", params: [{ fromBlock: "0x" + a.toString(16), toBlock: "0x" + b.toString(16), address, topics }] });
+      // eth_getLogs over [from, to] in spans the endpoint accepts, four spans at a time.
+      // A span the endpoint refuses (range or result cap, a dropped answer) is halved
+      // and asked again, so a wrong `logs span` costs requests instead of the view.
+      async function getLogsSpan(rpc, address, topics, a, b) {
+        const req = { method: "eth_getLogs", params: [{ fromBlock: "0x" + a.toString(16), toBlock: "0x" + b.toString(16), address, topics }] };
+        let error;
+        try {
+          const [r] = await rpcBatch(rpc, [req]);
+          if (r.ok) return r.value;
+          error = r.error;
+        } catch (e) {
+          error = e.message || "rpc error";
         }
-        const rs = await rpcMany(rpc, reqs, 10, onProgress);
-        const bad = rs.find((r) => !r.ok);
-        if (bad) throw new Error("eth_getLogs: " + bad.error);
-        return rs.flatMap((r) => r.value);
+        if (b - a < 64) throw new Error("eth_getLogs: " + error);
+        const mid = Math.floor((a + b) / 2);
+        const left = await getLogsSpan(rpc, address, topics, a, mid);
+        return left.concat(await getLogsSpan(rpc, address, topics, mid + 1, b));
+      }
+      async function getLogs(rpc, address, topics, from, to, span, onProgress) {
+        const spans = [];
+        for (let a = from; a <= to; a += span) spans.push([a, Math.min(to, a + span - 1)]);
+        const out = new Array(spans.length);
+        let done = 0;
+        for (let i = 0; i < spans.length; i += 4) {
+          await Promise.all(
+            spans.slice(i, i + 4).map(async ([a, b], k) => {
+              out[i + k] = await getLogsSpan(rpc, address, topics, a, b);
+              if (onProgress) onProgress(++done, spans.length);
+            }),
+          );
+        }
+        return out.flat();
       }
 
       // ---------------------------------------------------------------------
@@ -828,7 +879,7 @@
       // ---------------------------------------------------------------------
       // View state: network + week, mirrored in the URL hash (#polygon/2026-10-30)
       // ---------------------------------------------------------------------
-      const state = { net: null, week: null, weekTokens: [], epochOnChain: null };
+      const state = { net: null, week: null, weekTokens: [], epochOnChain: null, lotsAll: false };
       function weeksFor(net) {
         const weeks = [];
         for (let w = epochWeekAt(nowTs()); w >= weekOf(net.since); w -= CONFIG.calendar.week) weeks.push(w);
@@ -959,7 +1010,7 @@
         const margin = Math.ceil(600 / net.blockTime); // ten minutes of blocks on each side
         const from = Math.max(0, (await blockAtTime(rpc, week, latest, net.blockTime)) - margin);
         const to = Math.min(latest.number, (await blockAtTime(rpc, weekEnd, latest, net.blockTime)) + margin);
-        const logs = await getLogs(rpc, burner, [[TOPIC.LotStaged, TOPIC.Taken]], from, to, logsSpanFor(net));
+        const logs = await getLogs(logsRpcFor(net), burner, [[TOPIC.LotStaged, TOPIC.Taken]], from, to, logsSpanFor(net));
         // timestamps of the blocks that carry events (few), then keep this week only
         const blocks = [...new Set(logs.map((l) => l.blockNumber))];
         const br = await rpcMany(rpc, blocks.map((b) => ({ method: "eth_getBlockByNumber", params: [b, false] })));
@@ -1072,10 +1123,16 @@
           : "";
 
         // --- lots: one row per LotStaged (a restage in the same week makes a second row) ---
-        lotsBody.textContent = "";
+        // Sorted by what the lot brought in (the target paid), the biggest first; the lots
+        // still on offer follow. A lot is small when it brought under CONFIG.lots.min target
+        // and what is left of it asks under that too: the curve only falls, so an unsold
+        // remainder is worth less than its current ask. Small lots and the rows past
+        // CONFIG.lots.rows are folded behind "show all"; nothing but the chain is read.
         let totalPaid = 0n;
         let soldOut = 0;
-        for (const s of ev.staged) {
+        const minRaw = (BigInt(Math.round(CONFIG.lots.min * 100)) * 10n ** BigInt(td_)) / 100n;
+        const now = nowTs();
+        const lots = ev.staged.map((s) => {
           const { symbol, decimals } = meta(s.token);
           // takes of this lot: same token, after this staging and before the next staging of the same token
           const next = ev.staged.find((o) => o.token === s.token && (o.block > s.block || (o.block === s.block && o.logIndex > s.logIndex)));
@@ -1084,6 +1141,19 @@
           const paid = takes.reduce((a, t) => a + t.payment, 0n);
           totalPaid += paid;
           if (s.initial > 0n && sold >= s.initial) soldOut++;
+          const l = live[s.token.toLowerCase()];
+          const active = !!(l && l.available > 0n && now >= s.start && now < s.end && !next);
+          // what the auction asks for the rest right now, raw target units (price(): raw want per 1e18 raw token units)
+          const ask = active && l.price ? (BigInt(l.price) * l.available) / 10n ** 18n : 0n;
+          return { s, symbol, decimals, next, takes, sold, paid, l, active, ask, small: paid < minRaw && (!active || ask < minRaw) };
+        });
+        lots.sort((a, b) =>
+          a.paid === b.paid ? Number(b.active) - Number(a.active) || String(a.symbol).localeCompare(String(b.symbol)) : a.paid > b.paid ? -1 : 1,
+        );
+        const big = lots.filter((x) => !x.small);
+        const shown = state.lotsAll ? lots : big.slice(0, CONFIG.lots.rows);
+        lotsBody.textContent = "";
+        for (const { s, symbol, decimals, next, takes, sold, paid, l, active } of shown) {
           const row = lotsBody.appendChild(document.createElement("tr"));
           const tokenCell = td(row, addr(net.explorer, s.token, symbol));
           tokenCell.title = `staged ${fmtTs(s.ts)} ${tzLabel()}`;
@@ -1092,9 +1162,6 @@
           td(row, `${fmtUnits(paid, td_, 2)} ${tsym}`, "num");
           td(row, `${fmtPrice(perToken(paid, sold, decimals))} (${takes.length})`, "num");
           // live column (hidden on past weeks)
-          const l = live[s.token.toLowerCase()];
-          const now = nowTs();
-          const active = l && l.available > 0n && now >= s.start && now < s.end && !next;
           const liveCell = td(row, "-", "num live");
           if (active && l.price) {
             // price(): raw want per 1e18 raw token units -> want per whole token
@@ -1104,6 +1171,25 @@
           } else if (l && l.available !== null && !next) {
             liveCell.textContent = l.available > 0n ? `${fmtUnits(l.available, decimals)} (window ${now < s.start ? "not open" : "closed"})` : "sold out";
           }
+        }
+        if (lots.length > shown.length || state.lotsAll) {
+          const cell = td(lotsBody.appendChild(document.createElement("tr")), "", "subtle");
+          cell.colSpan = 5;
+          if (!state.lotsAll) {
+            const rest = lots.filter((x) => !shown.includes(x));
+            cell.append(
+              `${rest.length} more lots not shown: ${lots.length - big.length} under ${CONFIG.lots.min} ${tsym}, ${rest.filter((x) => x.active).length} still on offer · `,
+            );
+          }
+          const a = document.createElement("a");
+          a.href = "#";
+          a.textContent = state.lotsAll ? `show the ${Math.min(big.length, CONFIG.lots.rows)} biggest only` : `show all ${lots.length} lots`;
+          a.onclick = (e) => {
+            e.preventDefault();
+            state.lotsAll = !state.lotsAll;
+            renderWeek(net, rpc);
+          };
+          cell.append(a);
         }
         if (!ev.staged.length) note(lotsBody, `no lots staged in this week (burner logs ${ev.from} → ${ev.to})`, undefined, 5);
         $("lots-totals").textContent = ev.staged.length
@@ -1363,7 +1449,7 @@
             const from = await blockAtTime(rpc, since, latest, net.blockTime);
             const span = logsSpanFor(net);
             note(tbody, `scanning Transfer logs to the FeeCollector over ${latest.number - from} blocks (${Math.ceil((latest.number - from) / span)} requests)…`, "loading", 5);
-            const logs = await getLogs(rpc, null, [TOPIC.Transfer, null, "0x" + encAddress(fc)], from, latest.number, span, (done, total) => {
+            const logs = await getLogs(logsRpcFor(net), null, [TOPIC.Transfer, null, "0x" + encAddress(fc)], from, latest.number, span, (done, total) => {
               note(tbody, `scanning Transfer logs: ${done} / ${total} requests…`, "loading", 5);
             });
             const lastSeen = {}; // token -> last block with a transfer in
