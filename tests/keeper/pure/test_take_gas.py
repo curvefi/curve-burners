@@ -22,7 +22,7 @@ TOKEN = token_address(1)
 ROUTER = token_address(10**6 + 9)
 GWEI = 10**9
 ETH_PRICE = 3000.0  # want (a dollar token) per native token
-ROUTE_TYPES = ["address", "address", "uint256", "uint256", "address", "(address,bytes)[]"]
+ROUTE_TYPES = ["address", "address", "uint256", "uint256", "address", "bytes"]
 
 
 class Chain(FakeChain):
@@ -47,7 +47,13 @@ class Chain(FakeChain):
 
 
 def route_of(data):
-    return decode(ROUTE_TYPES, bytes(data)[4:])[5]
+    """The (target, calldata) steps packed in a take's route."""
+    packed, steps = decode(ROUTE_TYPES, bytes(data)[4:])[5], []
+    while packed:
+        size = int.from_bytes(packed[20:22], "big")
+        steps.append(("0x" + packed[:20].hex(), packed[22 : 22 + size]))
+        packed = packed[22 + size :]
+    return steps
 
 
 def min_profit_of(data):
@@ -199,7 +205,7 @@ def test_the_take_never_depends_on_its_refill():
     # No route to the native token, or a route that needs more steps than are left.
     for broken in ("none", "long", "raises"):
         chain = Chain()
-        taker = taker_of(chain)
+        taker = taker_of(chain, max_calls=4)  # a taker deployed with four steps
         swap = taker.router.swap_calls
 
         def best_route(token, want, amount, broken=broken):

@@ -74,6 +74,7 @@ and `auctions` are required; `${NAME}` placeholders read the environment
 | `native.requote` | 300 | Seconds between route quotes of a lot whose ask is still above the band (`ttl.near_above`) over its last route quote. Inside the band the lot is quoted every cycle. The ask itself needs no quote: it comes from the local model. |
 | `native.receipt_timeout` | 60 | Seconds to wait for a take's receipt. A private relay never includes a take that would revert (the lot went to someone else), so the wait ends here with "not included" and the loop goes on. |
 | `native.min_profit` | 0 | Want tokens a take must earn after its gas. The gas is the take's own estimate priced at the base fee plus the tip it would pay, converted at the native token's price (`fees.native_price`, else the price sources). A take that earns less waits for the curve; the same floor goes into the transaction, so a route that pays less on chain than it quoted reverts. See "Gas in the profit". |
+| `native.packed_route`, `native.max_calls` | `true`, 256 | How the deployed `AuctionTaker` takes its route. As built from this repository: packed bytes of any length (`target ++ 2-byte length ++ calldata` per step), 256 steps at most, and a route costs only what its own bytes cost. The deployments made before 2026-11-25 take a bounded array of four calls: `packed_route: false` and `max_calls: 4` for those. The gas refill is left out when it does not fit. |
 | `native.gas_refill` | `true` | Every take buys its own gas back: its gas cost in want is swapped to the native token and paid to a sending account in the same transaction, so the accounts' gas money stays level and the profit arrives in want, net of gas. The take never depends on it: where the refill has no route, no room in the route, would fail or would cost the take its profit, the take goes without. See "Gas in the profit". |
 | `native.refill_below`, `native.refill_amount` | 0, 0 | A top-up on top of that: a sending account holding less than `refill_below` native tokens gets `refill_amount` native tokens' worth of a take's profit (half of the profit at most) the same way. Both or neither; `0`: off. |
 | `native.router`, `native.chain`, `native.api_url` | by chain id | Curve router NG address, `api.curve.finance` chain slug and pool-list base URL (`curve_router.ROUTERS` / `API_CHAINS` cover Ethereum, Optimism, Gnosis, Polygon, Fantom, Fraxtal, Base, Arbitrum, Avalanche). |
@@ -342,7 +343,8 @@ run low.
 Taking the lot comes first. The refill is left out, and the take goes as a
 plain one with its gas as the on-chain floor, when the router has no route
 from want to the native token, when the take has no room (the
-`AuctionTaker` carries four route steps and the lot's own swap uses two),
+`AuctionTaker` carries `native.max_calls` route steps and the lot's own swap
+uses two),
 when the take would revert with the refill and not without, or when the
 refill's own gas would turn a take that pays into one that does not.
 

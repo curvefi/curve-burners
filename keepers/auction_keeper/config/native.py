@@ -71,6 +71,12 @@ class NativeSettings:
     # Want tokens a take must earn after its gas (gas x (base fee + tip), at
     # the native token's price). A take that earns less waits for the curve.
     min_profit: float = 0.0
+    # How the deployed AuctionTaker takes its route: packed bytes of any
+    # length (as built from this repository), or the bounded array of calls
+    # of the deployments before 2026-11-25 (false, with max_calls: 4).
+    packed_route: bool = True
+    # Route steps the deployed AuctionTaker carries.
+    max_calls: int = 256
     # Every take buys its own gas back: its gas cost in want is swapped to
     # the native token and paid to the sending account in the same
     # transaction, where the route has room for it.
@@ -202,6 +208,10 @@ def parse_native(raw: Any, name: str, default: NativeSettings) -> NativeSettings
         receipt_timeout=positive_int(
             raw.get("receipt_timeout"), f"{name}.receipt_timeout", default.receipt_timeout
         ),
+        packed_route=_boolean(
+            raw.get("packed_route"), f"{name}.packed_route", default.packed_route
+        ),
+        max_calls=positive_int(raw.get("max_calls"), f"{name}.max_calls", default.max_calls),
         gas_refill=_boolean(raw.get("gas_refill"), f"{name}.gas_refill", default.gas_refill),
         min_profit=_number(raw.get("min_profit"), f"{name}.min_profit", default.min_profit),
         refill_below=_number(raw.get("refill_below"), f"{name}.refill_below", default.refill_below),

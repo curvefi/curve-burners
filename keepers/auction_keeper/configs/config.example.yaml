@@ -90,6 +90,8 @@ native:
   requote: 300          # seconds between route quotes of a lot still above the band over its last one (inside it: every cycle)
   receipt_timeout: 60   # seconds to wait for a take's receipt before reporting it not included
   min_profit: 0         # want tokens a take must earn after its gas (estimate x (base fee + tip), at the native token's price)
+  # packed_route: false # for an AuctionTaker deployed before 2026-11-25 (a bounded array of calls) ...
+  # max_calls: 4        # ... which carries four route steps
   gas_refill: true      # a take swaps its own gas cost in want to the native token for the sending account, in the same
                         # transaction: gas money stays level, the profit arrives in want net of gas (left out where it cannot be done)
   # refill_below: 0.02  # a sending account under this many native tokens also gets ...

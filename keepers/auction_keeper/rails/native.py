@@ -58,7 +58,7 @@ from keepers.auction_keeper.chain.abi import CallReverted
 from keepers.auction_keeper.chain.client import ChainClient, GasQuote, NotIncluded, PriorityFee
 from keepers.auction_keeper.chain.contracts import Auction, LotView
 from keepers.auction_keeper.config import NetworkConfig
-from keepers.auction_keeper.execute import MAX_ROUTE_CALLS, Call, Executor, TakePlan
+from keepers.auction_keeper.execute import Call, Executor, TakePlan
 from keepers.auction_keeper.routing.curve_router import ETH as NATIVE_TOKEN
 from keepers.auction_keeper.routing.curve_router import curve_router_for
 from keepers.auction_keeper.routing.electric_router import electric_router_for
@@ -214,7 +214,7 @@ class NativeTaker:
         self.config = config
         self.settings = config.native
         self.router = router
-        self.executor = Executor(client, taker=taker)
+        self.executor = Executor(client, taker=taker, packed_route=config.native.packed_route)
         self.profit_receiver = profit_receiver
         # The last gas estimate of a take: (gas, base fee, monotonic time).
         self._gas_seen: tuple[int, int, float] | None = None
@@ -335,7 +335,7 @@ class NativeTaker:
                 < self.settings.refill_amount * (native_price or 0) * want_unit * REFILL_MIN_SHARE
             ):
                 top = 0
-            room = MAX_ROUTE_CALLS - len(route)
+            room = self.settings.max_calls - len(route)
             if refill_to and native_price and room > 0 and (self.settings.gas_refill or top):
                 # The refill buys back the gas of the whole take, its own
                 # swap included, so the take is estimated with a refill of

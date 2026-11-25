@@ -295,12 +295,37 @@ class CowAdapterContract(AdapterContract):
 
 
 class AuctionTaker(Contract):
-    """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route."""
+    """``contracts/burners/auction/periphery/AuctionTaker.vy``: native take plus a route.
+
+    The route goes in as packed bytes, step after step:
+    ``target (20 bytes) ++ calldata length (2 bytes) ++ calldata``. The
+    takers deployed before 2026-11-25 take a bounded array of
+    ``(target, calldata)`` instead (``packed=False``)."""
 
     TAKE_WITH_ROUTE = Function(
+        "take_with_route(address,address,uint256,uint256,address,bytes)",
+        ("uint256",),
+    )
+    TAKE_WITH_CALLS = Function(
         "take_with_route(address,address,uint256,uint256,address,(address,bytes)[])",
         ("uint256",),
     )
+    # The longest calldata of one step (the 2-byte length field).
+    MAX_STEP_DATA = 2**16 - 1
+
+    def __init__(self, client: ChainClient, address: str, *, packed: bool = True):
+        super().__init__(client, address)
+        self.packed = packed
+
+    @classmethod
+    def pack_route(cls, calls: list[tuple[str, bytes]]) -> bytes:
+        route = b""
+        for target, data in calls:
+            if len(data) > cls.MAX_STEP_DATA:
+                raise ValueError(f"route step to {target} carries {len(data)} bytes of calldata")
+            route += bytes.fromhex(to_checksum_address(target)[2:])
+            route += len(data).to_bytes(2, "big") + bytes(data)
+        return route
 
     def take_with_route_calldata(
         self,
@@ -311,8 +336,12 @@ class AuctionTaker(Contract):
         profit_receiver: str,
         calls: list[tuple[str, bytes]],
     ) -> bytes:
+        if not self.packed:
+            return self.TAKE_WITH_CALLS.encode(
+                auction, token, max_amount, min_profit, profit_receiver, calls
+            )
         return self.TAKE_WITH_ROUTE.encode(
-            auction, token, max_amount, min_profit, profit_receiver, calls
+            auction, token, max_amount, min_profit, profit_receiver, self.pack_route(calls)
         )
 
 

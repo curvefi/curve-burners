@@ -109,8 +109,9 @@ def curve_router_exchange(
     )
 
 
-# Route steps one take carries (AuctionTaker.MAX_CALLS).
-MAX_ROUTE_CALLS = 4
+# Route steps one take carries (AuctionTaker.MAX_STEPS); a taker deployed
+# with another bound is named in the config (native.max_calls).
+MAX_ROUTE_CALLS = 256
 
 
 @dataclass
@@ -138,10 +139,12 @@ class Executor:
         client: ChainClient,
         *,
         taker: str | None = None,
+        packed_route: bool = True,
         sleep: Callable[[float], None] = time.sleep,
     ):
         self.client = client
-        self.taker = AuctionTaker(client, taker) if taker else None
+        # packed_route=False: a taker deployed with the bounded array of calls.
+        self.taker = AuctionTaker(client, taker, packed=packed_route) if taker else None
         self.sleep = sleep
 
     # Reads
@@ -377,4 +380,8 @@ def connect(
         send_rpc=config.send_rpc,
         receipt_timeout=config.receipt_timeout,
     )
-    return Executor(client, taker=taker or config.auction_taker)
+    return Executor(
+        client,
+        taker=taker or config.auction_taker,
+        packed_route=config.native.packed_route,
+    )

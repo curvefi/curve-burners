@@ -25,6 +25,13 @@ def _timestamp() -> int:
     return boa.env.evm.vm.state.timestamp
 
 
+def _route(*calls: tuple) -> bytes:
+    """Packed route steps: target ++ 2-byte calldata length ++ calldata."""
+    return b"".join(
+        bytes.fromhex(target[2:]) + len(data).to_bytes(2, "big") + data for target, data in calls
+    )
+
+
 def _mint_call(token, receiver: str, amount: int) -> tuple:
     """Route step standing in for a swap: mints want as if a DEX paid out."""
     return (
@@ -124,7 +131,7 @@ def test_route_fills_and_forwards_exact_payment(
             amount,
             0,
             profit_receiver,
-            [_mint_call(want, taker.address, payment)],
+            _route(_mint_call(want, taker.address, payment)),
         )
 
     assert profit == 0
@@ -151,7 +158,7 @@ def test_want_surplus_is_profit_and_min_profit_gates(
                 amount,
                 surplus + 1,
                 profit_receiver,
-                [_mint_call(want, taker.address, payment + surplus)],
+                _route(_mint_call(want, taker.address, payment + surplus)),
             )
         profit = taker.take_with_route(
             auction.address,
@@ -159,7 +166,7 @@ def test_want_surplus_is_profit_and_min_profit_gates(
             amount,
             surplus,
             profit_receiver,
-            [_mint_call(want, taker.address, payment + surplus)],
+            _route(_mint_call(want, taker.address, payment + surplus)),
         )
 
     assert profit == surplus
@@ -182,10 +189,10 @@ def test_multi_step_route_runs_in_order(
             amount,
             0,
             profit_receiver,
-            [
+            _route(
                 _mint_call(want, taker.address, payment // 2),
                 _mint_call(want, taker.address, payment - payment // 2),
-            ],
+            ),
         )
     assert sell_token.balanceOf(profit_receiver) == amount
 
@@ -213,7 +220,7 @@ def test_failing_route_step_reverts_whole_take(
                 amount,
                 0,
                 profit_receiver,
-                [failing_call],
+                _route(failing_call),
             )
     assert sell_token.balanceOf(profit_receiver) == 0
     assert auction.available(sell_token.address) == STAGED_AMOUNT
@@ -235,7 +242,7 @@ def test_underfunded_route_reverts(
                 amount,
                 0,
                 profit_receiver,
-                [_mint_call(want, taker.address, payment - 1)],
+                _route(_mint_call(want, taker.address, payment - 1)),
             )
 
 
@@ -252,6 +259,60 @@ def test_callback_rejects_direct_calls(taker, auction, solver):
 def test_input_validation(taker, solver, profit_receiver, auction, sell_token):
     with boa.env.prank(solver):
         with boa.reverts(custom_err("ZeroAuction()")):
-            taker.take_with_route(ZERO_ADDRESS, sell_token.address, WAD, 0, profit_receiver, [])
+            taker.take_with_route(
+                ZERO_ADDRESS, sell_token.address, WAD, 0, profit_receiver, b"\x00"
+            )
         with boa.reverts(custom_err("ZeroReceiver()")):
-            taker.take_with_route(auction.address, sell_token.address, WAD, 0, ZERO_ADDRESS, [])
+            taker.take_with_route(
+                auction.address, sell_token.address, WAD, 0, ZERO_ADDRESS, b"\x00"
+            )
+        # The auction calls back only with data: a take without a route cannot pay.
+        with boa.reverts(custom_err("EmptyRoute()")):
+            taker.take_with_route(auction.address, sell_token.address, WAD, 0, profit_receiver, b"")
+
+
+def test_a_long_route_runs_whole_and_costs_only_its_own_bytes(
+    auction, taker, stage, sell_token, want, solver, profit_receiver, proceeds_receiver
+):
+    stage(sell_token)
+    amount = STAGED_AMOUNT // 16
+    payment = auction.getAmountNeeded(sell_token.address, amount)
+    # Forty mints summing to the payment and one wei each of profit: ten
+    # times what the bounded array of calls took.
+    share = payment // 40 + 1
+    step = _mint_call(want, taker.address, share)
+
+    with boa.env.prank(solver):
+        profit = taker.take_with_route(
+            auction.address, sell_token.address, amount, 0, profit_receiver, _route(*[step] * 40)
+        )
+
+    assert profit == 40 * share - payment
+    assert want.balanceOf(proceeds_receiver) == payment
+
+
+def test_malformed_routes_revert(auction, taker, stage, sell_token, want, solver, profit_receiver):
+    stage(sell_token)
+    amount = STAGED_AMOUNT // 4
+    payment = auction.getAmountNeeded(sell_token.address, amount)
+    good = _route(_mint_call(want, taker.address, payment))
+
+    def take(route: bytes):
+        with boa.env.prank(solver):
+            return taker.take_with_route(
+                auction.address, sell_token.address, amount, 0, profit_receiver, route
+            )
+
+    # A step cut short anywhere: in its target, its length or its calldata.
+    for cut in (1, 21, len(good) - 1):
+        with boa.reverts():
+            take(good[:cut])
+    # Bytes after the last whole step are not ignored.
+    with boa.reverts():
+        take(good + b"\x00")
+    # More steps than the loop runs are not silently dropped.
+    idle_step = _route(_mint_call(want, taker.address, 0))
+    with boa.reverts(custom_err("BadRoute()")):
+        take(good + idle_step * 256)
+    assert auction.available(sell_token.address) == STAGED_AMOUNT
+    assert take(good) == 0
