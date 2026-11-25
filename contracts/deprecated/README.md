@@ -3,6 +3,8 @@ except [`SafeTransferer`](SafeTransferer.vy) which is used to transfer unusual c
 
 ## About
 
+- CowSwapBurner uses `ComposableCow` to post orders into CowSwap, where coins
+  are priced by CowSwap solvers' internal auction.
 - SwapBurner for all `exchange`s. (1)
 - DepositBurner for `add_liquidity`.
 Does not work for first versions of crypto pools since there is no `.lp_price()` and StableSwap metapools without price oracle.

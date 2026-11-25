@@ -1,0 +1,40 @@
+"""
+@title IAdapterRegistry
+@author Curve Finance
+@license MIT
+@notice Read surface only of the settlement adapter catalog: adapter configs,
+        the list of registered adapters, and whether an executor is in use.
+        Management (set_adapter, activate_adapter, disable_adapter) is on the
+        AdapterRegistry contract ABI and not shared through this interface.
+@dev An adapter is a settlement rail selling auction inventory by its own
+     rules (the ERC-1271 router is one way in: it routes signatures prefixed
+     with an active adapter's address to it); the executor is the protocol
+     contract that pulls sold tokens, which auctions approve while
+     is_executor_active(executor). An unknown adapter returns the zeroed
+     config (executor == empty(address)).
+"""
+
+from contracts.utils import constants as c
+
+
+struct AdapterConfig:
+    executor: address
+    active: bool
+
+
+@external
+@view
+def get_adapter(_adapter: address) -> AdapterConfig:
+    ...
+
+
+@external
+@view
+def get_adapters() -> DynArray[address, c.MAX_ADAPTERS]:
+    ...
+
+
+@external
+@view
+def is_executor_active(_executor: address) -> bool:
+    ...
