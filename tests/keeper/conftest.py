@@ -13,9 +13,20 @@ import boa
 import pytest
 from eth_utils import keccak
 
+from keepers.auction_keeper.chain.abi import address_word
 from keepers.auction_keeper.chain.boa_client import BoaClient
-from keepers.auction_keeper.config import CowSettings, NetworkConfig, PricingSettings, TokenFilter
+from keepers.auction_keeper.chain.client import Log
+from keepers.auction_keeper.chain.events import LOT_STAGED_TOPIC
+from keepers.auction_keeper.config import (
+    CowSettings,
+    FocusSettings,
+    LookaheadSettings,
+    NetworkConfig,
+    PricingSettings,
+    TokenFilter,
+)
 from keepers.auction_keeper.core.keeper import NetworkKeeper
+from keepers.auction_keeper.core.model import Curve, LotRecord
 from keepers.auction_keeper.core.state import KeeperState
 from keepers.auction_keeper.rails.cow import CowPublisher
 
@@ -68,6 +79,39 @@ class FakeOrderbook:
 def anchor():
     with boa.env.anchor():
         yield
+
+
+@pytest.fixture(autouse=True)
+def fresh_adapters(monkeypatch):
+    """Tests change the registry between cycles: read it every cycle."""
+    monkeypatch.setattr(NetworkKeeper, "adapters_ttl", 0.0)
+
+
+def band_entry(auction, view, target: int) -> int:
+    """When the lot's quote first gets down to ``target`` want (the window end
+    if never), from the keeper's local model of the auction's curve."""
+    curve = Curve.build(
+        auction.start_total(),
+        auction.floor_total(),
+        auction.step_duration(),
+        auction.auction_length(),
+    )
+    record = LotRecord(view.token, view.initial_amount, view.start, view.end, view.available)
+    return record.reaches(curve, target) or view.end
+
+
+def staged_log(harness, token, block_number: int) -> Log:
+    """The LotStaged log of the token's current lot, as a node would return it."""
+    from eth_abi import encode
+
+    staged_at, initial = harness.lots(token.address)
+    start, end = harness.window(token.address)
+    return Log(
+        address=harness.address,
+        topics=(LOT_STAGED_TOPIC, address_word(token.address)),
+        data=encode(["uint256"] * 5, [initial, START_TOTAL, FLOOR_TOTAL, start, end]),
+        block_number=block_number,
+    )
 
 
 @pytest.fixture(scope="module")
@@ -187,6 +231,10 @@ def network_config(harness):
             # test passes its own pricer to the keeper.
             "pricing": PricingSettings(sources=()),
             "cow": CowSettings(),
+            # boa indexes no logs and mines no next block: every lot is read
+            # back from the chain each cycle and priced for the latest block.
+            "focus": FocusSettings(audit=1000, confirm=0),
+            "lookahead": LookaheadSettings(blocks=0),
         }
         fields.update(overrides)
         return NetworkConfig(**fields)

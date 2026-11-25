@@ -27,6 +27,7 @@ from keepers.auction_keeper.chain.contracts import (
     LotView,
 )
 from keepers.auction_keeper.config import NetworkConfig
+from keepers.auction_keeper.limits import GATES
 from keepers.auction_keeper.rails import AdapterPublisher, PublishResult
 
 log = logging.getLogger(__name__)
@@ -172,12 +173,16 @@ class Orderbook:
         return cls(base)
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Any:
+        url = f"{self.base_url}/api/v1{path}"
+        # Orders take from the whole budget of the host; the quotes of the
+        # ``cow`` price source leave half of it to them.
+        gate = GATES.of(url)
+        gate.take()
         try:
-            response = self.session.request(
-                method, f"{self.base_url}/api/v1{path}", timeout=self.timeout, **kwargs
-            )
+            response = self.session.request(method, url, timeout=self.timeout, **kwargs)
         except requests.RequestException as exc:
             raise OrderbookError(0, "Transport", str(exc)) from exc
+        gate.answered(response.status_code)
         if response.status_code >= 400:
             try:
                 payload = response.json()
@@ -230,6 +235,10 @@ class CowPublisher(AdapterPublisher):
                 self.vault_relayer,
             )
 
+    @property
+    def spender(self) -> str:
+        return self.vault_relayer
+
     # Order construction
 
     def build_order(self, lot: LotView, valid_to: int) -> GPv2Order:
@@ -243,10 +252,10 @@ class CowPublisher(AdapterPublisher):
             app_data=self.app_data,
         )
 
-    def validate(self, auction: Auction, order: GPv2Order) -> str | None:
+    def validate(self, auction: Auction, order: GPv2Order, *, at: int | None = None) -> str | None:
         """Run the auction's router on the order; None when valid, else the reason."""
         return self.validate_signature(
-            auction, order.digest(self.domain_separator), order.signature(self.address)
+            auction, order.digest(self.domain_separator), order.signature(self.address), at=at
         )
 
     # Publishing
@@ -261,7 +270,8 @@ class CowPublisher(AdapterPublisher):
             log.info("%s: lot window closes before an order could be valid", lot.token)
             return None
         order = self.build_order(lot, valid_to)
-        reason = self.validate(auction, order)
+        ahead = self.network.lookahead.orders
+        reason = self.validate(auction, order, at=lot.timestamp if ahead else None)
         if reason is not None:
             log.warning("%s: order rejected by the auction router: %s", lot.token, reason)
             return None
@@ -277,7 +287,12 @@ class CowPublisher(AdapterPublisher):
             )
         else:
             self._register_app_data()
-            posted = self.orderbook.post_order(body)
+            try:
+                posted = self.orderbook.post_order(body)
+            except OrderbookError as exc:
+                if exc.error_type != "DuplicatedOrder":
+                    raise
+                posted = uid  # the orderbook holds this very order already
             if posted.lower() != uid.lower():
                 log.warning("orderbook uid %s differs from the computed %s", posted, uid)
                 uid = posted

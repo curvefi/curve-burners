@@ -105,7 +105,7 @@ def test_publish_posts_eip1271_order_and_syncs_allowance(
 ):
     client = BoaClient(sender=keeper_account)
     auction = Auction(client, harness.address)
-    config = network_config(order_ttl=300, mode="keeper", keeper_key_env="KEY")
+    config = network_config(order_ttl=300, mode="keeper", keeper_key_env="KEY", approvals="lazy")
     publisher = make_publisher(client, auction, config, orderbook)
     view = auction.lot_view(sell_token.address)
     assert sell_token.allowance(harness.address, relayer) == 0
@@ -139,7 +139,7 @@ def test_publish_posts_eip1271_order_and_syncs_allowance(
 def test_offline_mode_posts_without_allowance_and_names_the_sync(
     client, auction, harness, network_config, orderbook, sell_token, relayer, lot, caplog
 ):
-    publisher = make_publisher(client, auction, network_config(), orderbook)
+    publisher = make_publisher(client, auction, network_config(approvals="lazy"), orderbook)
     view = auction.lot_view(sell_token.address)
     assert publisher.publish(auction, view) is not None
     assert len(orderbook.posted) == 1
@@ -151,7 +151,7 @@ def test_offline_mode_posts_without_allowance_and_names_the_sync(
 def test_keeper_mode_never_posts_without_a_sending_client(
     client, auction, network_config, orderbook, sell_token, lot, caplog
 ):
-    config = network_config(mode="keeper", keeper_key_env="KEY")
+    config = network_config(mode="keeper", keeper_key_env="KEY", approvals="lazy")
     publisher = make_publisher(client, auction, config, orderbook)
     assert publisher.publish(auction, auction.lot_view(sell_token.address)) is None
     assert orderbook.posted == []

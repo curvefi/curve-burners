@@ -15,7 +15,6 @@ from eth_utils import to_checksum_address
 
 from keepers.auction_keeper.chain.abi import MAX_UINT256, CallReverted, Function, address_word
 from keepers.auction_keeper.chain.client import ChainClient
-from keepers.auction_keeper.chain.events import LOT_STAGED_TOPIC, lot_staged_token, staged_tokens
 
 ERC1271_MAGIC_VALUE = bytes.fromhex("1626ba7e")
 ERC1271_INVALID = bytes.fromhex("ffffffff")
@@ -59,8 +58,10 @@ class Contract:
         self.client = client
         self.address = to_checksum_address(address)
 
-    def _read(self, fn: Function, *args: Any, sender: str | None = None) -> tuple[Any, ...]:
-        return fn.decode(self.client.call(self.address, fn.encode(*args), sender=sender))
+    def _read(
+        self, fn: Function, *args: Any, sender: str | None = None, at: int | None = None
+    ) -> tuple[Any, ...]:
+        return fn.decode(self.client.call(self.address, fn.encode(*args), sender=sender, at=at))
 
     def _read_one(self, fn: Function, *args: Any) -> Any:
         return self._read(fn, *args)[0]
@@ -99,6 +100,9 @@ class Auction(Contract):
     RECEIVER = Function("receiver()", ("address",))
     REGISTRY = Function("registry()", ("address",))
     AUCTION_LENGTH = Function("auction_length()", ("uint256",))
+    START_TOTAL = Function("start_total()", ("uint256",))
+    FLOOR_TOTAL = Function("floor_total()", ("uint256",))
+    STEP_DURATION = Function("step_duration()", ("uint256",))
     LOTS = Function("lots(address)", ("uint256", "uint256"))
     WINDOW = Function("window(address,uint256)", ("uint256", "uint256"))
     AVAILABLE = Function("available(address)", ("uint256",))
@@ -126,6 +130,15 @@ class Auction(Contract):
 
     def auction_length(self) -> int:
         return self._read_one(self.AUCTION_LENGTH)
+
+    def start_total(self) -> int:
+        return self._read_one(self.START_TOTAL)
+
+    def floor_total(self) -> int:
+        return self._read_one(self.FLOOR_TOTAL)
+
+    def step_duration(self) -> int:
+        return self._read_one(self.STEP_DURATION)
 
     def lots(self, token: str) -> Lot:
         staged_at, initial_amount = self._read(self.LOTS, token)
@@ -165,9 +178,12 @@ class Auction(Contract):
             self.CHECK_ORDER, sell_token, buy_token, receiver, sell_amount, min_buy_amount, valid_to
         )
 
-    def is_valid_signature(self, digest: bytes, signature: bytes) -> bytes:
-        """The router's answer: ERC1271_MAGIC_VALUE, ERC1271_INVALID, or a CallReverted."""
-        return bytes(self._read_one(self.IS_VALID_SIGNATURE, digest, signature))
+    def is_valid_signature(
+        self, digest: bytes, signature: bytes, *, at: int | None = None
+    ) -> bytes:
+        """The router's answer: ERC1271_MAGIC_VALUE, ERC1271_INVALID, or a
+        CallReverted; with ``at``, as the block with that timestamp sees it."""
+        return bytes(self._read(self.IS_VALID_SIGNATURE, digest, signature, at=at)[0])
 
     def lot_view(self, token: str) -> LotView:
         """Snapshot a token's lot in a few reads; ``available`` is 0 for an inactive lot."""
@@ -213,12 +229,6 @@ class Auction(Contract):
         return self.TAKE_WITH_LIMITS.encode(
             token, max_amount, min_amount, max_payment, receiver, deadline, data
         )
-
-    # Token discovery
-
-    def staged_tokens(self, from_block: int, to_block: int, chunk: int = 50_000) -> set[str]:
-        """Tokens with a LotStaged event in [from_block, to_block] (``chain.events``)."""
-        return staged_tokens(self.client, self.address, from_block, to_block, chunk)
 
 
 @dataclass(frozen=True)
@@ -309,7 +319,6 @@ class AuctionTaker(Contract):
 __all__ = [
     "ERC1271_INVALID",
     "ERC1271_MAGIC_VALUE",
-    "LOT_STAGED_TOPIC",
     "AdapterConfig",
     "AdapterContract",
     "AdapterRegistry",
@@ -320,5 +329,4 @@ __all__ = [
     "Lot",
     "LotView",
     "address_word",
-    "lot_staged_token",
 ]

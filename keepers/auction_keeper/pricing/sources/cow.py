@@ -19,7 +19,8 @@ class CowQuoteSource:
 
     def __init__(self, orderbook_url: str, *, http: Any | None = None):
         self.orderbook_url = orderbook_url.rstrip("/")
-        self.http = http or JsonClient(timeout=15.0)
+        # A quote leaves half of the orderbook's request budget to the orders.
+        self.http = http or JsonClient(timeout=15.0, reserve=0.5)
 
     def quote(self, lot: LotView) -> int | None:
         body = {

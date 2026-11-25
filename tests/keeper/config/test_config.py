@@ -152,7 +152,7 @@ def test_pricing_ttl_and_budget_default_and_override(monkeypatch):
 
     config = parse_config(
         {
-            "pricing": {"sources": ["cow"], "cache": 30, "cross_check": 0.2},
+            "pricing": {"sources": ["cow"], "cache": 30, "workers": 2},
             "ttl": {"min": 30, "max": 600, "near_above": 0.5},
             "max_open_orders": 4,
             "networks": {
@@ -172,13 +172,13 @@ def test_pricing_ttl_and_budget_default_and_override(monkeypatch):
         }
     )
     a, b = config.network("a"), config.network("b")
-    assert a.pricing == PricingSettings(sources=("cow",), cache=30, cross_check=0.2)
-    assert a.ttl == TtlSettings(near_above=0.5, near_below=0.1, min_ttl=30, max_ttl=600)
+    assert a.pricing == PricingSettings(sources=("cow",), cache=30, workers=2)
+    assert a.ttl == TtlSettings(near_above=0.5, near_below=0.03, min_ttl=30, max_ttl=600)
     assert a.max_open_orders == 4
     assert b.pricing == PricingSettings(
         sources=(),
         cache=30,
-        cross_check=0.2,
+        workers=2,
         chains={"curve": "xdai"},
         oneinch_api_key_env="MY_1INCH",
     )
@@ -196,8 +196,9 @@ def test_pricing_ttl_and_budget_default_and_override(monkeypatch):
         {"pricing": {"sources": "cow"}},
         {"pricing": {"feed": "x"}},
         {"pricing": {"cache": 0}},
-        {"pricing": {"cross_check": 1}},
-        {"pricing": {"cross_check": True}},
+        {"pricing": {"cross_check": 0.25}},
+        {"pricing": {"probe_interval": 300}},
+        {"approvals": "eager"},
         {"pricing": {"chains": {"binance": "bsc"}}},
         {"pricing": {"chains": ["polygon"]}},
         {"pricing": {"coingecko_url": ""}},
@@ -223,7 +224,7 @@ def test_native_section_parses_and_needs_a_taker():
     pool = "0x" + "01" * 20
     config = parse_config(
         {
-            "native": {"margin": 0.01, "poll": 15},
+            "native": {"margin": 0.01, "requote": 15},
             "networks": {
                 "a": {
                     "rpc": "r",
@@ -243,10 +244,10 @@ def test_native_section_parses_and_needs_a_taker():
         }
     )
     a, b = config.network("a"), config.network("b")
-    assert a.native.enabled and a.native.margin == 0.01 and a.native.poll == 15
+    assert a.native.enabled and a.native.margin == 0.01 and a.native.requote == 15
     assert a.native.max_impact == 0.02 and a.native.chain == "fraxtal"
     assert list(a.native.routes) == [TOKEN_A] and a.native.routes[TOKEN_A].hops == 1
-    assert b.native == NativeSettings(margin=0.01, poll=15)
+    assert b.native == NativeSettings(margin=0.01, requote=15)
     with pytest.raises(ConfigError, match="auction_taker"):
         parse_config(
             {"networks": {"x": {"rpc": "r", "auctions": [AUCTION], "native": {"enabled": True}}}}
@@ -309,7 +310,7 @@ def test_native_electric_backend_parses():
         {"native": {"enabled": "yes"}},
         {"native": {"margin": 1}},
         {"native": {"max_impact": -0.1}},
-        {"native": {"poll": 0}},
+        {"native": {"requote": 0}},
         {"native": {"router": "nope"}},
         {"native": {"routes": {TOKEN_A: {"path": [TOKEN_A], "params": []}}}},
         {"native": {"min_pool_usd": -1}},

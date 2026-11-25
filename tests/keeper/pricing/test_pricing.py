@@ -116,33 +116,32 @@ class Source:
 def test_pricer_priority_fallback_and_cache(sell_token, want):
     clock = [100.0]
     first, second = Source("first", None), Source("second", 42)
-    pricer = MarketPricer([first, second], cache_ttl=60, cross_check=0, clock=lambda: clock[0])
+    pricer = MarketPricer([first, second], clock=lambda: clock[0])
     lot = make_lot(sell_token.address, want.address, 10**18)
 
-    quote = pricer.market(lot)
+    quote = pricer.refresh(lot)
     assert quote is not None and (quote.want_amount, quote.source) == (42, "second")
     assert (first.calls, second.calls) == (1, 1)
 
-    # Cached for the TTL, re-asked after it; a different amount is a different lot.
-    assert pricer.market(lot) is quote
-    assert pricer.market(make_lot(sell_token.address, want.address, 2 * 10**18)) is not quote
+    # Kept until asked for again; another amount of the token is the same
+    # estimate pro rata, with nobody asked.
     clock[0] += 61
-    assert pricer.market(lot) is not quote
-    assert (first.calls, second.calls) == (3, 3)
+    assert pricer.cached(lot.auction, lot.token, lot.available) is quote
+    assert pricer.age(lot.auction, lot.token) == 61
+    double = pricer.cached(lot.auction, lot.token, 2 * 10**18)
+    assert (double.want_amount, double.amount) == (84, 2 * 10**18)
+    assert (first.calls, second.calls) == (1, 1)
 
-    # The first source wins when it answers; a failing source is skipped.
+    # Both answer: both are levels, the highest is the estimate; a failing source is skipped.
     first.answer = 7
-    clock[0] += 61
-    assert pricer.market(lot).want_amount == 7
+    assert pricer.refresh(lot).levels == (("second", 42), ("first", 7))
     first.answer = RuntimeError("feed down")
-    clock[0] += 61
-    assert pricer.market(lot).want_amount == 42
+    assert pricer.refresh(lot).want_amount == 42
 
     # No answer anywhere: no market (and nothing stale left in the cache).
     second.answer = None
-    clock[0] += 61
-    assert pricer.market(lot) is None
-    assert pricer.market(lot) is None
+    assert pricer.refresh(lot) is None
+    assert pricer.cached(lot.auction, lot.token, lot.available) is None
 
 
 def test_llama_source_reads_prices_and_skips_low_confidence(client, http, sell_token, want):
@@ -286,33 +285,27 @@ def test_build_sources_follows_the_configured_priority(client, network_config, m
     assert build_sources(network_config(), client) == []
 
 
-def test_pricer_cross_checks_the_winner_against_the_next_source(sell_token, want, caplog):
+def test_pricer_asks_every_source_and_keeps_every_answer(sell_token, want):
     clock = [100.0]
-    curve, cow, third = Source("curve", 100), Source("cow", 130), Source("third", 1)
-    pricer = MarketPricer(
-        [curve, cow, third], cache_ttl=60, cross_check=0.5, clock=lambda: clock[0]
-    )
+    curve, cow, third = Source("curve", 100), Source("cow", 130), Source("third", None)
+    pricer = MarketPricer([curve, cow, third], clock=lambda: clock[0])
     lot = make_lot(sell_token.address, want.address, 10**18)
 
-    # Within tolerance: the first source wins; the third is never asked.
-    quote = pricer.market(lot)
-    assert (quote.want_amount, quote.source) == (100, "curve")
-    assert (curve.calls, cow.calls, third.calls) == (1, 1, 0)
+    # The source with no price was asked and adds no level.
+    quote = pricer.refresh(lot)
+    assert (quote.want_amount, quote.source) == (130, "cow")
+    assert quote.levels == (("cow", 130), ("curve", 100))
+    assert (curve.calls, cow.calls, third.calls) == (1, 1, 1)
 
-    # A disagreement (one feed misprices the token, no telling which): every
-    # source is asked and believed, the market spans lowest to highest.
-    curve.answer = 5
-    clock[0] += 61
-    with caplog.at_level("WARNING"):
-        quote = pricer.market(lot)
-    assert (quote.want_amount, quote.source, quote.low) == (130, "cow", 1)
-    assert "curve: 5, cow: 130, third: 1" in caplog.text
-    assert pricer.market(lot) is quote  # cached like any estimate
-    assert (curve.calls, cow.calls, third.calls) == (2, 2, 1)
+    # Far apart: still every answer, none replaces another.
+    curve.answer, third.answer = 5, 1
+    quote = pricer.refresh(lot)
+    assert quote.levels == (("cow", 130), ("curve", 5), ("third", 1))
+    assert pricer.cached(lot.auction, lot.token, lot.available) is quote  # kept like any estimate
 
-    # Only one source has a price: nothing to check against, it wins.
+    # Only one source has a price: nothing contradicts it.
     cow.answer = None
     third.answer = None
-    clock[0] += 61
-    assert pricer.market(lot).want_amount == 5
-    assert third.calls == 2
+    curve.answer = 120
+    quote = pricer.refresh(lot)
+    assert quote.levels == (("curve", 120),)

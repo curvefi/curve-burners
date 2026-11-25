@@ -9,11 +9,10 @@ from keepers.auction_keeper.chain.boa_client import BoaClient
 from keepers.auction_keeper.chain.contracts import Auction
 from keepers.auction_keeper.config import NativeSettings, PricingSettings, TokenFilter
 from keepers.auction_keeper.core.keeper import NetworkKeeper
-from keepers.auction_keeper.core.schedule import band_entry
 from keepers.auction_keeper.pricing import CurveRouterSource, build_sources
 from keepers.auction_keeper.rails.native import BestRouter, NativeTaker, Routed
 from keepers.auction_keeper.routing.curve_router import CurveRouter, PoolCatalog
-from tests.keeper.conftest import LOT_AMOUNT
+from tests.keeper.conftest import LOT_AMOUNT, band_entry
 
 WAD = 10**18
 RATE = WAD // 10  # 0.1 want per sell token
@@ -115,16 +114,18 @@ def test_take_when_the_curve_crosses_the_route_quote(
     # Just above the band: the loop tightens its poll.
     dy = LOT_AMOUNT * RATE // WAD
     view = auction.lot_view(sell_token.address)
-    travel_to(band_entry(auction, view, int(dy * 1.15), view.timestamp, view.end))
+    travel_to(band_entry(auction, view, int(dy * 1.04)))
     (outcome,) = keeper.cycle()
-    assert outcome.action == "waiting" and keeper.wait_seconds(0) == config.native.poll
+    # Near the route: the loop wakes for the lot's next price step (here a
+    # whole step away, which is longer than the poll interval).
+    assert outcome.action == "waiting"
+    assert keeper._next_step == boa.env.evm.patch.timestamp + 60
+    assert keeper.wait_seconds(0) == config.poll_interval
 
     # Under the route quote by the margin: taken, the auction paid from the
     # swap, the profit to the keeper, the lot gone.
     view = auction.lot_view(sell_token.address)
-    travel_to(
-        band_entry(auction, view, int(dy * (1 - config.native.margin)), view.timestamp, view.end)
-    )
+    travel_to(band_entry(auction, view, int(dy * (1 - config.native.margin))))
     (outcome,) = keeper.cycle()
     assert outcome.action == "taken", outcome.detail
     payment = int(outcome.detail.split("payment=")[1].split()[0])
@@ -132,8 +133,7 @@ def test_take_when_the_curve_crosses_the_route_quote(
     assert want.balanceOf(keeper_account) == dy - payment > 0
     assert sell_token.balanceOf(router_mock.address) == LOT_AMOUNT
     assert harness.available(sell_token.address) == 0
-    (outcome,) = keeper.cycle()
-    assert outcome.action == "skipped" and outcome.detail == "inactive lot"
+    assert keeper.cycle() == []  # sold: not ranked any more
 
 
 def test_thin_pool_is_taken_in_chunks(
@@ -151,7 +151,7 @@ def test_thin_pool_is_taken_in_chunks(
     assert LOT_AMOUNT * 0.005 < quote.amount < LOT_AMOUNT * 0.02
 
     view = auction.lot_view(sell_token.address)
-    travel_to(band_entry(auction, view, 1, view.timestamp, view.end) - 7200)
+    travel_to(band_entry(auction, view, 1) - 7200)
     (outcome,) = keeper.cycle()
     assert outcome.action == "taken", outcome.detail
     assert 0 < harness.available(sell_token.address) <= LOT_AMOUNT - quote.amount
@@ -170,7 +170,7 @@ def test_offline_and_dry_run_only_simulate(
     router_mock.set_pair(sell_token.address, want.address, RATE, 0)
     auction = Auction(client, harness.address)
     view = auction.lot_view(sell_token.address)
-    travel_to(band_entry(auction, view, 1, view.timestamp, view.end) - 7200)
+    travel_to(band_entry(auction, view, 1) - 7200)
 
     offline = keeper_with(
         native_config().__class__(**{**native_config().__dict__, "mode": "offline"}),
@@ -295,26 +295,18 @@ def test_lots_are_quoted_in_parallel_and_one_failure_spares_the_rest(
 
     keeper = keeper_with(native_config(), client, state, router, taker)
     barrier = threading.Barrier(3, timeout=10)
-    lot = SimpleNamespace(token="0xA", active=True)
-    gone = SimpleNamespace(token="0xD", active=False)
+    lots = [SimpleNamespace(token=name, timestamp=0) for name in ("0xA", "0xB", "0xbad", "0xC")]
+    book = SimpleNamespace(auction=None, curve=object(), lots={lot.token: None for lot in lots})
 
-    class Reader:
-        def lot_view(self, token):
-            if token == "0xbad":
-                raise RuntimeError("rpc down")
-            return lot
-
-    def try_quote(auction, lot):
+    def try_quote(auction, lot, ask):
+        if lot.token == "0xbad":
+            raise RuntimeError("router down")
         barrier.wait()  # passes only when three quotes run at once
         return ("quote", threading.current_thread().name)
 
     keeper.native.try_quote = try_quote
     keeper.client.concurrent = True
-    reader = Reader()
-    answers = keeper._quote_all(
-        [(reader, lot), (reader, "0xread"), (reader, "0xbad"), (reader, gone), (reader, lot)]
-    )
-    assert [a[0] for a in answers] == [lot, lot, None, gone, lot]
-    assert answers[2] == (None, None) and answers[3] == (gone, None)
-    threads = {a[1][1] for a in answers if a[1]}
+    answers = keeper._quote_all(book, lots)
+    assert [a and a[0] for a in answers] == ["quote", "quote", None, "quote"]
+    threads = {a[1] for a in answers if a}
     assert len(threads) == 3 and all(name.startswith("quote") for name in threads)

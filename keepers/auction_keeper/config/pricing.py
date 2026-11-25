@@ -8,7 +8,12 @@ import os
 from dataclasses import dataclass, field
 from typing import Any
 
-from keepers.auction_keeper.config.common import ConfigError, fraction, positive_int
+from keepers.auction_keeper.config.common import (
+    ConfigError,
+    fraction,
+    non_negative,
+    positive_int,
+)
 
 PRICE_SOURCES = (
     "curve",
@@ -23,19 +28,22 @@ PRICE_SOURCES = (
 )
 DEFAULT_PRICE_SOURCES = ("curve", "llama", "cow")
 DEFAULT_PRICE_CACHE = 60
-DEFAULT_PRICE_CROSS_CHECK = 0.25
+DEFAULT_PRICE_CACHE_FAR = 3600
 
 
 @dataclass(frozen=True)
 class PricingSettings:
-    """Market estimate sources in priority order (``keepers.auction_keeper.pricing``)."""
+    """Market estimate sources (``keepers.auction_keeper.pricing``): all are
+    asked, each answer is a price level the schedule posts densely around."""
 
     sources: tuple[str, ...] = DEFAULT_PRICE_SOURCES
+    # Seconds an estimate is reused for a lot near its market, and for one
+    # far from it (never longer than half the time the curve needs to get near).
     cache: int = DEFAULT_PRICE_CACHE
-    # Largest relative disagreement tolerated between the winning source and
-    # the next one with a price; beyond it every source is asked and the
-    # market is the span of their answers. 0 disables.
-    cross_check: float = DEFAULT_PRICE_CROSS_CHECK
+    cache_far: int = DEFAULT_PRICE_CACHE_FAR
+    # Seconds a cycle may spend refreshing estimates, and lots asked at once.
+    budget: float = 5.0
+    workers: int = 4
     # Chain slug per source (curve, llama, coingecko, kyber); defaults by chain id.
     chains: dict[str, str] = field(default_factory=dict)
     # CoinGecko: a demo key with the public API, or a pro key with the pro-api URL.
@@ -57,10 +65,17 @@ class PricingSettings:
 class TtlSettings:
     """Order validity by distance from the market (``keepers.auction_keeper.core.schedule``)."""
 
-    near_above: float = 0.2
-    near_below: float = 0.1
+    # The dense band around each source's price. The curve falls about a
+    # third of a percent per step, so 5% over and 3% under a price is some
+    # 25 steps (a quarter of an hour) of dense orders per price.
+    near_above: float = 0.05
+    near_below: float = 0.03
     min_ttl: int = 60
     max_ttl: int = 7200
+    # Inside the band, replace an order as soon as the curve steps below its
+    # limit instead of when it expires (two orders of a lot are then open at
+    # once for up to `min`).
+    every_step: bool = False
 
 
 def parse_pricing(raw: Any, name: str, default: PricingSettings) -> PricingSettings:
@@ -71,7 +86,9 @@ def parse_pricing(raw: Any, name: str, default: PricingSettings) -> PricingSetti
     unknown = set(raw) - {
         "sources",
         "cache",
-        "cross_check",
+        "cache_far",
+        "budget",
+        "workers",
         "chains",
         "coingecko_api_key_env",
         "coingecko_url",
@@ -110,17 +127,14 @@ def parse_pricing(raw: Any, name: str, default: PricingSettings) -> PricingSetti
     url = raw.get("coingecko_url", default.coingecko_url)
     if not isinstance(url, str) or not url:
         raise ConfigError(f"{name}.coingecko_url must be a URL")
-    cross_check = raw.get("cross_check", default.cross_check)
-    if (
-        isinstance(cross_check, bool)
-        or not isinstance(cross_check, int | float)
-        or not 0 <= cross_check < 1
-    ):
-        raise ConfigError(f"{name}.cross_check must be a fraction in [0, 1)")
+    cache = positive_int(raw.get("cache"), f"{name}.cache", default.cache)
+    cache_far = positive_int(raw.get("cache_far"), f"{name}.cache_far", default.cache_far)
     return PricingSettings(
         sources=sources,
-        cache=positive_int(raw.get("cache"), f"{name}.cache", default.cache),
-        cross_check=float(cross_check),
+        cache=cache,
+        cache_far=max(cache, cache_far),
+        budget=non_negative(raw.get("budget"), f"{name}.budget", default.budget),
+        workers=positive_int(raw.get("workers"), f"{name}.workers", default.workers),
         chains=chains,
         coingecko_url=url,
         **key_envs,
@@ -132,15 +146,18 @@ def parse_ttl(raw: Any, name: str, default: TtlSettings) -> TtlSettings:
         return default
     if not isinstance(raw, dict):
         raise ConfigError(f"{name} must be a mapping")
-    unknown = set(raw) - {"near_above", "near_below", "min", "max"}
+    unknown = set(raw) - {"near_above", "near_below", "min", "max", "every_step"}
     if unknown:
         raise ConfigError(f"{name}: unknown setting(s) {sorted(unknown)}")
-
+    every_step = raw.get("every_step", default.every_step)
+    if not isinstance(every_step, bool):
+        raise ConfigError(f"{name}.every_step must be a boolean")
     settings = TtlSettings(
         near_above=fraction(raw.get("near_above"), f"{name}.near_above", default.near_above),
         near_below=fraction(raw.get("near_below"), f"{name}.near_below", default.near_below),
         min_ttl=positive_int(raw.get("min"), f"{name}.min", default.min_ttl),
         max_ttl=positive_int(raw.get("max"), f"{name}.max", default.max_ttl),
+        every_step=every_step,
     )
     if settings.min_ttl > settings.max_ttl:
         raise ConfigError(f"{name}: min must not exceed max")
@@ -149,7 +166,7 @@ def parse_ttl(raw: Any, name: str, default: TtlSettings) -> TtlSettings:
 
 __all__ = [
     "DEFAULT_PRICE_CACHE",
-    "DEFAULT_PRICE_CROSS_CHECK",
+    "DEFAULT_PRICE_CACHE_FAR",
     "DEFAULT_PRICE_SOURCES",
     "PRICE_SOURCES",
     "PricingSettings",

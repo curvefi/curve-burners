@@ -14,7 +14,7 @@ from eth.exceptions import Revert
 from eth_utils import keccak, to_checksum_address
 
 from keepers.auction_keeper.chain.abi import CallReverted
-from keepers.auction_keeper.chain.client import Block, Log, TxResult
+from keepers.auction_keeper.chain.client import Block, Log, PriorityFee, TxResult
 
 
 class BoaClient:
@@ -31,11 +31,19 @@ class BoaClient:
     def sender(self) -> str | None:
         return self._sender
 
-    def call(self, to: str, data: bytes, *, sender: str | None = None) -> bytes:
+    def call(
+        self, to: str, data: bytes, *, sender: str | None = None, at: int | None = None
+    ) -> bytes:
+        patch = boa.env.evm.patch
+        now = patch.timestamp
+        if at is not None:
+            patch.timestamp = at  # the next block's clock, for this call only
         try:
             result = boa.env.raw_call(to, sender=sender or self._sender, data=data, simulate=True)
         except Revert as exc:
             raise CallReverted(exc.args[0] if exc.args else b"") from exc
+        finally:
+            patch.timestamp = now
         return bytes(result.output)
 
     def latest_block(self) -> Block:
@@ -52,7 +60,16 @@ class BoaClient:
             and all(t is None or entry.topics[i] == t for i, t in enumerate(topics))
         ]
 
-    def send(self, to: str, data: bytes, *, value: int = 0) -> TxResult:
+    def send(
+        self,
+        to: str,
+        data: bytes,
+        *,
+        value: int = 0,
+        at: int | None = None,
+        receipt_timeout: float | None = None,
+        priority_fee: PriorityFee | None = None,
+    ) -> TxResult:
         if self._sender is None:
             raise RuntimeError("read-only client")
         self.sent.append((to_checksum_address(to), data))

@@ -1,7 +1,9 @@
-"""Persisted keeper state: published orders and the token-discovery scan cursor.
+"""Persisted keeper state: published orders, the lot books and the price cache.
 
-A lost state file costs one extra publish per lot at most: orderbooks
-deduplicate identical orders, and a repost at a fresh quote is always valid.
+A lost state file costs one extra publish per lot at most (orderbooks
+deduplicate identical orders, and a repost at a fresh quote is always
+valid), one scan of the auction's logs from ``start_block`` and one round of
+price lookups.
 """
 
 from __future__ import annotations
@@ -27,6 +29,8 @@ class OrderRecord:
     # Window start of the lot the order was built for: a restaged lot (new
     # window) invalidates the record even if the order has not expired.
     lot_start: int
+    # The schedule zone the order was posted in ("": not recorded).
+    zone: str = ""
 
 
 _RECORD_FIELDS = {f.name for f in fields(OrderRecord)}
@@ -44,8 +48,10 @@ class KeeperState:
     def __init__(self, path: Path | None = None):
         self.path = Path(path) if path is not None else None
         self._orders: dict[str, dict[str, Any]] = {}
-        self._cursors: dict[str, int] = {}
-        self._tokens: dict[str, list[str]] = {}
+        # Per "network:auction": the AuctionBook dump (lot records, log cursor).
+        self._books: dict[str, dict[str, Any]] = {}
+        # Per network: the MarketPricer dump.
+        self._prices: dict[str, dict[str, Any]] = {}
         self._lock = threading.RLock()
         if self.path is not None and self.path.exists():
             self._load()
@@ -73,6 +79,26 @@ class KeeperState:
             if self._orders.pop(self._key(network, auction, adapter, token), None) is not None:
                 self.save()
 
+    def adapter_orders(self, network: str, auction: str, adapter: str) -> dict[str, OrderRecord]:
+        """The recorded orders of one adapter by (lowercase) lot token."""
+        prefix = f"{network}:{auction.lower()}:{adapter.lower()}:"
+        with self._lock:
+            return {
+                key[len(prefix) :]: _record(raw)
+                for key, raw in self._orders.items()
+                if key.startswith(prefix)
+            }
+
+    def drop_orders(self, network: str, auction: str, adapter: str, tokens: list[str]) -> None:
+        """Forget the adapter's records of ``tokens`` (one write of the file)."""
+        with self._lock:
+            dropped = [
+                self._orders.pop(self._key(network, auction, adapter, token), None)
+                for token in tokens
+            ]
+            if any(raw is not None for raw in dropped):
+                self.save()
+
     def orders(self) -> dict[str, OrderRecord]:
         with self._lock:
             return {key: _record(raw) for key, raw in self._orders.items()}
@@ -87,22 +113,24 @@ class KeeperState:
                 if key.startswith(prefix) and raw["valid_to"] > now
             ]
 
-    # Token discovery
+    # The local model's books and the price cache: set in memory, written by
+    # the keeper's one ``save`` per cycle.
 
-    def scan_cursor(self, network: str, auction: str) -> int | None:
+    def book(self, network: str, auction: str) -> dict[str, Any] | None:
         with self._lock:
-            return self._cursors.get(f"{network}:{auction.lower()}")
+            return self._books.get(f"{network}:{auction.lower()}")
 
-    def known_tokens(self, network: str, auction: str) -> set[str]:
+    def set_book(self, network: str, auction: str, book: dict[str, Any]) -> None:
         with self._lock:
-            return set(self._tokens.get(f"{network}:{auction.lower()}", []))
+            self._books[f"{network}:{auction.lower()}"] = book
 
-    def record_scan(self, network: str, auction: str, to_block: int, tokens: set[str]) -> None:
-        key = f"{network}:{auction.lower()}"
+    def prices(self, network: str) -> dict[str, Any]:
         with self._lock:
-            self._cursors[key] = to_block
-            self._tokens[key] = sorted(self.known_tokens(network, auction) | tokens)
-            self.save()
+            return dict(self._prices.get(network, {}))
+
+    def set_prices(self, network: str, prices: dict[str, Any]) -> None:
+        with self._lock:
+            self._prices[network] = prices
 
     # Persistence
 
@@ -114,14 +142,18 @@ class KeeperState:
             log.warning("state file %s unreadable (%s); starting empty", self.path, exc)
             return
         self._orders = dict(raw.get("orders", {}))
-        self._cursors = dict(raw.get("cursors", {}))
-        self._tokens = dict(raw.get("tokens", {}))
+        self._books = dict(raw.get("books", {}))
+        self._prices = dict(raw.get("prices", {}))
 
     def save(self) -> None:
         if self.path is None:
             return
         with self._lock:
-            payload = {"orders": self._orders, "cursors": self._cursors, "tokens": self._tokens}
+            payload = {
+                "orders": self._orders,
+                "books": self._books,
+                "prices": self._prices,
+            }
             tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-            tmp.write_text(json.dumps(payload, indent=2, sort_keys=True))
+            tmp.write_text(json.dumps(payload, indent=1, sort_keys=True))
             os.replace(tmp, self.path)

@@ -17,7 +17,6 @@ from keepers.auction_keeper.config import (
     TokenFilter,
 )
 from keepers.auction_keeper.core.keeper import NetworkKeeper
-from keepers.auction_keeper.core.schedule import band_entry
 from keepers.auction_keeper.execute import curve_router_exchange
 from keepers.auction_keeper.pricing import ElectricRouterSource, build_sources
 from keepers.auction_keeper.rails.native import NativeTaker, router_for
@@ -27,7 +26,7 @@ from keepers.auction_keeper.routing.electric_router import (
     ElectricRouterError,
     electric_router_for,
 )
-from tests.keeper.conftest import LOT_AMOUNT
+from tests.keeper.conftest import LOT_AMOUNT, band_entry
 
 WAD = 10**18
 RATE = WAD // 10  # 0.1 want per sell token
@@ -345,7 +344,7 @@ def test_take_through_the_electric_router(
     dy = LOT_AMOUNT * RATE // WAD
     view = auction.lot_view(sell_token.address)
     margin = native_config.native.margin
-    travel_to(band_entry(auction, view, int(dy * (1 - margin)), view.timestamp, view.end))
+    travel_to(band_entry(auction, view, int(dy * (1 - margin))))
     (outcome,) = keeper.cycle()
     assert outcome.action == "taken", outcome.detail
     payment = int(outcome.detail.split("payment=")[1].split()[0])
@@ -368,7 +367,7 @@ def test_a_route_that_underpays_fails_in_simulation(
     auction = Auction(client, harness.address)
     dy = LOT_AMOUNT * RATE // WAD
     view = auction.lot_view(sell_token.address)
-    travel_to(band_entry(auction, view, int(dy * 0.99), view.timestamp, view.end))
+    travel_to(band_entry(auction, view, int(dy * 0.99)))
     router_mock.set_pair(sell_token.address, want.address, RATE // 10, 0)
 
     (outcome,) = keeper.cycle()

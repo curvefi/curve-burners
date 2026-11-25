@@ -3,15 +3,13 @@
 import boa
 import pytest
 
-from keepers.auction_keeper.chain.abi import address_word
 from keepers.auction_keeper.chain.boa_client import BoaClient
-from keepers.auction_keeper.chain.client import Log
-from keepers.auction_keeper.chain.contracts import LOT_STAGED_TOPIC, Auction, Erc20, LotView
+from keepers.auction_keeper.chain.contracts import Auction, Erc20, LotView
 from keepers.auction_keeper.config import TokenFilter
 from keepers.auction_keeper.core.keeper import NetworkKeeper, needs_publish
 from keepers.auction_keeper.core.state import KeeperState, OrderRecord
-from keepers.auction_keeper.pricing import MarketQuote
-from tests.keeper.conftest import DOMAIN_SEPARATOR, FakeOrderbook
+from keepers.auction_keeper.pricing import MarketPricer
+from tests.keeper.conftest import DOMAIN_SEPARATOR, FakeOrderbook, staged_log
 
 
 def factory(orderbook):
@@ -41,15 +39,24 @@ def keeper_for(client, state, orderbook):
     return _make
 
 
-class FakePricer:
-    """Market per token (want for the whole lot); None or missing: no market."""
+class FakeSource:
+    name = "fake"
 
     def __init__(self, markets):
         self.markets = {token.lower(): amount for token, amount in markets.items()}
+        self.asked = 0
 
-    def market(self, lot):
-        amount = self.markets.get(lot.token.lower())
-        return MarketQuote(amount, "fake", 0.0) if amount else None
+    def quote(self, lot):
+        self.asked += 1
+        return self.markets.get(lot.token.lower())
+
+
+class FakePricer(MarketPricer):
+    """Market per token (want for the whole lot); None or missing: no market."""
+
+    def __init__(self, markets):
+        self.source = FakeSource(markets)
+        super().__init__([self.source])
 
 
 def actions(outcomes):
@@ -140,36 +147,27 @@ def test_blacklist_and_inactive_lots(
 def test_tokens_discovered_from_lot_staged_logs(
     keeper_for, client, network_config, orderbook, sell_token, harness, lot, state
 ):
-    client.logs.append(
-        Log(
-            address=harness.address,
-            topics=(LOT_STAGED_TOPIC, address_word(sell_token.address)),
-            data=b"",
-            block_number=5,
-        )
-    )
+    client.logs.append(staged_log(harness, sell_token, 5))
     config = network_config(start_block=1, log_chunk=2)
     keeper = keeper_for(config)
     assert actions(keeper.cycle()) == [(sell_token.address, "posted")]
-    assert state.known_tokens("boa", harness.address) == {sell_token.address}
-    assert state.scan_cursor("boa", harness.address) == client.latest_block().number
+    book = keeper.books[harness.address]
+    assert set(book.lots) == {sell_token.address}
+    assert book.cursor == client.latest_block().number
+    # The book is in the state file's section, for the next start.
+    assert state.book("boa", harness.address)["cursor"] == book.cursor
 
-    # The scan cursor moves on; the token stays known without rescanning.
+    # The scan cursor moves on; the lot stays known without rescanning.
     client.logs.clear()
     assert actions(keeper.cycle()) == [(sell_token.address, "kept")]
+    restarted = keeper_for(config)
+    assert set(restarted.books[harness.address].lots) == {sell_token.address}
 
 
 def test_without_start_block_only_future_lots_are_discovered(
     keeper_for, client, network_config, sell_token, harness, lot
 ):
-    client.logs.append(
-        Log(
-            address=harness.address,
-            topics=(LOT_STAGED_TOPIC, address_word(sell_token.address)),
-            data=b"",
-            block_number=client.latest_block().number - 1,
-        )
-    )
+    client.logs.append(staged_log(harness, sell_token, client.latest_block().number - 1))
     keeper = keeper_for(network_config())
     assert keeper.cycle() == []
 
@@ -219,12 +217,11 @@ def test_state_round_trips_through_disk(tmp_path):
         uid="0xabc", valid_to=10, sell_amount=1, buy_amount=2, posted_at=3, lot_start=4
     )
     state.set_order("net", "0xA", "0xB", "0xC", record)
-    state.record_scan("net", "0xA", 99, {"0xC"})
+    state.set_book("net", "0xA", {"cursor": 99, "fence": 0, "lots": {}})
+    state.save()
     reloaded = KeeperState(path)
     assert reloaded.order("net", "0xa", "0xb", "0xc") == record
-    assert reloaded.scan_cursor("net", "0xA") == 99 and reloaded.known_tokens("net", "0xA") == {
-        "0xC"
-    }
+    assert reloaded.book("net", "0xa") == {"cursor": 99, "fence": 0, "lots": {}}
 
 
 def test_needs_publish_policy():
@@ -279,7 +276,8 @@ def test_order_validity_follows_the_schedule(
     assert actions(keeper.cycle()) == [(sell_token.address, "posted")]
     now = auction.lot_view(sell_token.address).timestamp
     assert orderbook.posted[-1]["validTo"] == now + config.ttl.min_ttl
-    plan = keeper.plan_for(auction, auction.lot_view(sell_token.address))
+    book = keeper.books[harness.address]
+    plan = keeper.plan_for(book, auction.lot_view(sell_token.address))
     assert plan.zone == "near" and plan.market == needed
 
     # Far above the market: one order until the curve is due to enter the band.
@@ -287,7 +285,8 @@ def test_order_validity_follows_the_schedule(
         config, pricer=FakePricer({sell_token.address: needed // 20}), state_=KeeperState(None)
     )
     assert actions(keeper.cycle()) == [(sell_token.address, "posted")]
-    plan = keeper.plan_for(auction, auction.lot_view(sell_token.address))
+    book = keeper.books[harness.address]
+    plan = keeper.plan_for(book, auction.lot_view(sell_token.address))
     assert plan.zone == "far" and plan.band_entry is not None
     # Hours away: the validity is the schedule's cap, well past the uniform TTL.
     assert orderbook.posted[-1]["validTo"] == plan.valid_to == now + config.ttl.max_ttl
@@ -332,23 +331,17 @@ def test_dust_is_left_alone_until_the_lot_changes(
     unit = 10 ** Erc20(client, want).decimals()
     threshold = int(config.dust * unit)
 
-    class CountingPricer(FakePricer):
-        asked = 0
-
-        def market(self, lot):
-            self.asked += 1
-            return super().market(lot)
-
-    # Under the threshold: nothing is posted, and the lot is not priced again.
-    pricer = CountingPricer({sell_token.address: threshold - 1})
+    # Under the threshold: the lot is not even ranked, and not priced again.
+    pricer = FakePricer({sell_token.address: threshold - 1})
     keeper = keeper_for(config, pricer=pricer)
     for _ in range(2):
-        (outcome,) = keeper.cycle()
-        assert (outcome.action, outcome.detail) == ("skipped", "dust")
-    assert pricer.asked == 1 and not orderbook.posted
+        assert keeper.cycle() == []
+    assert pricer.source.asked == 1 and not orderbook.posted
 
     # A small amount is not dust; neither is a lot with no market estimate.
-    keeper = keeper_for(config, pricer=FakePricer({sell_token.address: threshold}))
+    keeper = keeper_for(
+        config, pricer=FakePricer({sell_token.address: threshold}), state_=KeeperState(None)
+    )
     assert actions(keeper.cycle()) == [(sell_token.address, "posted")]
     keeper = keeper_for(config, pricer=FakePricer({}), state_=KeeperState(None))
     assert actions(keeper.cycle()) == [(sell_token.address, "posted")]

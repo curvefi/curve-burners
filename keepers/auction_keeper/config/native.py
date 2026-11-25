@@ -63,8 +63,23 @@ class NativeSettings:
     margin: float = 0.005
     # Chunk the take so the route's price impact stays under this fraction.
     max_impact: float = 0.01
-    # Seconds between polls while a lot's quote is within the band above the route.
-    poll: int = 30
+    # Seconds between route quotes of a lot whose ask is still above the band
+    # over its last route quote; inside the band it is quoted every cycle.
+    requote: int = 300
+    # Seconds to wait for a take's receipt before reporting it not included.
+    receipt_timeout: int = 60
+    # Want tokens a take must earn after its gas (gas x (base fee + tip), at
+    # the native token's price). A take that earns less waits for the curve.
+    min_profit: float = 0.0
+    # Every take buys its own gas back: its gas cost in want is swapped to
+    # the native token and paid to the sending account in the same
+    # transaction, where the route has room for it.
+    gas_refill: bool = True
+    # A sending account that holds less than ``refill_below`` native tokens
+    # also gets ``refill_amount`` native tokens' worth of a take's profit
+    # the same way (0: never).
+    refill_below: float = 0.0
+    refill_amount: float = 0.0
     # Pools below this TVL (USD) are not routed through; hops per route (the
     # router takes five at most).
     min_pool_usd: float = 1000.0
@@ -86,6 +101,14 @@ def _number(value: Any, name: str, default: float | None) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
         raise ConfigError(f"{name} must be a non-negative number")
     return float(value)
+
+
+def _boolean(value: Any, name: str, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ConfigError(f"{name} must be a boolean")
+    return value
 
 
 def parse_electric(raw: Any, name: str, default: ElectricSettings) -> ElectricSettings:
@@ -164,6 +187,9 @@ def parse_native(raw: Any, name: str, default: NativeSettings) -> NativeSettings
                 routes[token] = route_from_config(route)
             except (KeyError, TypeError, ValueError) as exc:
                 raise ConfigError(f"{name}.routes[{token}]: {exc}") from exc
+    refill = [raw.get(key, getattr(default, key)) for key in ("refill_below", "refill_amount")]
+    if bool(refill[0]) != bool(refill[1]):
+        raise ConfigError(f"{name}: refill_below and refill_amount go together")
     return NativeSettings(
         enabled=enabled,
         backends=tuple(backends),
@@ -172,7 +198,16 @@ def parse_native(raw: Any, name: str, default: NativeSettings) -> NativeSettings
         router=router,
         margin=fraction(raw.get("margin"), f"{name}.margin", default.margin),
         max_impact=fraction(raw.get("max_impact"), f"{name}.max_impact", default.max_impact),
-        poll=positive_int(raw.get("poll"), f"{name}.poll", default.poll),
+        requote=positive_int(raw.get("requote"), f"{name}.requote", default.requote),
+        receipt_timeout=positive_int(
+            raw.get("receipt_timeout"), f"{name}.receipt_timeout", default.receipt_timeout
+        ),
+        gas_refill=_boolean(raw.get("gas_refill"), f"{name}.gas_refill", default.gas_refill),
+        min_profit=_number(raw.get("min_profit"), f"{name}.min_profit", default.min_profit),
+        refill_below=_number(raw.get("refill_below"), f"{name}.refill_below", default.refill_below),
+        refill_amount=_number(
+            raw.get("refill_amount"), f"{name}.refill_amount", default.refill_amount
+        ),
         min_pool_usd=float(min_pool_usd),
         max_hops=positive_int(raw.get("max_hops"), f"{name}.max_hops", default.max_hops),
         api_url=non_empty_string(raw.get("api_url"), f"{name}.api_url", default.api_url) or "",

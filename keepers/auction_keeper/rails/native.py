@@ -14,7 +14,8 @@ electric router, which solves splits over the whole pool graph off-chain
 lot is quoted on all of them at once and swapped through the one that pays
 more, so a lot one cannot route, or a router that is down, costs nothing.
 
-Each cycle, per live lot, the taker
+Per lot the keeper hands it (the lots in focus that are due for a route
+quote, ``core.keeper``), the taker
 
 1. finds the best router route for the whole available amount;
 2. shrinks the take to the largest chunk whose price impact on that route
@@ -22,31 +23,55 @@ Each cycle, per live lot, the taker
    arbitrage refills it between pieces, so the lot clears nearer the price
    of a deep market than a single dump would;
 3. takes the chunk when the auction's quote for it is at least
-   ``native.margin`` under the route's quote, simulating the call first.
+   ``native.margin`` under the route's quote and what it earns covers its
+   gas: the take's gas is estimated, priced at the base fee plus the tip it
+   would pay and converted to want at the native token's price, and a take
+   that earns less than that plus ``native.min_profit`` waits for the curve
+   to fall further. The same floor goes into the transaction
+   (``_min_profit``), so a route that pays less on chain than it quoted
+   reverts instead of losing money;
+4. buys its gas back in the same transaction (``native.gas_refill``): two
+   more route steps swap the take's gas cost in want to the native token,
+   paid to the sending account, so the accounts' gas money stays level and
+   the profit arrives in want, net of gas. An account that is short of gas
+   (``native.refill_below``) gets ``native.refill_amount`` on top. The take
+   never depends on it: with no route to the native token, no room for the
+   steps, or a refill that would fail or cost the take its profit, the take
+   goes without.
 
-The keeper polls faster (``native.poll``) while a lot's quote is within
-the schedule's band above the route quote.
+The auction's quote comes from the keeper's local model, priced for the
+block the take can land in; the simulation runs with that block's clock.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from eth_utils import to_checksum_address
 
 from keepers.auction_keeper.chain.abi import CallReverted
-from keepers.auction_keeper.chain.client import ChainClient
+from keepers.auction_keeper.chain.client import ChainClient, GasQuote, NotIncluded, PriorityFee
 from keepers.auction_keeper.chain.contracts import Auction, LotView
 from keepers.auction_keeper.config import NetworkConfig
-from keepers.auction_keeper.execute import Call, Executor, TakePlan
+from keepers.auction_keeper.execute import MAX_ROUTE_CALLS, Call, Executor, TakePlan
+from keepers.auction_keeper.routing.curve_router import ETH as NATIVE_TOKEN
 from keepers.auction_keeper.routing.curve_router import curve_router_for
 from keepers.auction_keeper.routing.electric_router import electric_router_for
 
 log = logging.getLogger(__name__)
+
+# The gas refill swap may pay this much less native token than its quote.
+REFILL_SLIPPAGE = 0.02
+# A refill smaller than this share of ``native.refill_amount`` is not worth its gas.
+REFILL_MIN_SHARE = 0.1
+# Seconds the last take's gas and base fee are trusted to turn down, with no
+# request, a take that earns less than half of what that gas would cost.
+GAS_MEMORY = 120.0
 
 
 class Router(Protocol):
@@ -191,10 +216,17 @@ class NativeTaker:
         self.router = router
         self.executor = Executor(client, taker=taker)
         self.profit_receiver = profit_receiver
+        # The last gas estimate of a take: (gas, base fee, monotonic time).
+        self._gas_seen: tuple[int, int, float] | None = None
 
     # Quotes
 
-    def quote(self, auction: Auction, lot: LotView) -> TakeQuote | None:
+    def quote(
+        self, auction: Auction, lot: LotView, ask: Callable[[int], int] | None = None
+    ) -> TakeQuote | None:
+        """The route quote for the lot's chunk. ``ask(amount)`` prices the
+        chunk on the auction's curve (the keeper's local model); without it
+        the auction is asked."""
         best = self.router.best_route(lot.token, lot.want, lot.available)
         if best is None:
             return None
@@ -203,16 +235,18 @@ class NativeTaker:
         if chunked is None:
             return None
         route, amount, dy, impact = chunked
-        payment = auction.get_amount_needed(lot.token, amount)
+        payment = ask(amount) if ask else auction.get_amount_needed(lot.token, amount)
         return TakeQuote(route, amount, dy, payment, impact)
 
     # Execution
 
-    def try_quote(self, auction: Auction, lot: LotView) -> TakeQuote | NativeResult:
+    def try_quote(
+        self, auction: Auction, lot: LotView, ask: Callable[[int], int] | None = None
+    ) -> TakeQuote | NativeResult:
         """The quote, or the result the lot ends with when there is none. Only
         reads, so the keeper calls it for several lots at once."""
         try:
-            quote = self.quote(auction, lot)
+            quote = self.quote(auction, lot, ask)
         except Exception as exc:  # noqa: BLE001 - a dead API or router must not stop the loop
             log.warning("%s: native quote failed: %s", lot.token, exc)
             return NativeResult("failed", f"quote: {exc}")
@@ -227,9 +261,23 @@ class NativeTaker:
         *,
         dry_run: bool,
         quoted: TakeQuote | NativeResult | None = None,
+        at: int | None = None,
+        priority_fee: Callable[[TakeQuote], PriorityFee] | None = None,
+        native_price: float | None = None,
+        want_unit: int = 10**18,
+        refill_to: str | None = None,
+        top_up: bool = False,
     ) -> NativeResult:
         """One try at the lot: take (or simulate) when the quote is under the
-        route. ``quoted`` is a ``try_quote`` answer made ahead for this lot."""
+        route and the take pays for its gas. ``quoted`` is a ``try_quote``
+        answer made ahead for this lot; ``at`` is the timestamp of the block
+        the take is meant for, which the quote's payment was priced at;
+        ``priority_fee(quote)`` sizes the take's tip from what it earns
+        (``core.fees``). ``native_price`` (want tokens per native token) and
+        ``want_unit`` (10**decimals of want) convert the gas to want: with no
+        price the gas is not counted. ``refill_to`` is the account the
+        take buys its gas back for (``native.gas_refill``); with ``top_up``
+        it is short of gas and gets ``native.refill_amount`` as well."""
         quote = quoted if quoted is not None else self.try_quote(auction, lot)
         if isinstance(quote, NativeResult):
             return quote
@@ -241,29 +289,153 @@ class NativeTaker:
         receiver = self.profit_receiver or self.settings.profit_receiver or sender
         if receiver is None:
             return NativeResult("failed", "no sender and no native.profit_receiver")
+        profit = quote.dy - quote.payment
+        floor = int(self.settings.min_profit * want_unit)
+
+        def in_want(wei: int) -> int:
+            return int(wei * (native_price or 0) * want_unit / 10**18)
+
+        seen = self._gas_seen
+        if native_price and seen is not None and time.monotonic() - seen[2] < GAS_MEMORY:
+            # Not worth an estimate: under half of what the last take's gas cost.
+            if profit < in_want(seen[0] * seen[1] // 2) + floor:
+                return NativeResult(
+                    "waiting", f"profit {profit} does not pay for gas; {quote}", near
+                )
+        route = self.router.swap_calls(
+            quote.route, quote.amount, quote.payment, self.executor.taker.address
+        )
         plan = TakePlan(
             auction.address,
             lot.token,
             max_amount=quote.amount,
-            route=self.router.swap_calls(
-                quote.route, quote.amount, quote.payment, self.executor.taker.address
-            ),
+            route=route,
             min_profit=0,
             profit_receiver=to_checksum_address(receiver),
         )
+        fee = priority_fee(quote) if priority_fee else None
+
+        def cost_of(priced: GasQuote) -> tuple[int, int]:
+            """The tip per gas of the take and its gas in want."""
+            tip = fee(priced.gas, priced.base_fee, priced.tip) if fee else priced.tip
+            return tip, in_want(priced.gas * (priced.base_fee + tip))
+
+        gas: int | None = None
+        note = ""
         try:
-            result = self.executor.take_with_route(plan, timeout=0, dry_run=dry_run)
+            priced: GasQuote | None = None
+            refilled = 0
+            # What the account is topped up with on top of the take's own gas.
+            top = min(
+                int(self.settings.refill_amount * (native_price or 0) * want_unit), profit // 2
+            )
+            if (
+                not top_up
+                or top
+                < self.settings.refill_amount * (native_price or 0) * want_unit * REFILL_MIN_SHARE
+            ):
+                top = 0
+            room = MAX_ROUTE_CALLS - len(route)
+            if refill_to and native_price and room > 0 and (self.settings.gas_refill or top):
+                # The refill buys back the gas of the whole take, its own
+                # swap included, so the take is estimated with a refill of
+                # roughly the right size in place and the size is set after.
+                guess = in_want(seen[0] * seen[1]) if seen is not None else 0
+                if not guess:
+                    priced = self.executor.gas_quote(plan, at=at)
+                    guess = cost_of(priced)[1] * 3 // 2 if priced is not None else 0
+                calls = (
+                    self._refill_calls(lot.want, max(guess, top), refill_to, room) if guess else []
+                )
+                if calls:
+                    try:
+                        with_refill = self.executor.gas_quote(
+                            replace(plan, route=route + calls), at=at
+                        )
+                    except CallReverted:
+                        with_refill = None  # the refill swap fails: the take goes without it
+                    if with_refill is not None:
+                        cost = cost_of(with_refill)[1]
+                        spend = max(cost if self.settings.gas_refill else 0, top)
+                        # A take that pays for its gas only without the refill's own goes without.
+                        if 0 < spend <= profit - floor and profit >= cost + floor:
+                            calls = self._refill_calls(lot.want, spend, refill_to, room)
+                            if calls:
+                                plan = replace(plan, route=route + calls)
+                                priced, refilled = with_refill, spend
+            if not refilled and priced is None:
+                priced = self.executor.gas_quote(plan, at=at)
+            if priced is not None:
+                gas = priced.gas
+                tip, cost = cost_of(priced)
+                fee = lambda *_: tip  # noqa: E731 - the tip the cost was counted with
+                self._gas_seen = (gas, priced.base_fee, time.monotonic())
+                if native_price:
+                    if profit < cost + floor:
+                        log.info(
+                            "%s: waiting, profit %s under gas %s (+%s); %s",
+                            lot.token,
+                            profit,
+                            cost,
+                            floor,
+                            quote,
+                        )
+                        return NativeResult(
+                            "waiting", f"profit {profit} under gas {cost}; {quote}", near
+                        )
+                    # The want swapped to gas money is profit too, paid in another token.
+                    plan = replace(plan, min_profit=max(0, cost + floor - refilled))
+                    note = f" gas={cost}" + (f" refill={refilled}->{refill_to}" if refilled else "")
+                else:
+                    log.warning(
+                        "%s: no price for the native token; gas is not counted in the profit",
+                        lot.token,
+                    )
+            result = self.executor.send_route(
+                plan,
+                dry_run=dry_run,
+                at=at,
+                receipt_timeout=self.settings.receipt_timeout,
+                priority_fee=fee,
+                gas=gas,
+            )
         except CallReverted as exc:
             log.warning("%s: take reverted in simulation: %s", lot.token, exc)
             return NativeResult("failed", f"simulation: {exc}", near)
+        except NotIncluded as exc:
+            log.warning("%s: %s", lot.token, exc)
+            return NativeResult("failed", str(exc), near)
         except Exception as exc:  # noqa: BLE001 - report, keep the loop alive
             log.exception("%s: native take failed", lot.token)
             return NativeResult("failed", str(exc), near)
         if result is None:
-            log.info("%s: dry run, would take %s", lot.token, quote)
-            return NativeResult("simulated", str(quote), near)
-        log.info("%s: TAKEN tx %s, %s", lot.token, result.tx_hash, quote)
-        return NativeResult("taken", f"tx {result.tx_hash} {quote}", near)
+            log.info("%s: dry run, would take %s%s", lot.token, quote, note)
+            return NativeResult("simulated", f"{quote}{note}", near)
+        log.info("%s: TAKEN tx %s, %s%s", lot.token, result.tx_hash, quote, note)
+        return NativeResult("taken", f"tx {result.tx_hash} {quote}{note}", near)
+
+    def _refill_calls(self, want: str, spend: int, to: str, room: int) -> list[Call]:
+        """The route steps that swap ``spend`` want to the native token for
+        the account ``to``. Nothing when the router has no route to the
+        native token or the take has no room for the steps: the take does
+        not depend on its refill."""
+        if spend <= 0:
+            return []
+        try:
+            best = self.router.best_route(want, NATIVE_TOKEN, spend)
+            if best is None:
+                return []
+            route, paid = best
+            calls = self.router.swap_calls(
+                route, spend, int(paid * (1 - REFILL_SLIPPAGE)), to_checksum_address(to)
+            )
+        except Exception as exc:  # noqa: BLE001 - the take goes without it
+            log.warning("gas refill route failed: %s", exc)
+            return []
+        if len(calls) > room:
+            log.debug("no room for the gas refill (%s steps, %s free)", len(calls), room)
+            return []
+        return calls
 
 
 __all__ = [

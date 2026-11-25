@@ -33,7 +33,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -41,7 +41,13 @@ from eth_abi import encode
 from eth_utils import to_checksum_address
 
 from keepers.auction_keeper.chain.abi import MAX_UINT256, CallReverted, Function, selector
-from keepers.auction_keeper.chain.client import ChainClient, TxResult, Web3Client
+from keepers.auction_keeper.chain.client import (
+    ChainClient,
+    GasQuote,
+    PriorityFee,
+    TxResult,
+    Web3Client,
+)
 from keepers.auction_keeper.chain.contracts import Auction, AuctionTaker, Erc20, LotView
 from keepers.auction_keeper.config import KeeperConfig, NetworkConfig, load_config
 
@@ -101,6 +107,10 @@ def curve_router_exchange(
             [route, params, amount, min_dy, pools, to_checksum_address(receiver)],
         ),
     )
+
+
+# Route steps one take carries (AuctionTaker.MAX_CALLS).
+MAX_ROUTE_CALLS = 4
 
 
 @dataclass
@@ -206,7 +216,7 @@ class Executor:
         """
         if self.taker is None:
             raise RuntimeError("no AuctionTaker configured (auction_taker in config)")
-        sender = self._sender()
+        self._sender()  # fail before waiting when there is no key
         lot = self.wait_for(
             plan.auction,
             plan.token,
@@ -216,21 +226,65 @@ class Executor:
             poll=poll,
             timeout=timeout,
         )
-        calldata = self.taker.take_with_route_calldata(
+        return self.send_route(replace(plan, token=lot.token), dry_run=dry_run)
+
+    def route_calldata(self, plan: TakePlan) -> bytes:
+        if self.taker is None:
+            raise RuntimeError("no AuctionTaker configured (auction_taker in config)")
+        return self.taker.take_with_route_calldata(
             to_checksum_address(plan.auction),
-            lot.token,
+            to_checksum_address(plan.token),
             plan.max_amount,
             plan.min_profit,
-            to_checksum_address(plan.profit_receiver or sender),
+            to_checksum_address(plan.profit_receiver or self._sender()),
             [call.as_tuple() for call in plan.route],
         )
-        profit = self._simulate(self.taker.address, calldata, sender)
+
+    def gas_quote(self, plan: TakePlan, *, at: int | None = None) -> GasQuote | None:
+        """What sending the route take would cost (``ChainClient.gas_quote``);
+        None with a client that cannot say. Raises ``CallReverted`` when the
+        take would revert."""
+        quote = getattr(self.client, "gas_quote", None)
+        if quote is None or self.taker is None:
+            return None
+        return quote(self.taker.address, self.route_calldata(plan), at=at)
+
+    def send_route(
+        self,
+        plan: TakePlan,
+        *,
+        dry_run: bool = False,
+        at: int | None = None,
+        receipt_timeout: float | None = None,
+        priority_fee: PriorityFee | None = None,
+        gas: int | None = None,
+    ) -> TxResult | None:
+        """Simulate the route take and send it, with no wait and no lot read.
+        ``at`` is the timestamp of the block it is meant for (the next one):
+        the simulation and the gas estimate then run with that clock, so a
+        take that only pays from the next price step on is not held back a
+        block. ``priority_fee`` sizes the tip (``ChainClient.send``).
+        ``gas`` is the estimate of a ``gas_quote`` made for this route.
+        ``dry_run`` stops after a successful simulation (None)."""
+        if self.taker is None:
+            raise RuntimeError("no AuctionTaker configured (auction_taker in config)")
+        sender = self._sender()
+        calldata = self.route_calldata(plan)
+        profit = self._simulate(self.taker.address, calldata, sender, at=at)
         log.info(
-            "%s: route simulation ok, profit %s", lot.token, int.from_bytes(profit[:32], "big")
+            "%s: route simulation ok, profit %s", plan.token, int.from_bytes(profit[:32], "big")
         )
         if dry_run:
             return None
-        return self.client.send(self.taker.address, calldata)
+        known = {"gas": gas} if gas is not None else {}
+        return self.client.send(
+            self.taker.address,
+            calldata,
+            at=at,
+            receipt_timeout=receipt_timeout,
+            priority_fee=priority_fee,
+            **known,
+        )
 
     def take_direct(
         self,
@@ -291,9 +345,9 @@ class Executor:
             raise RuntimeError("executions need a keeper key (keeper_key_env in config)")
         return self.client.sender
 
-    def _simulate(self, to: str, calldata: bytes, sender: str) -> bytes:
+    def _simulate(self, to: str, calldata: bytes, sender: str, at: int | None = None) -> bytes:
         try:
-            return self.client.call(to, calldata, sender=sender)
+            return self.client.call(to, calldata, sender=sender, at=at)
         except CallReverted as exc:
             raise CallReverted(exc.data, f"simulation reverted: {exc}") from exc
 
@@ -317,5 +371,10 @@ def connect(
         if network is None:
             raise ValueError("network name required with a KeeperConfig")
         config = config.network(network)
-    client = Web3Client(config.rpc, private_key or config.private_key)
+    client = Web3Client(
+        config.rpc,
+        private_key or config.private_key,
+        send_rpc=config.send_rpc,
+        receipt_timeout=config.receipt_timeout,
+    )
     return Executor(client, taker=taker or config.auction_taker)

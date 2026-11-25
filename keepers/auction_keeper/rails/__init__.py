@@ -66,6 +66,11 @@ class AdapterPublisher(ABC):
     def executor(self) -> str:
         return self.adapter.executor
 
+    @property
+    def spender(self) -> str:
+        """Who pulls a sold lot from the auction: the address its allowance is for."""
+        return self.executor
+
     @classmethod
     def enabled(cls, network: NetworkConfig) -> bool:
         """Whether the network config switches this rail on (default: yes)."""
@@ -88,10 +93,14 @@ class AdapterPublisher(ABC):
             return min(lot.end, planned)
         return min(lot.end, lot.timestamp + self.network.order_ttl)
 
-    def validate_signature(self, auction: Auction, digest: bytes, signature: bytes) -> str | None:
-        """Run the auction's router on (digest, signature); None when valid, else the reason."""
+    def validate_signature(
+        self, auction: Auction, digest: bytes, signature: bytes, *, at: int | None = None
+    ) -> str | None:
+        """Run the auction's router on (digest, signature); None when valid,
+        else the reason. ``at``: the timestamp of the block the order was
+        priced for, when that is not the latest one (``lookahead.orders``)."""
         try:
-            answer = auction.is_valid_signature(digest, signature)
+            answer = auction.is_valid_signature(digest, signature, at=at)
         except CallReverted as exc:
             return str(exc)
         if answer != ERC1271_MAGIC_VALUE:
@@ -103,10 +112,16 @@ class AdapterPublisher(ABC):
     ) -> bool:
         """Whether ``executor`` can pull the lot; keeper mode syncs it.
 
+        Only with ``approvals: lazy``: otherwise the keeper has synced every
+        lot's allowance in batches before the first order (``core.approvals``),
+        or was told to leave allowances alone, and nothing is read here.
+
         Offline mode posts regardless: the order is valid, and the
         permissionless ``sync_executor_approvals`` can run from anywhere before
         a fill — the warning names the call.
         """
+        if self.network.approvals != "lazy":
+            return True
         token = Erc20(self.client, lot.token)
         if token.allowance(auction.address, executor) >= lot.available:
             return True

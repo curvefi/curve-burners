@@ -13,6 +13,8 @@ from typing import Any
 
 import requests
 
+from keepers.auction_keeper.limits import GATES
+
 log = logging.getLogger(__name__)
 
 
@@ -32,11 +34,24 @@ def _short(body: Any, limit: int = 300) -> str:
 
 
 class JsonClient:
-    """``requests`` with a timeout, JSON in and out, and ``ApiError`` on 4xx/5xx."""
+    """``requests`` with a timeout, JSON in and out, and ``ApiError`` on 4xx/5xx.
 
-    def __init__(self, *, session: requests.Session | None = None, timeout: float = 30.0):
+    Every request passes the host's gate (``keepers.auction_keeper.limits``):
+    one over the host's budget, or to a host that has just refused, is not
+    sent and raises ``Throttled``. ``reserve`` is the share of the budget
+    this client leaves to more important requests to the same host.
+    """
+
+    def __init__(
+        self,
+        *,
+        session: requests.Session | None = None,
+        timeout: float = 30.0,
+        reserve: float = 0.0,
+    ):
         self.session = session or requests.Session()
         self.timeout = timeout
+        self.reserve = reserve
 
     def request(
         self,
@@ -49,6 +64,8 @@ class JsonClient:
         data: str | None = None,
     ) -> Any:
         """``data`` is a pre-serialized body (for request signing); else ``json``."""
+        gate = GATES.of(url)
+        gate.take(reserve=self.reserve)
         try:
             response = self.session.request(
                 method,
@@ -61,6 +78,7 @@ class JsonClient:
             )
         except requests.RequestException as exc:
             raise ApiError(0, str(exc), url) from exc
+        gate.answered(response.status_code)
         try:
             payload: Any = response.json() if response.content else None
         except ValueError:

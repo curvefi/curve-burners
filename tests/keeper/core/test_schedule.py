@@ -5,9 +5,9 @@ import pytest
 from keepers.auction_keeper.chain.boa_client import BoaClient
 from keepers.auction_keeper.chain.contracts import Auction
 from keepers.auction_keeper.config import TtlSettings
-from keepers.auction_keeper.core.schedule import ENTRY_RESOLUTION, band_entry, plan
+from keepers.auction_keeper.core.schedule import plan as schedule_plan
 from keepers.auction_keeper.pricing import MarketQuote
-from tests.keeper.conftest import STEP_DURATION
+from tests.keeper.conftest import STEP_DURATION, band_entry
 
 ORDER_TTL = 300
 SETTINGS = TtlSettings(near_above=0.2, near_below=0.1, min_ttl=60, max_ttl=10**6)
@@ -20,6 +20,13 @@ def auction(keeper_account, harness):
 
 def market(amount):
     return MarketQuote(amount, "test", 0.0)
+
+
+def plan(auction, view, quote, settings, order_ttl):
+    """The schedule with the band entry answered by the local model."""
+    return schedule_plan(
+        view, quote, settings, order_ttl, reaches=lambda target: band_entry(auction, view, target)
+    )
 
 
 def test_far_zone_orders_until_the_curve_enters_the_band(auction, sell_token, lot):
@@ -36,8 +43,8 @@ def test_far_zone_orders_until_the_curve_enters_the_band(auction, sell_token, lo
         return auction.get_amount_needed(sell_token.address, view.available, timestamp=ts)
 
     assert needed(entry) <= upper
-    # The step before the entry (allowing for the bisection resolution) is still above.
-    assert needed(entry - STEP_DURATION - ENTRY_RESOLUTION) > upper
+    # The entry is the first second of its step: the second before is still above.
+    assert needed(entry - 1) > upper and (entry - view.start) % STEP_DURATION == 0
     assert view.timestamp + ORDER_TTL < entry < view.end
 
 
@@ -80,23 +87,31 @@ def test_below_market_and_blind_use_the_uniform_ttl(auction, sell_token, lot):
 
 def test_band_entry_is_the_window_end_when_never_reached(auction, sell_token, lot):
     view = auction.lot_view(sell_token.address)
-    assert band_entry(auction, view, 0, view.timestamp, view.end) == view.end
+    assert band_entry(auction, view, 0) == view.end
     planned = plan(auction, view, market(1), SETTINGS, ORDER_TTL)
     assert planned.zone == "far" and planned.band_entry == view.end
     assert planned.valid_to == view.end
 
 
-def test_disagreeing_sources_keep_the_band_from_the_highest_to_the_lowest(auction, sell_token, lot):
+def test_disagreeing_sources_each_keep_a_band_of_their_own(auction, sell_token, lot):
     view = auction.lot_view(sell_token.address)
     needed = view.amount_needed
-    # The curve is at the highest answer, far above the lowest: dense already,
-    # and still dense where the quote alone against the highest would be "below".
-    for high, low in ((needed, needed // 100), (needed * 2, needed // 2)):
-        span = MarketQuote(high, "test", 0.0, low=low)
+
+    def levels(*amounts):
+        return MarketQuote(
+            amounts[0], "test", 0.0, levels=tuple((f"s{i}", a) for i, a in enumerate(amounts))
+        )
+
+    # The curve is at one of the answers, whichever: dense.
+    for span in (levels(needed, needed // 100), levels(needed * 100, needed)):
         planned = plan(auction, view, span, SETTINGS, ORDER_TTL)
-        assert planned.zone == "near", (high, low)
+        assert planned.zone == "near", span
         assert planned.valid_to == view.timestamp + SETTINGS.min_ttl
+    # Between two answers far apart: one order until the band of the lower one.
+    between = plan(auction, view, levels(needed * 2, needed // 2), SETTINGS, ORDER_TTL)
+    lower = plan(auction, view, market(needed // 2), SETTINGS, ORDER_TTL)
+    assert between.zone == "far" and between.band_entry == lower.band_entry
     # Far above both: the wait ends at the band of the highest answer.
-    far = plan(auction, view, MarketQuote(needed // 2, "test", 0.0, low=1), SETTINGS, ORDER_TTL)
+    far = plan(auction, view, levels(needed // 2, 1), SETTINGS, ORDER_TTL)
     alone = plan(auction, view, market(needed // 2), SETTINGS, ORDER_TTL)
     assert far.zone == "far" and far.band_entry == alone.band_entry

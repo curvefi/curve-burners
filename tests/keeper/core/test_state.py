@@ -25,7 +25,7 @@ def test_records_from_another_layout_are_read(tmp_path):
     path.write_text(json.dumps(raw))
     state = KeeperState(path)
     assert state.order("net", "0xA", "0xB", "0xC") == RECORD
-    assert state.known_tokens("net", "0xA") == set()
+    assert state.book("net", "0xA") is None and state.prices("net") == {}
 
 
 def test_open_orders_by_adapter_and_expiry(tmp_path):
@@ -49,14 +49,16 @@ def test_concurrent_networks_share_one_file(tmp_path):
     def writer(network):
         for i in range(25):
             state.set_order(network, "0xA", "0xB", f"0x{i:02x}", RECORD)
-            state.record_scan(network, "0xA", i, {f"0x{i:02x}"})
+            state.set_book(network, "0xA", {"cursor": i, "lots": {}})
+            state.set_prices(network, {f"0xa:0x{i:02x}": {"asked": float(i), "quote": None}})
 
     threads = [threading.Thread(target=writer, args=(f"net{n}",)) for n in range(4)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
+    state.save()  # books and prices are written by the keeper's save, once a cycle
     reloaded = KeeperState(path)
     assert len(reloaded.orders()) == 100
-    assert all(reloaded.scan_cursor(f"net{n}", "0xA") == 24 for n in range(4))
-    assert all(len(reloaded.known_tokens(f"net{n}", "0xA")) == 25 for n in range(4))
+    assert all(reloaded.book(f"net{n}", "0xA")["cursor"] == 24 for n in range(4))
+    assert all(list(reloaded.prices(f"net{n}")) == ["0xa:0x18"] for n in range(4))

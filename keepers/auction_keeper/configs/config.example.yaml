@@ -5,33 +5,76 @@
 # from the environment (~/.env is loaded first).
 
 # Defaults for every network (each may override them).
-poll_interval: 60       # seconds between node polls (the loop also wakes for the next order expiry)
+poll_interval: 60       # longest wait between cycles (the loop also wakes for the next order expiry and the next price step of a lot in focus)
 order_ttl: 300          # order validity without a market estimate (or below it); reposted when it expires
-# Market estimate behind the validity schedule: sources in priority order,
-# the first with a price wins, cross-checked against the next one that has
-# one. USD feeds: curve (prices.curve.finance), llama (coins.llama.fi),
-# coingecko. Swap quotes for the exact lot: cow (orderbook /quote), kyber,
-# velora, oneinch (needs pricing.oneinch_api_key_env; skipped without it).
-# [] disables pricing (uniform order_ttl).
+# Market estimates: what each lot is worth in want. Every source is asked and
+# the HIGHEST answer is the estimate (the others may not know the route, as
+# with LP tokens); a source with no price has no vote. USD feeds: curve
+# (prices.curve.finance), llama (coins.llama.fi), coingecko. Swap quotes for
+# the exact lot: cow (orderbook /quote), kyber, velora, oneinch (needs
+# pricing.oneinch_api_key_env; skipped without it). [] disables pricing
+# (uniform order_ttl, no ranking).
 pricing:
   sources: [curve, llama, cow]
-  cache: 60             # seconds a lot's estimate is reused
-  cross_check: 0.25     # the winner must agree with the next source within 25%, else every source is believed (dense from the highest down to the lowest)
+  cache: 60             # seconds an estimate is reused for a lot near its market
+  cache_far: 3600       # ... and for a lot far above it (kept in the state file across restarts)
+  budget: 5             # seconds a cycle may spend refreshing estimates that are due
+  workers: 4            # lots asked about at once
   # chains: {curve: polygon, llama: polygon, coingecko: polygon-pos, kyber: polygon}  # defaults by chain id
   # coingecko_api_key_env: COINGECKO_API_KEY   # demo key; a pro key goes with
   # coingecko_url: https://pro-api.coingecko.com/api/v3
   # oneinch_api_key_env: ONEINCH_API_KEY
-# Validity by distance of the curve quote from the market: one long order
-# far above it (until the curve is due to enter the band, at most `max`),
-# `min` inside the band (quote within near_above / near_below of the market).
+# Validity by distance of the curve quote from the sources' prices. Every
+# source's answer has a band of its own (near_above over it, near_below
+# under it): `min` inside a band, one long order outside (until the curve is
+# due to enter the next band down, at most `max`).
 ttl:
-  near_above: 0.2
-  near_below: 0.1
+  near_above: 0.05
+  near_below: 0.03
   min: 60               # the CoW orderbook minimum
   max: 7200
+  every_step: false     # inside the band, replace an order at every step of the curve instead of at its expiry
+# Which lots a cycle works on. Every lot is ranked each cycle from the local
+# model of the auction (no request); only the lots chosen here cost chain
+# reads, quotes, orders and takes. Sold and dust lots are never chosen.
+focus:
+  threshold: 0.25       # every lot whose ask is within 25% above its highest estimate, however many
+  nearest: 5            # plus the 5 nearest of the rest
+  blind: 2              # plus 2 lots no source prices, in rotation
+  max_lots: 40          # at most, nearest first
+  confirm: 60           # seconds an on-chain `available` read of a worked lot is reused
+  audit: 2              # lots read back from the chain per cycle, in rotation (what no log says)
+# Price lots for the block a take lands in, not the last one mined: on the
+# last block before a price step that is already the lower price.
+lookahead:
+  blocks: 1             # blocks ahead (x the chain's block time: 12 s Ethereum, 1 s Arbitrum, ...); 0: the latest block
+  # seconds: 12         # the same in seconds (a chain with no known block time)
+  orders: false         # also price adapter orders ahead (only if the orderbook validates on the pending block)
+# The tip of a take: a share of what it earns, inside a floor and a cap.
+# tip = (profit_share x profit in the native token - gas x base fee) / gas.
+# The allowance syncs pay the node's suggested fee.
+fees:
+  priority_floor: 0     # gwei; paid whatever the take earns
+  priority_cap: 5       # gwei
+  profit_share: 0.5     # of (route quote - payment), base fee included
+  # native_price: 3000  # want per native token; asked from the price sources when unset
 # Open orders per adapter at once; the lots farthest from the market wait.
-# The CoW orderbook caps an owner's open outside-market orders at 10.
+# The CoW orderbook caps an owner's open outside-market orders at 10. Records
+# of sold or ended lots are dropped at once, and the long orders of lots
+# above a band take half of the slots at most.
 max_open_orders: 8
+# Request budgets, for the whole process (the hosts limit and ban by IP).
+limits:
+  http: 60              # requests per minute to one HTTP host, a quarter of it at once (0: no limit)
+  hosts: {api.cow.fi: 20}   # single hosts; a request over the budget is skipped, not queued
+  cooldown: 600         # seconds a host is left alone after a 403 / 429 (doubling when it repeats)
+  rpc: 0                # requests per second to a node (0: no limit); per network: rpc_rate
+# The log: standard error unless a file is set (or `run --log-file`).
+log:
+  # file: keeper.log
+  max_mb: 20            # the file is rotated at this size ...
+  backups: 3            # ... and this many old files are kept
+  repeat: 300           # seconds the same line is held back after it was written (0: never)
 # Lots the market values under this many want tokens (what a fill leaves
 # behind) are left alone: no orders, no takes. 0 turns it off.
 dust: 0.01
@@ -44,7 +87,13 @@ native:
   workers: 4            # lots quoted at once
   margin: 0.005         # take when the quote is this far under the Curve route quote
   max_impact: 0.01      # chunk so the route's price impact stays under 1%
-  poll: 30              # try a lot near its route quote this often, whatever the full cycle does
+  requote: 300          # seconds between route quotes of a lot still above the band over its last one (inside it: every cycle)
+  receipt_timeout: 60   # seconds to wait for a take's receipt before reporting it not included
+  min_profit: 0         # want tokens a take must earn after its gas (estimate x (base fee + tip), at the native token's price)
+  gas_refill: true      # a take swaps its own gas cost in want to the native token for the sending account, in the same
+                        # transaction: gas money stays level, the profit arrives in want net of gas (left out where it cannot be done)
+  # refill_below: 0.02  # a sending account under this many native tokens also gets ...
+  # refill_amount: 0.02 # ... this many native tokens' worth of a take's profit on top
   # router: "0x..."     # Curve router NG; defaults by chain id
   # chain: fraxtal      # api.curve.finance slug; defaults by chain id
   # min_pool_usd: 1000
@@ -68,18 +117,39 @@ native:
   #   min_tvl: 10000
   #   timeout: 180        # seconds per erouter run
   #   cache: 30           # seconds an answer is reused
-state_path: auction_keeper_state.json   # published orders and the LotStaged scan cursor
+state_path: auction_keeper_state.json   # published orders, the lot records with the log cursor, the price estimates
+# receipt_timeout: 300   # seconds to wait for any other transaction's receipt
 # offline (default): read the chain and post orders, never send a transaction.
 # keeper: also send the on-chain housekeeping (executor allowance syncs); needs keeper_key_env.
 mode: offline
+# Executor allowances (the auction approving the CoW vault relayer for a lot's token).
+# startup: with the first cycle every lot's allowance is read once and the
+#   missing ones are synced 64 tokens per transaction; lots staged later join
+#   the next batch; a token is never looked at twice. Sends only in mode keeper
+#   (offline: the missing tokens are listed once).
+# lazy: checked before each order and synced token by token.
+# off: never read, never sent.
+approvals: startup
 # keeper_key_env: KEEPER_PRIVATE_KEY    # env var holding the key for keeper mode and custom takes
+# keeper_key_env: [KEEPER_KEY, KEEPER_KEY_2]   # several accounts: as many takes in flight at once
+#                                              # (set native.profit_receiver to collect the profit in one place)
 
 networks:
   ethereum:
     rpc: https://eth-mainnet.g.alchemy.com/v2/${ALCHEMY_API_TOKEN}
+    # Submit transactions through private, MEV-protected endpoints instead of
+    # `rpc` (reads, nonce, gas and receipts stay there). A URL or a list: the
+    # signed transaction is posted to all at once, one acceptance is enough.
+    # MEV Blocker's default endpoint shares transactions with searchers for
+    # backrunning; /fullprivacy does not.
+    # send_rpc:
+    #   - https://rpc.flashbots.net/fast
+    #   - https://rpc.mevblocker.io/fullprivacy
+    #   - https://rpc.titanbuilder.xyz
+    #   - https://rpc.beaverbuild.org
     auctions:
       - "0x0000000000000000000000000000000000000000"   # DutchAuctionBurner
-    # Block to start the LotStaged scan from (the burner's deployment block).
+    # Block to start the scan of the auction's logs from (the burner's deployment block).
     # Without it only lots staged after the keeper starts are discovered,
     # plus the whitelist.
     start_block: 21000000
@@ -109,6 +179,6 @@ networks:
     pricing:
       sources: [cow, kyber, llama]   # this network trusts swap quotes first
     ttl:
-      near_above: 0.3
+      near_above: 0.08
     # mode: keeper
     # keeper_key_env: GNOSIS_KEEPER_KEY
